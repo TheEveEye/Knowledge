@@ -16,9 +16,7 @@ The authentication layer:
 - Stores each registration and its credentials separately in the Keychain, available only while this device is unlocked. Credentials never enter SwiftData or UserDefaults.
 - Restores the selected account, serializes refreshes, saves rotating refresh tokens, and attempts remote revocation before clearing the selected account’s local credentials on sign-out.
 
-Choose **Try ChatGPT plan** from the Knowledge sidebar to send an example request. The screen loads the signed-in account’s available models, provides a short editable prompt, streams the reply, and shows **Completed using your ChatGPT plan** only after the Responses API confirms completion. It also displays returned token counts and links to usage settings. A request is sent only when you tap **Send test prompt**; every test uses your authorized ChatGPT plan.
-
-The example uses the active account’s refreshed OAuth access token, `GET https://api.openai.com/v1/models`, and streaming `POST https://api.openai.com/v1/responses` with `store: false`, `stream: true`, and array input. It handles admission errors, plan eligibility and usage-limit failures, incomplete/interrupted responses, and cancellation. Changing accounts or leaving the example cancels its pending request. Responses are shown locally and are not added to the SwiftData item list.
+The app currently provides authentication and local items. A reusable plan request client supports model discovery and streaming Responses API requests for future AI features. It uses the active account’s refreshed OAuth access token, `GET https://api.openai.com/v1/models`, and `POST https://api.openai.com/v1/responses` with `store: false`, `stream: true`, and array input. It captures returned token counts and handles admission errors, plan eligibility and usage-limit failures, incomplete/interrupted responses, and cancellation. Account settings link to ChatGPT’s usage settings.
 
 ## Native callback adaptation
 
@@ -66,7 +64,3 @@ Manual checks on simulator and physical device:
 - [Apple local network privacy](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
 
 The ChatGPT logo asset comes from [OpenAI’s approved sign-in assets](https://developers.openai.com/assets/siwc/sign-in-buttons/chatgpt-logo-black.svg). The integration configuration follows the local/open-source flow; paid or remotely hosted distribution requires the applicable OpenAI access approval.
-
-## Optional live plan smoke test
-
-Debug builds support the explicit launch argument `--plan-usage-smoke-test`. It sends one short request using the already connected account and writes status, model, event names, and token counts to `Library/Caches/PlanUsageSmokeResult.json`. The file contains no OAuth credentials, identity information, prompt, or generated answer. The probe is absent from Release builds and ordinary launches do not send a request automatically. This live check consumes ChatGPT plan usage.

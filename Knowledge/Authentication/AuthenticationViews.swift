@@ -39,11 +39,6 @@ struct AuthenticationRootView: View {
         }
         .task {
             await authentication.restore()
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--plan-usage-smoke-test") {
-                await PlanUsageSmokeProbe.run(authentication: authentication)
-            }
-            #endif
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {

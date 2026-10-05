@@ -46,9 +46,9 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
         }
         switch kind {
         case .noModels: return "No models are available for this ChatGPT account. Reload models or choose another account."
-        case .permission: return "Enable ChatGPT plan usage in account settings to send a test prompt."
+        case .permission: return "Enable ChatGPT plan usage in account settings to send a request."
         case .network: return "The connection was interrupted. Check your network and try again."
-        case .invalidResponse: return "OpenAI returned an unexpected response. The test could not be confirmed."
+        case .invalidResponse: return "OpenAI returned an unexpected response. Completion could not be confirmed."
         case .interrupted: return "The response ended before OpenAI confirmed completion. You can try again."
         case .incomplete: return "OpenAI did not complete this response. You can try again."
         case .server:
@@ -57,7 +57,7 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
             case 403: return "OpenAI did not allow this request for the selected account or workspace."
             case 429: return "A request limit was reached. Check Manage usage and try again later."
             case .some(500...599): return "OpenAI is temporarily unavailable. Try again later."
-            default: return "OpenAI could not complete the test request."
+            default: return "OpenAI could not complete the request."
             }
         }
     }

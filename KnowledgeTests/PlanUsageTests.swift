@@ -2,9 +2,8 @@ import Foundation
 import Testing
 @testable import Knowledge
 
-@MainActor @Suite("ChatGPT plan example")
+@MainActor @Suite("ChatGPT plan requests")
 struct PlanUsageTests {
-    private let listed = ChatGPTPlanModel(slug: "model-test", displayName: "Test model")
     private let completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
 
     @Test func modelCatalogUsesPlanShapeAndPreservesServerOrder() async throws {
@@ -128,45 +127,6 @@ struct PlanUsageTests {
         let receipt = try await PlanUsageAPIClient(transport: transport).response(model: "model-test", prompt: "test", accessToken: "synthetic") { _ in }
         #expect(receipt.text == "Final")
     }
-
-    @Test func modelFailureKeepsSendDisabledAndMakesNoInferenceRequest() async {
-        let client = PlanExampleFixtureClient(models: [listed])
-        let example = PlanUsageExample(client: client)
-        await example.loadModels { throw PlanUsageError(kind: .permission) }
-        #expect(example.phase == .failed)
-        #expect(!example.canSend)
-        #expect(client.responseCount == 0)
-    }
-
-    @Test func completionAppearsOnlyAfterTerminalSuccess() async {
-        let client = PlanExampleFixtureClient(models: [listed])
-        let example = PlanUsageExample(client: client)
-        await example.loadModels { "synthetic" }
-        client.failure = PlanUsageError(kind: .interrupted)
-        await example.send { "synthetic" }
-        #expect(example.phase == .failed)
-        #expect(example.output == "Partial")
-        #expect(example.receipt == nil)
-        client.failure = nil
-        await example.send { "synthetic" }
-        #expect(example.phase == .completed)
-        #expect(example.output == "Final")
-    }
-
-    @Test func cancellationDiscardsLateResponseFromPreviousAccount() async {
-        let client = PlanExampleFixtureClient(models: [listed])
-        client.hold = true
-        let example = PlanUsageExample(client: client)
-        await example.loadModels { "synthetic" }
-        let sending = Task { await example.send { "synthetic" } }
-        await client.waitUntilSending()
-        example.cancel()
-        client.finish()
-        await sending.value
-        #expect(example.phase == .canceled)
-        #expect(example.receipt == nil)
-        #expect(example.output.isEmpty)
-    }
 }
 
 @MainActor private final class PlanFixtureTransport: PlanHTTPTransport {
@@ -193,26 +153,4 @@ struct PlanUsageTests {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
                         headerFields: ["Content-Type": stream ? contentType : "application/json", "x-request-id": "req_test"])!
     }
-}
-
-@MainActor private final class PlanExampleFixtureClient: ChatGPTPlanRequesting {
-    let catalog: [ChatGPTPlanModel]
-    var failure: PlanUsageError?
-    var responseCount = 0
-    var hold = false
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var started: CheckedContinuation<Void, Never>?
-    init(models: [ChatGPTPlanModel]) { catalog = models }
-    func models(accessToken: String) async throws -> [ChatGPTPlanModel] { catalog }
-    func response(model: String, prompt: String, accessToken: String, onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt {
-        responseCount += 1
-        if hold {
-            await withCheckedContinuation { value in continuation = value; started?.resume(); started = nil }
-        }
-        onDelta("Partial")
-        if let failure { throw failure }
-        return .init(responseID: "resp_test", requestID: "req_test", text: "Final", inputTokens: 1, outputTokens: 1)
-    }
-    func waitUntilSending() async { if continuation != nil { return }; await withCheckedContinuation { started = $0 } }
-    func finish() { continuation?.resume(); continuation = nil }
 }

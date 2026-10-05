@@ -22,13 +22,6 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             List {
-                Section {
-                    NavigationLink {
-                        PlanUsageExampleView { presentedSheet = .account }
-                    } label: {
-                        Label("Try ChatGPT plan", systemImage: "sparkles")
-                    }
-                }
                 Section("Items") {
                     ForEach(items) { item in
                         NavigationLink {
@@ -59,7 +52,7 @@ struct ContentView: View {
                 }
             }
         } detail: {
-            PlanUsageExampleView { presentedSheet = .account }
+            Text("Select an item")
         }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
