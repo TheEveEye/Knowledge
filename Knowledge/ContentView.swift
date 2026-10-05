@@ -10,20 +10,37 @@ import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(AuthenticationStore.self) private var authentication
     @Query private var items: [Item]
+    @State private var presentedSheet: AccountSheet?
+
+    private enum AccountSheet: String, Identifiable {
+        case account, planWelcome
+        var id: String { rawValue }
+    }
 
     var body: some View {
         NavigationSplitView {
             List {
-                ForEach(items) { item in
+                Section {
                     NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
+                        PlanUsageExampleView { presentedSheet = .account }
                     } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+                        Label("Try ChatGPT plan", systemImage: "sparkles")
                     }
                 }
-                .onDelete(perform: deleteItems)
+                Section("Items") {
+                    ForEach(items) { item in
+                        NavigationLink {
+                            Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
+                        } label: {
+                            Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+                        }
+                    }
+                    .onDelete(perform: deleteItems)
+                }
             }
+            .navigationTitle("Knowledge")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     EditButton()
@@ -33,9 +50,32 @@ struct ContentView: View {
                         Label("Add Item", systemImage: "plus")
                     }
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        presentedSheet = .account
+                    } label: {
+                        Label("ChatGPT account", systemImage: "person.crop.circle")
+                    }
+                }
             }
         } detail: {
-            Text("Select an item")
+            PlanUsageExampleView { presentedSheet = .account }
+        }
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .account:
+                ChatGPTAccountView()
+            case .planWelcome:
+                ChatGPTPlanWelcomeView()
+            }
+        }
+        .onAppear {
+            if authentication.planWelcomeAccountID != nil {
+                presentedSheet = .planWelcome
+            }
+        }
+        .onChange(of: authentication.planWelcomeAccountID) { _, accountID in
+            if accountID != nil { presentedSheet = .planWelcome }
         }
     }
 
@@ -57,5 +97,6 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environment(AuthenticationStore())
         .modelContainer(for: Item.self, inMemory: true)
 }

@@ -10,6 +10,8 @@ import SwiftData
 
 @main
 struct KnowledgeApp: App {
+    @State private var authentication = AuthenticationStore()
+
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             Item.self,
@@ -25,7 +27,8 @@ struct KnowledgeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AuthenticationRootView()
+                .environment(authentication)
         }
         .modelContainer(sharedModelContainer)
     }
