@@ -44,7 +44,7 @@ struct NewImportView: View {
         NavigationStack {
             Form {
                 Section("Subject") { Text(subject.name) }
-                Section("Your notes") {
+                Section {
                     Picker("Input", selection: $useFile) {
                         Text("File").tag(true); Text("Paste text").tag(false)
                     }.pickerStyle(.segmented)
@@ -57,20 +57,29 @@ struct NewImportView: View {
                         TextField("Title (optional)", text: $title)
                         TextEditor(text: $text).frame(minHeight: 200).accessibilityLabel("Notes to import")
                     }
+                } header: { Text("Your notes") }
+                footer: {
+                    Text("You can edit and exclude entries before saving. Facts stay grounded in your notes; suggested connections are labeled separately.")
                 }
                 ImportModelPicker()
                 if let error { Section { Text(error).foregroundStyle(.red) } }
-                Section {
-                    if imports.isPreparing { ProgressView("Preparing your source…") }
-                    Button("Extract concepts", systemImage: "sparkles") { prepare() }
-                        .disabled(imports.isPreparing || imports.activeJobID != nil || imports.selectedModel.isEmpty
-                                  || (useFile ? selectedFile == nil : text.trimmed.isEmpty))
-                } footer: {
-                    Text("You can edit and exclude entries before saving. Facts stay grounded in your notes; suggested connections are labeled separately.")
+                if imports.isPreparing {
+                    Section { ProgressView("Preparing your source…") }
                 }
             }
             .navigationTitle("Import notes")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(imports.isPreparing) } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(imports.isPreparing)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Extract concepts", systemImage: "sparkles") { prepare() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(imports.isPreparing || imports.activeJobID != nil || imports.selectedModel.isEmpty
+                                  || (useFile ? selectedFile == nil : text.trimmed.isEmpty))
+                }
+            }
             .fileImporter(isPresented: $showFiles, allowedContentTypes: [.pdf, .plainText, .text]) { result in
                 do { selectedFile = try result.get() }
                 catch { if (error as? CocoaError)?.code != .userCancelled { self.error = error.localizedDescription } }

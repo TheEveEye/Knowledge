@@ -84,4 +84,15 @@ import SwiftData
         .navigationTitle("Import")
     }
 }
+
+#Preview("Import notes") {
+    let data = try! LibraryPreviewData()
+    let subject = try! data.container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>()).first!
+    Color.clear.sheet(isPresented: .constant(true)) {
+        NewImportView(subject: subject)
+            .environment(data.authentication).environment(data.imports).modelContainer(data.container)
+            .presentationDetents([.large])
+    }
+    .transaction { $0.disablesAnimations = true }
+}
 #endif
