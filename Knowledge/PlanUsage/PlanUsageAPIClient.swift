@@ -26,8 +26,11 @@ nonisolated struct PlanResponseReceipt: Sendable, Equatable {
     var contentType: String? = nil
 }
 
+/// Transport milestones only. Model reasoning is never surfaced as progress.
+nonisolated enum PlanResponseActivity: Sendable, Equatable { case waiting, processing }
+
 nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
-    enum Kind: String, Sendable { case permission, noModels, network, invalidResponse, interrupted, incomplete, server }
+    enum Kind: String, Sendable { case permission, noModels, network, invalidResponse, interrupted, incomplete, refused, server }
     let kind: Kind
     var status: Int? = nil
     var code: String? = nil
@@ -37,6 +40,9 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     var errorDescription: String? {
         if code == "subscription_sharing_usage_limit_exceeded" {
             return "A ChatGPT usage limit was reached. Review your plan and Knowledge’s limit in Manage usage."
+        }
+        if code == "subscription_sharing_usage_unavailable" {
+            return "ChatGPT plan usage is currently unavailable. Review your connection in Manage usage and try again later."
         }
         if code == "subscription_sharing_user_not_eligible" {
             return "ChatGPT plan usage is not available for this account or workspace."
@@ -51,6 +57,7 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
         case .invalidResponse: return "OpenAI returned an unexpected response. Completion could not be confirmed."
         case .interrupted: return "The response ended before OpenAI confirmed completion. You can try again."
         case .incomplete: return "OpenAI did not complete this response. You can try again."
+        case .refused: return "ChatGPT could not process this material. Try a different passage or model."
         case .server:
             switch status {
             case 401: return "OpenAI did not accept this connection. Try signing in again through account settings."
@@ -72,6 +79,20 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     func models(accessToken: String) async throws -> [ChatGPTPlanModel]
     func response(model: String, prompt: String, accessToken: String,
                   onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt
+    func response(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt
+    func response(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt
+}
+
+extension ChatGPTPlanRequesting {
+    func response(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt {
+        onActivity(.waiting)
+        return try await response(payload, accessToken: accessToken, onDelta: onDelta)
+    }
 }
 
 @MainActor protocol PlanHTTPTransport {
@@ -117,12 +138,25 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
 
     func response(model: String, prompt: String, accessToken: String,
                   onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt {
+        try await response(PlanResponseRequest(model: model, input: [.init(role: "user", content: prompt)],
+            instructions: "Keep your reply brief: at most two sentences."), accessToken: accessToken, onDelta: onDelta)
+    }
+
+    func response(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt {
+        try await response(payload, accessToken: accessToken, onDelta: onDelta, onActivity: { _ in })
+    }
+
+    func response(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt {
         var request = try request(path: "responses", accessToken: accessToken)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 120
-        request.httpBody = try JSONEncoder().encode(ResponseRequest(model: model, input: [.init(role: "user", content: prompt)]))
+        request.timeoutInterval = 240
+        request.httpBody = try JSONEncoder().encode(payload)
+        onActivity(.waiting)
         let stream = try await transport.stream(for: request)
         defer { stream.cancel() }
         try validate(stream.response, for: request)
@@ -143,7 +177,9 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
             try Task.checkCancellation()
             if prefix.count < 8192 { prefix.append(chunk.prefix(8192 - prefix.count)) }
             for event in try parser.append(chunk) {
-                if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty, onDelta: receiveText) {
+                guard streamedText.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse) }
+                if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty,
+                                             onDelta: receiveText, onActivity: onActivity) {
                     if receipt.text == nil && !streamedText.isEmpty { receipt.text = streamedText }
                     return receipt
                 }
@@ -151,7 +187,8 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
         }
         try Task.checkCancellation()
         for event in try parser.finish() {
-            if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty, onDelta: receiveText) {
+            if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty,
+                                         onDelta: receiveText, onActivity: onActivity) {
                 if receipt.text == nil && !streamedText.isEmpty { receipt.text = streamedText }
                 return receipt
             }
@@ -168,7 +205,8 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     }
 
     private func process(_ event: PlanSSEEvent, response: HTTPURLResponse,
-                         hasText: Bool, onDelta: @MainActor (String) -> Void) throws -> PlanResponseReceipt? {
+                         hasText: Bool, onDelta: @MainActor (String) -> Void,
+                         onActivity: @MainActor (PlanResponseActivity) -> Void) throws -> PlanResponseReceipt? {
         if event.data == "[DONE]" { return nil }
         guard let data = event.data.data(using: .utf8),
               let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -180,6 +218,10 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
         if let type, type.count <= 100, type.range(of: "^[a-z_.]+$", options: .regularExpression) != nil { observeEvent(type) }
         let body = payload["response"] as? [String: Any]
         switch type {
+        case "response.created", "response.in_progress":
+            onActivity(.processing)
+        case "response.refusal.delta", "response.refusal.done":
+            throw PlanUsageError(kind: .refused, requestID: requestID(response))
         case "response.output_text.delta":
             guard let delta = payload["delta"] as? String else {
                 throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Invalid text delta")
@@ -192,10 +234,14 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
                 throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Invalid completion event")
             }
             let output = body["output"] as? [[String: Any]] ?? []
+            guard !output.contains(where: { item in
+                (item["content"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "refusal" }
+            }) else { throw PlanUsageError(kind: .refused, requestID: requestID(response)) }
             let text = output.filter { $0["type"] as? String == "message" }
                 .flatMap { $0["content"] as? [[String: Any]] ?? [] }
                 .filter { $0["type"] as? String == "output_text" }
                 .compactMap { $0["text"] as? String }.joined(separator: "\n")
+            guard text.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse) }
             let usage = body["usage"] as? [String: Any]
             return PlanResponseReceipt(responseID: body["id"] as? String, requestID: requestID(response),
                                        text: text.isEmpty ? nil : text,
@@ -346,11 +392,3 @@ nonisolated struct PlanSSEParser {
 }
 
 nonisolated private struct ModelCatalog: Decodable { let models: [ChatGPTPlanModel] }
-nonisolated private struct ResponseRequest: Encodable {
-    let model: String
-    let input: [Input]
-    let instructions = "Keep your reply brief: at most two sentences."
-    let store = false
-    let stream = true
-    struct Input: Encodable { let role: String; let content: String }
-}

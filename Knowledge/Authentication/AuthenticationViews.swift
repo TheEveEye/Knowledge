@@ -3,6 +3,7 @@ import UIKit
 
 struct AuthenticationRootView: View {
     @Environment(AuthenticationStore.self) private var authentication
+    @Environment(ImportCoordinator.self) private var imports
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -39,9 +40,13 @@ struct AuthenticationRootView: View {
         }
         .task {
             await authentication.restore()
+            #if DEBUG
+            await ImportDiagnostics.runIfRequested(authentication: authentication, imports: imports)
+            #endif
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
+                imports.pause()
                 authentication.sceneDidEnterBackground()
             }
         }

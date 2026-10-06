@@ -4,6 +4,56 @@ import Testing
 
 @MainActor @Suite("ChatGPT plan requests")
 struct PlanUsageTests {
+    @Test func serverMilestonesAndTextDeltasAreVisibleBeforeCompletion() async throws {
+        let wire = "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+            + "data: {\"type\":\"response.in_progress\"}\n\n"
+            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\n" + completed
+        let transport = PlanFixtureTransport(chunks: [Data(wire.utf8)])
+        var activity: [PlanResponseActivity] = [], output = ""
+        let receipt = try await PlanUsageAPIClient(transport: transport).response(
+            .init(model: "fixture", input: [.init(role: "user", content: "Notes")], instructions: "Extract facts."), accessToken: "synthetic",
+            onDelta: { output += $0 }, onActivity: { activity.append($0) })
+        #expect(activity == [.waiting, .processing, .processing])
+        #expect(output == "Partial" && receipt.text == "Partial")
+    }
+
+    @Test func structuredRequestsCarryTaskInstructionsAndSchema() async throws {
+        let transport = PlanFixtureTransport(chunks: [Data(completed.utf8)])
+        let request = PlanResponseRequest(model: "model-test", input: [.init(role: "user", content: "Source passages")],
+            instructions: "Extract source-grounded concepts.", text: .init(format: .init(name: "knowledge_test", schema: ImportSchemas.extraction)))
+        _ = try await PlanUsageAPIClient(transport: transport).response(request, accessToken: "synthetic") { _ in }
+        let body = try #require(try JSONSerialization.jsonObject(with: transport.requests[0].httpBody!) as? [String: Any])
+        #expect(body["instructions"] as? String == "Extract source-grounded concepts.")
+        #expect(body["store"] as? Bool == false && body["stream"] as? Bool == true)
+        let text = try #require(body["text"] as? [String: Any]), format = try #require(text["format"] as? [String: Any])
+        #expect(format["type"] as? String == "json_schema" && format["strict"] as? Bool == true)
+        #expect(body["temperature"] == nil && body["max_output_tokens"] == nil && body["background"] == nil)
+        let schema = try #require(format["schema"] as? [String: Any])
+        #expect(schema["additionalProperties"] as? Bool == false)
+        #expect(Set(schema["required"] as? [String] ?? []) == ["concepts", "facts", "connections", "coverage"])
+    }
+
+    @Test(arguments: ["response.refusal.delta", "response.refusal.done"])
+    func refusalsCannotCountAsCompletedExtraction(_ event: String) async {
+        let wire = "data: {\"type\":\"\(event)\",\"delta\":\"Refused\"}\n\n" + completed
+        let transport = PlanFixtureTransport(chunks: [Data(wire.utf8)])
+        await #expect(throws: PlanUsageError.self) {
+            try await PlanUsageAPIClient(transport: transport).response(model: "fixture", prompt: "Source", accessToken: "synthetic") { _ in }
+        }
+        #expect(transport.stopped)
+    }
+
+    @Test func completedRefusalAndMidStreamUsageFailureAreNotAccepted() async {
+        let refusal = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"No\"}]}]}}\n\n"
+        let failure = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"concepts\\\":[]}\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\"}}}\n\n"
+        for wire in [refusal, failure] {
+            let transport = PlanFixtureTransport(chunks: [Data(wire.utf8)])
+            await #expect(throws: PlanUsageError.self) {
+                try await PlanUsageAPIClient(transport: transport).response(model: "fixture", prompt: "Source", accessToken: "synthetic") { _ in }
+            }
+        }
+    }
+
     private let completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
 
     @Test func modelCatalogUsesPlanShapeAndPreservesServerOrder() async throws {
