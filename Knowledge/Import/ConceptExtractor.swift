@@ -2,6 +2,7 @@ import Foundation
 
 @MainActor protocol ConceptExtractor {
     func extract(source: PreparedSource, context: SubjectSnapshot, model: String, checkpoint: ImportCheckpoint,
+                 initialFeed: [ImportConceptFeedEntry],
                  accessToken: @escaping @MainActor () async throws -> String,
                  onCheckpoint: @escaping @MainActor (ImportCheckpoint) throws -> Void,
                  onProgress: @escaping @MainActor (ExtractionProgress) -> Void) async throws -> ImportDraft
@@ -22,11 +23,29 @@ nonisolated struct ReconciliationInput: Codable, Sendable {
     let existingConnections: [DraftConnection]
 }
 
+nonisolated private struct ImportBatchResult: Sendable {
+    let index: Int
+    let draft: ImportDraft
+    let receipts: [PlanResponseReceipt]
+    let passes: [ValidatedImportPass]
+    let invalidScopes: [ImportPreviewScope]
+    let patch: PendingImportPatch?
+}
+
+nonisolated private enum ImportBatchOutcome: Sendable {
+    case success(ImportBatchResult)
+    case failure(Int, any Error)
+}
+
 @MainActor final class ChatGPTConceptExtractor: ConceptExtractor {
     private let client: any ChatGPTPlanRequesting
-    init(client: (any ChatGPTPlanRequesting)? = nil) { self.client = client ?? PlanUsageAPIClient() }
+    private let configuration: ImportProcessingConfiguration
+    init(client: (any ChatGPTPlanRequesting)? = nil, configuration: ImportProcessingConfiguration = .init()) {
+        self.client = client ?? PlanUsageAPIClient(); self.configuration = configuration
+    }
 
     func extract(source: PreparedSource, context: SubjectSnapshot, model: String, checkpoint original: ImportCheckpoint,
+                 initialFeed: [ImportConceptFeedEntry] = [],
                  accessToken: @escaping @MainActor () async throws -> String,
                  onCheckpoint: @escaping @MainActor (ImportCheckpoint) throws -> Void,
                  onProgress: @escaping @MainActor (ExtractionProgress) -> Void) async throws -> ImportDraft {
@@ -35,101 +54,200 @@ nonisolated struct ReconciliationInput: Codable, Sendable {
             checkpoint.chunking = .compact
         }
         let chunks = checkpoint.chunks(for: source)
-        guard checkpoint.version == 1, checkpoint.parts.count <= chunks.count else { throw ImportError.damagedCheckpoint }
+        try checkpoint.validateIndices(batchCount: chunks.count)
         let emptyContext = SubjectSnapshot(subjectID: context.subjectID, name: context.name, concepts: [], facts: [])
-        for (index, part) in checkpoint.parts.enumerated() {
+        for completion in checkpoint.completedBatches {
+            let index = completion.index, part = completion.draft
             try ImportValidator.validateDraft(part, source: source, context: emptyContext, requireComplete: false)
-            guard Set(part.coverage.map(\.segmentID)) == Set(chunks[index].requiredSegmentIDs) else { throw ImportError.damagedCheckpoint }
+            guard part.coverage.count == chunks[index].requiredSegmentIDs.count,
+                  Set(part.coverage.map(\.segmentID)) == Set(chunks[index].requiredSegmentIDs) else { throw ImportError.damagedCheckpoint }
         }
-
-        for chunk in chunks.dropFirst(checkpoint.parts.count) {
-            try Task.checkCancellation()
-            let progress = ImportProgressReporter(.init(stage: .extracting, completed: chunk.index, total: chunks.count,
-                location: ExtractionProgress.location(for: chunk), passagesInBatch: chunk.requiredSegmentIDs.count), report: onProgress)
-            let input = ExtractionInput(sourceID: source.id, title: source.title, subject: context.name,
-                                        segments: chunk.segments, requiredSegmentIDs: chunk.requiredSegmentIDs)
-            let receipt = try await send(model: model, input: input, name: "knowledge_extraction_v1",
-                                         instructions: ImportSchemas.extractionInstructions, schema: ImportSchemas.extraction(for: chunk),
-                                         accessToken: accessToken, progress: progress)
-            progress.transition(.validating)
-            let raw: ExtractionPayload = try await decode(receipt)
-            let payload = CoveragePreparation.prepare(raw, chunk: chunk)
-            var receipts = [receipt]
-            var part: ImportDraft
-            do { part = try ImportValidator.extract(payload, chunk: chunk, sourceID: source.id) }
-            catch let error as ImportError {
-                guard case .invalidExtraction = error else { throw error }
-                let repairInput = try ConnectionRepair.input(for: payload, chunk: chunk, sourceID: source.id)
-                progress.prepareForRepair()
-                let repairReceipt = try await send(model: model, input: repairInput, name: "knowledge_connection_repair_v1",
-                    instructions: ImportSchemas.connectionRepairInstructions, schema: ImportSchemas.connectionRepair(for: repairInput),
-                    accessToken: accessToken, progress: progress)
-                receipts.append(repairReceipt)
-                progress.transition(.validating)
-                let repair: ConnectionRepairPayload = try await decode(repairReceipt)
-                part = try ConnectionRepair.apply(repair, original: payload, chunk: chunk, sourceID: source.id)
+        for patch in checkpoint.pendingPatches {
+            guard let part = checkpoint.completedBatches.first(where: { $0.index == patch.index })?.draft else {
+                throw ImportError.damagedCheckpoint
             }
-            let uncited = Set(CoveragePreparation.uncitedPassageIDs(raw, chunk: chunk))
-            if !uncited.isEmpty {
-                let missing = SourceChunk(index: chunk.index, segments: chunk.segments.filter { uncited.contains($0.id) },
-                    requiredSegmentIDs: chunk.requiredSegmentIDs.filter { uncited.contains($0) })
-                progress.prepareForRepair(label: "Reading \(uncited.count) uncited source passages…", retainingConnections: true)
-                let extraInput = ExtractionInput(sourceID: source.id, title: source.title, subject: context.name,
-                    segments: missing.segments, requiredSegmentIDs: missing.requiredSegmentIDs)
-                let extraReceipt = try await send(model: model, input: extraInput, name: "knowledge_extraction_v1",
-                    instructions: ImportSchemas.extractionInstructions, schema: ImportSchemas.extraction(for: missing),
-                    accessToken: accessToken, progress: progress)
-                receipts.append(extraReceipt)
-                progress.transition(.validating)
+            try Self.validatePatch(patch, draft: part, chunk: chunks[patch.index], sourceID: source.id)
+        }
+        guard (checkpoint.draft == nil || checkpoint.completedBatches.count == chunks.count),
+              checkpoint.reconciledPartCount == 0 || checkpoint.draft != nil else { throw ImportError.damagedCheckpoint }
+        for ids in [checkpoint.parts.flatMap { $0.concepts.map(\.id) }, checkpoint.parts.flatMap { $0.facts.map(\.id) },
+                    checkpoint.parts.flatMap { $0.connections.map(\.id) }] {
+            guard Set(ids).count == ids.count else { throw ImportError.damagedCheckpoint }
+        }
+        if let draft = checkpoint.draft { try ImportValidator.validateDraft(draft, source: source, context: context, requireComplete: false) }
+        let progress = ImportRunProgress(source: source, chunks: chunks, checkpoint: checkpoint, initialFeed: initialFeed, report: onProgress)
+        defer { progress.stop() }
+        let completedIndices = Set(checkpoint.completedBatches.map(\.index))
+        let pending = chunks.filter { !completedIndices.contains($0.index) }
+        checkpoint.batchErrors = []
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: ImportBatchOutcome.self) { group in
+                var queue = pending.makeIterator()
+                for _ in 0..<configuration.workerCount(pendingBatchCount: pending.count) {
+                    guard let chunk = queue.next() else { break }
+                    progress.begin(chunk.index)
+                    group.addTask { @MainActor in
+                        await self.batchOutcome(chunk: chunk, source: source, subject: context.name, model: model,
+                            total: chunks.count, accessToken: accessToken, progress: progress)
+                    }
+                }
+                for try await outcome in group {
+                    try Task.checkCancellation()
+                    if let error = progress.fatalError { group.cancelAll(); throw error }
+                    switch outcome {
+                    case .success(let result):
+                        // The group owner is the only writer; every success is durable before another slot is filled.
+                        checkpoint.completedBatches.append(.init(index: result.index, draft: result.draft))
+                        if let patch = result.patch { checkpoint.pendingPatches.append(patch) }
+                        checkpoint.usage += result.receipts.map { .init(responseID: $0.responseID, inputTokens: $0.inputTokens, outputTokens: $0.outputTokens) }
+                        try onCheckpoint(checkpoint)
+                        progress.accept(result.index, draft: result.draft, passes: result.passes, invalidScopes: result.invalidScopes)
+                    case .failure(let index, let error):
+                        if Self.stopsImport(error) {
+                            group.cancelAll(); progress.stop()
+                            throw error
+                        }
+                        let failure = ImportBatchError(index: index, message: error.localizedDescription)
+                        checkpoint.batchErrors.append(failure)
+                        try onCheckpoint(checkpoint)
+                        progress.fail(failure)
+                    }
+                    try Task.checkCancellation()
+                    if let chunk = queue.next() {
+                        progress.begin(chunk.index)
+                        group.addTask { @MainActor in
+                            await self.batchOutcome(chunk: chunk, source: source, subject: context.name, model: model,
+                                total: chunks.count, accessToken: accessToken, progress: progress)
+                        }
+                    }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in progress.stop() }
+        }
+        guard checkpoint.batchErrors.isEmpty else { throw ImportBatchFailures(failures: checkpoint.batchErrors.sorted { $0.index < $1.index }) }
+        // Patching is a separate phase. Every source-checked batch is durable before optional AI repairs.
+        for index in checkpoint.pendingPatches.map(\.index).sorted() {
+            try Task.checkCancellation()
+            guard let patch = checkpoint.pendingPatches.first(where: { $0.index == index }),
+                  let partIndex = checkpoint.completedBatches.firstIndex(where: { $0.index == index }) else {
+                throw ImportError.damagedCheckpoint
+            }
+            var part = checkpoint.completedBatches[partIndex].draft
+            progress.beginPatch(index)
+            let reporter = ImportProgressReporter(.init(stage: .extracting, completed: checkpoint.completedBatches.count,
+                total: chunks.count, preview: .init(concepts: part.concepts.count, facts: part.facts.count, connections: part.connections.count), batchIndex: index),
+                scope: .init(batchIndex: index, attempt: UUID(), pass: .connectionRepair), report: progress.receive)
+            if !patch.connections.isEmpty {
+                reporter.prepareForRepair(label: "Patching \(patch.connections.count) connection suggestions…", retainingConnections: true)
                 do {
-                    let extra: ExtractionPayload = try await decode(extraReceipt)
-                    let supplement = try ImportValidator.extract(CoveragePreparation.prepare(extra, chunk: missing), chunk: missing, sourceID: source.id)
-                    part.concepts += supplement.concepts; part.facts += supplement.facts; part.connections += supplement.connections
-                    part.coverage = part.coverage.filter { !uncited.contains($0.segmentID) } + supplement.coverage
-                } catch let error as ImportError {
-                    guard case .invalidExtraction = error else { throw error }
-                    // Invalid additional entries are not admitted. The source passages remain explicitly uncertain.
+                    let receipt = try await send(model: model, input: patch, name: "knowledge_connection_patch_v2",
+                        instructions: ImportSchemas.connectionPatchInstructions, schema: ImportSchemas.connectionPatch(for: patch),
+                        accessToken: accessToken, progress: reporter)
+                    checkpoint.usage.append(.init(responseID: receipt.responseID, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens))
+                    let payload: ConnectionPatchPayload = try await decode(receipt)
+                    part = ExtractionRecovery.apply(payload, patch: patch, to: part)
+                } catch {
+                    if Self.stopsImport(error) { throw error }
+                    part = ExtractionRecovery.excludePending(patch, from: part,
+                        reason: "The connection patch could not be completed. This suggestion remains excluded for review. \(error.localizedDescription)")
+                }
+                // Save this stage before a passage request. Resume never repeats a finished connection patch.
+                checkpoint.completedBatches[partIndex] = .init(index: index, draft: part)
+                if let position = checkpoint.pendingPatches.firstIndex(where: { $0.index == index }) {
+                    checkpoint.pendingPatches[position].connections = []
+                }
+                try Task.checkCancellation()
+                try onCheckpoint(checkpoint)
+            }
+            var passes: [ValidatedImportPass] = []
+            if !patch.passageIDs.isEmpty {
+                let required = Set(patch.passageIDs)
+                let missing = SourceChunk(index: index, segments: chunks[index].segments.filter { required.contains($0.id) },
+                    requiredSegmentIDs: patch.passageIDs)
+                let scope = reporter.prepareForRepair(label: "Patching \(required.count) source passages…", retainingConnections: true)
+                do {
+                    let input = ExtractionInput(sourceID: source.id, title: source.title, subject: context.name,
+                        segments: missing.segments, requiredSegmentIDs: missing.requiredSegmentIDs)
+                    let receipt = try await send(model: model, input: input, name: "knowledge_extraction_v1",
+                        instructions: ImportSchemas.extractionInstructions, schema: ImportSchemas.extraction(for: missing),
+                        accessToken: accessToken, progress: reporter)
+                    checkpoint.usage.append(.init(responseID: receipt.responseID, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens))
+                    let raw: ExtractionPayload = try await decode(receipt)
+                    let recovered = try ExtractionRecovery.prepare(raw, chunk: missing, sourceID: source.id)
+                    var extra = recovered.draft
+                    if let outstanding = recovered.patch, !outstanding.connections.isEmpty {
+                        extra = ExtractionRecovery.excludePending(outstanding, from: extra,
+                            reason: "This suggestion from the source patch did not pass reference checks and remains excluded for review.")
+                    }
+                    passes.append(.init(scope: scope, payload: recovered.payload, draft: extra,
+                        conceptOrdinals: recovered.conceptOrdinals, factOrdinals: recovered.factOrdinals))
+                    part.concepts += extra.concepts; part.facts += extra.facts; part.connections += extra.connections
+                    part.excludedConnections = (part.excludedConnections ?? []) + (extra.excludedConnections ?? [])
+                    part.processingNotes = (part.processingNotes ?? []) + (extra.processingNotes ?? [])
+                    // Only one source patch pass; unresolved passages remain honest, inspectable coverage gaps.
+                    let unresolved = Set(recovered.patch?.passageIDs ?? [])
+                    let coverage = extra.coverage.map { value in
+                        unresolved.contains(value.segmentID) ? CoverageDecision(segmentID: value.segmentID, disposition: .uncertain,
+                            reason: "The patch did not fully resolve this passage. Inspect its original text and extracted entries.") : value
+                    }
+                    part.coverage = part.coverage.filter { !required.contains($0.segmentID) } + coverage
+                } catch {
+                    if Self.stopsImport(error) { throw error }
+                    part.processingNotes = (part.processingNotes ?? []) + ["A source patch could not be completed. Uncertain passages remain available for review. \(error.localizedDescription)"]
                 }
             }
             try Task.checkCancellation()
-            checkpoint.parts.append(part)
-            checkpoint.usage += receipts.map { .init(responseID: $0.responseID, inputTokens: $0.inputTokens, outputTokens: $0.outputTokens) }
-            progress.transition(.saving)
+            let coverageByID = Dictionary(uniqueKeysWithValues: part.coverage.map { ($0.segmentID, $0) })
+            part.coverage = chunks[index].requiredSegmentIDs.compactMap { coverageByID[$0] }
+            try ImportValidator.validateDraft(part, source: source, context: emptyContext, requireComplete: false)
+            checkpoint.completedBatches[partIndex] = .init(index: index, draft: part)
+            checkpoint.pendingPatches.removeAll { $0.index == index }
             try onCheckpoint(checkpoint)
-            progress.saved()
+            progress.patched(index, draft: part, passes: passes)
         }
         if checkpoint.draft == nil {
             checkpoint.draft = ImportDraft(sourceID: source.id,
                 concepts: checkpoint.parts.flatMap(\.concepts), facts: checkpoint.parts.flatMap(\.facts),
                 connections: checkpoint.parts.flatMap(\.connections), coverage: checkpoint.parts.flatMap(\.coverage),
-                excludedConnections: checkpoint.parts.flatMap { $0.excludedConnections ?? [] })
+                excludedConnections: checkpoint.parts.flatMap { $0.excludedConnections ?? [] },
+                processingNotes: checkpoint.parts.flatMap { $0.processingNotes ?? [] })
             try onCheckpoint(checkpoint)
         }
         // Immutable original IDs keep the reconciliation cursor stable after duplicates are combined.
         let allIDs = checkpoint.parts.flatMap { $0.concepts.map(\.id) }
         let batches = stride(from: 0, to: allIDs.count, by: 12).map { Array(allIDs[$0..<min($0 + 12, allIDs.count)]) }
         guard checkpoint.reconciledPartCount <= batches.count, var draft = checkpoint.draft else { throw ImportError.damagedCheckpoint }
+        try ImportValidator.validateDraft(draft, source: source, context: context, requireComplete: false)
+        progress.reconciling(draft, completed: checkpoint.reconciledPartCount, total: batches.count)
         for index in checkpoint.reconciledPartCount..<batches.count {
             try Task.checkCancellation()
             let batch = draft.concepts.filter { batches[index].contains($0.id) }
-            let progress = ImportProgressReporter(.init(stage: .connecting, completed: index, total: batches.count,
-                location: "Reviewing: " + batch.prefix(3).map(\.name).joined(separator: ", ")), report: onProgress)
+            let batchProgress = ImportProgressReporter(.init(stage: .connecting, completed: index, total: batches.count,
+                location: "Reviewing: " + batch.prefix(3).map(\.name).joined(separator: ", ")), report: progress.receive)
             if !batch.isEmpty {
                 let input = try Self.reconciliationInput(batch: batch, draft: draft, context: context)
                 let receipt = try await send(model: model, input: input, name: "knowledge_connections_v1",
                                              instructions: ImportSchemas.reconciliationInstructions, schema: ImportSchemas.reconciliation(for: input),
-                                             accessToken: accessToken, progress: progress)
-                progress.transition(.validating)
-                let payload: ReconciliationPayload = try await decode(receipt)
-                draft = try Reconciliation.apply(payload, to: draft, input: input, context: context)
+                                             accessToken: accessToken, progress: batchProgress)
+                batchProgress.transition(.validating)
+                do {
+                    let payload: ReconciliationPayload = try await decode(receipt)
+                    draft = try Reconciliation.applyRecovering(payload, to: draft, input: input, context: context)
+                } catch let error as ImportError {
+                    guard case .invalidExtraction = error else { throw error }
+                    draft.processingNotes = (draft.processingNotes ?? []) + [
+                        "This reconciliation response could not be validated. Source concepts and facts were kept; no changes from this response were applied."
+                    ]
+                }
                 checkpoint.usage.append(.init(responseID: receipt.responseID, inputTokens: receipt.inputTokens, outputTokens: receipt.outputTokens))
             }
             try Task.checkCancellation()
             checkpoint.reconciledPartCount = index + 1
             checkpoint.draft = draft
-            progress.transition(.saving)
+            batchProgress.transition(.saving)
             try onCheckpoint(checkpoint)
-            progress.saved()
+            progress.reconciling(draft, completed: index + 1, total: batches.count)
         }
         draft.isComplete = true
         let excludedConcepts = Set(draft.concepts.filter { !$0.selected }.map(\.id))
@@ -146,8 +264,77 @@ nonisolated struct ReconciliationInput: Codable, Sendable {
         try Task.checkCancellation()
         checkpoint.draft = draft
         try onCheckpoint(checkpoint)
-        onProgress(.init(stage: .connecting, completed: batches.count, total: batches.count, activity: .finished))
+        progress.reconciling(draft, completed: batches.count, total: batches.count)
+        progress.finish()
         return draft
+    }
+
+    private func batchOutcome(chunk: SourceChunk, source: PreparedSource, subject: String, model: String, total: Int,
+        accessToken: @escaping @MainActor () async throws -> String,
+        progress: ImportRunProgress) async -> ImportBatchOutcome {
+        if let error = progress.fatalError { return .failure(chunk.index, error) }
+        do { return .success(try await extractBatch(chunk: chunk, source: source, subject: subject, model: model,
+            total: total, accessToken: accessToken, onProgress: progress.receive)) }
+        catch {
+            if Self.stopsImport(error) { progress.abort(error) }
+            return .failure(chunk.index, error)
+        }
+    }
+
+    private func extractBatch(chunk: SourceChunk, source: PreparedSource, subject: String, model: String, total: Int,
+        accessToken: @escaping @MainActor () async throws -> String,
+        onProgress: @escaping @MainActor (ExtractionProgress) -> Void) async throws -> ImportBatchResult {
+        try Task.checkCancellation()
+        let scope = ImportPreviewScope(batchIndex: chunk.index, attempt: UUID(), pass: .extraction)
+        let progress = ImportProgressReporter(.init(stage: .extracting, completed: 0, total: total,
+            location: ExtractionProgress.location(for: chunk), passagesInBatch: chunk.requiredSegmentIDs.count,
+            batchIndex: chunk.index), scope: scope, report: onProgress)
+        let input = ExtractionInput(sourceID: source.id, title: source.title, subject: subject,
+                                    segments: chunk.segments, requiredSegmentIDs: chunk.requiredSegmentIDs)
+        let receipt = try await send(model: model, input: input, name: "knowledge_extraction_v1",
+            instructions: ImportSchemas.extractionInstructions, schema: ImportSchemas.extraction(for: chunk),
+            accessToken: accessToken, progress: progress)
+        progress.transition(.validating)
+        let raw: ExtractionPayload = try await decode(receipt)
+        let recovered = try ExtractionRecovery.prepare(raw, chunk: chunk, sourceID: source.id)
+        try Task.checkCancellation()
+        progress.transition(.saving)
+        return .init(index: chunk.index, draft: recovered.draft, receipts: [receipt], passes: [
+            .init(scope: scope, payload: recovered.payload, draft: recovered.draft,
+                conceptOrdinals: recovered.conceptOrdinals, factOrdinals: recovered.factOrdinals)
+        ], invalidScopes: [], patch: recovered.patch)
+    }
+
+    private static func validatePatch(_ patch: PendingImportPatch, draft: ImportDraft, chunk: SourceChunk, sourceID: UUID) throws {
+        guard patch.concepts.count == draft.concepts.count, patch.facts.count == draft.facts.count,
+              Set(patch.passageIDs).count == patch.passageIDs.count,
+              Set(patch.passageIDs).isSubset(of: Set(chunk.requiredSegmentIDs)),
+              Set(patch.connections.map(\.key)).count == patch.connections.count,
+              patch.connections.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 100 }),
+              patch.connections.allSatisfy({ task in draft.excludedConnections?.contains { $0.id == task.exclusionID } == true }),
+              zip(patch.concepts, draft.concepts).allSatisfy({ $0.0.name == $0.1.original.name && $0.0.aliases == $0.1.original.aliases
+                  && $0.0.explanation == $0.1.original.explanation
+                  && $0.0.evidence.map { EvidenceReference(sourceID: sourceID, segmentID: $0.segmentID, quote: $0.quote) } == $0.1.evidence }),
+              zip(patch.facts, draft.facts).allSatisfy({ $0.0.statement == $0.1.original.statement && $0.0.kind == $0.1.original.kind
+                  && $0.0.qualifications == $0.1.original.qualifications
+                  && $0.0.evidence.map { EvidenceReference(sourceID: sourceID, segmentID: $0.segmentID, quote: $0.quote) } == $0.1.evidence }) else {
+            throw ImportError.damagedCheckpoint
+        }
+        let conceptIDs = Dictionary(zip(patch.concepts.map(\.id), draft.concepts.map(\.id)), uniquingKeysWith: { first, _ in first })
+        guard zip(patch.facts, draft.facts).allSatisfy({ conceptIDs[$0.0.conceptID] == $0.1.conceptID }) else {
+            throw ImportError.damagedCheckpoint
+        }
+        _ = try ImportValidator.extract(.init(concepts: patch.concepts, facts: patch.facts, connections: [], coverage: []),
+            chunk: .init(index: chunk.index, segments: chunk.segments, requiredSegmentIDs: []), sourceID: sourceID)
+    }
+
+    static func stopsImport(_ error: any Error) -> Bool {
+        if error is CancellationError || error is AuthenticationError || (error as? URLError)?.code == .cancelled { return true }
+        if let error = error as? ImportError, error == .accountChanged { return true }
+        guard let error = error as? PlanUsageError else { return false }
+        return error.kind == .permission || error.kind == .noModels || [400, 401, 403, 429].contains(error.status ?? 0)
+            || ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "subscription_sharing_user_not_eligible",
+                "chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context"].contains(error.code ?? "")
     }
 
     private func send<T: Encodable>(model: String, input: T, name: String, instructions: String,

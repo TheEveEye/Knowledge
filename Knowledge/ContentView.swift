@@ -38,6 +38,9 @@ struct ContentView: View {
                     Section("Draft imports") {
                         ForEach(drafts) { job in
                             NavigationLink(value: LibrarySelection.importJob(job.id)) { ImportJobLabel(job: job) }
+                                .draftImportDeletion(for: job) { id in
+                                    if selection == .importJob(id) { selection = nil }
+                                }
                         }
                     }
                 }
@@ -75,6 +78,12 @@ struct ContentView: View {
         }
         .onAppear { if authentication.planWelcomeAccountID != nil { sheet = .welcome } }
         .onChange(of: authentication.planWelcomeAccountID) { _, id in if id != nil { sheet = .welcome } }
+        .onChange(of: subjects.map(\.id)) { _, ids in
+            if case .subject(let id) = selection, !ids.contains(id) { selection = nil }
+        }
+        .onChange(of: jobs.map(\.id)) { _, ids in
+            if case .importJob(let id) = selection, !ids.contains(id) { selection = nil }
+        }
         .alert("Import", isPresented: Binding(get: { imports.message != nil }, set: { if !$0 { imports.message = nil } })) {
             Button("OK", role: .cancel) { imports.message = nil }
         } message: { Text(imports.message ?? "") }

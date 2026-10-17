@@ -101,6 +101,38 @@ struct NewImportView: View {
     }
 }
 
+extension View {
+    func draftImportDeletion(for job: KnowledgeImportJob, onDelete: @escaping (UUID) -> Void = { _ in }) -> some View {
+        modifier(DraftImportDeletionModifier(jobID: job.id, title: job.title, onDelete: onDelete))
+    }
+}
+
+private struct DraftImportDeletionModifier: ViewModifier {
+    let jobID: UUID
+    let title: String
+    let onDelete: (UUID) -> Void
+    @Environment(ImportCoordinator.self) private var imports
+    @State private var showConfirmation = false
+
+    func body(content: Content) -> some View {
+        content
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                // Keep the row visible until the confirmation actually deletes it.
+                Button { showConfirmation = true } label: { Label("Delete", systemImage: "trash") }
+                    .tint(.red)
+            }
+            .alert("Delete draft import?", isPresented: $showConfirmation) {
+                Button("Delete", role: .destructive) {
+                    do { try imports.deleteDraft(jobID: jobID); onDelete(jobID) }
+                    catch { imports.message = "The draft could not be deleted: \(error.localizedDescription)" }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This deletes “\(title)” and its import progress. Any active processing will stop. This can’t be undone.")
+            }
+    }
+}
+
 struct ImportJobLabel: View {
     let job: KnowledgeImportJob
     @Environment(ImportCoordinator.self) private var imports
@@ -127,6 +159,7 @@ struct ImportJobView: View {
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dismiss) private var dismiss
     @Query private var jobs: [KnowledgeImportJob]
+    @State private var showModelPicker = false
     init(jobID: UUID, onClose: (() -> Void)? = nil) {
         self.jobID = jobID; self.onClose = onClose
         _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.id == jobID })
@@ -143,89 +176,46 @@ struct ImportJobView: View {
                         Button("Done", action: close).buttonStyle(.borderedProminent)
                     }
                 } else {
-                    Form {
-                        Section(job.title) {
-                            if imports.activeJobID == jobID {
-                                if let progress = imports.progress {
-                                    ImportProgressView(progress: progress, model: imports.models.first { $0.slug == job.model }?.displayName ?? job.model)
-                                } else { ProgressView("Starting extraction…") }
-                                Button("Pause processing") { imports.pause() }
-                                Text("Each batch is checked and saved before the next starts. You can pause and resume without repeating saved batches.")
-                                    .font(.callout).foregroundStyle(.secondary)
-                            } else {
-                                if let error = job.lastError { Text(error).foregroundStyle(.secondary) }
-                                if let checkpoint = try? job.checkpoint(), !checkpoint.parts.isEmpty {
-                                    Text("\(checkpoint.parts.flatMap(\.coverage).count) source passages are already checked and saved.")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                }
-                                Text("Review will be available once all passages and connections have been processed.")
-                                Button("Resume with selected model", systemImage: "play") { imports.start(jobID: jobID) }
-                                    .disabled(imports.selectedModel.isEmpty || imports.activeJobID != nil)
-                            }
-                        }
-                        if imports.activeJobID != jobID { ImportModelPicker() }
+                    if let snapshot = try? imports.progressSnapshot(for: job), let source = try? job.prepared() {
+                        let model = imports.activeJobID == jobID || imports.selectedModel.isEmpty ? job.model : imports.selectedModel
+                        ImportProgressView(progress: snapshot,
+                            model: imports.models.first { $0.slug == model }?.displayName ?? model,
+                            title: job.title, source: source, isRunning: imports.activeJobID == jobID,
+                            error: imports.activeJobID == jobID ? nil : job.lastError,
+                            onChooseModel: { showModelPicker = true })
+                    } else {
+                        ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark",
+                            description: Text("This draft could not be read. Keep the original notes and start a new import."))
                     }
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Keep draft", action: close) } }
                 }
             } else { ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark") }
         }
         .navigationTitle("Import")
-    }
-    private func close() { if let onClose { onClose() } else { dismiss() } }
-}
-
-struct ImportProgressView: View {
-    let progress: ExtractionProgress
-    let model: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(progress.description).font(.headline)
-            if let location = progress.location { Text(location).font(.callout).foregroundStyle(.secondary) }
-            if progress.passagesInBatch > 0 {
-                Text("\(progress.passagesInBatch) source passages in this batch").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack(alignment: .center, spacing: 12) {
-                ProgressView().accessibilityHidden(true)
-                Text(progress.activityLabel).font(.callout)
-            }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("This batch: \(elapsed(at: context.date)) · \(model)")
-                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                        .accessibilityHidden(true)
-                    if let notice = progress.waitingNotice(at: context.date) {
-                        Text(notice).font(.callout).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if progress.preview.hasEntries {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(progress.activity == .saved ? "This batch · checked and saved" : "Received so far · awaiting checks")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if progress.stage == .connecting {
-                        Text("\(progress.preview.connections) connection suggestions received").font(.callout).monospacedDigit()
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let job = jobs.first, ![.review, .saved].contains(job.status) {
+                ToolbarItem(placement: .cancellationAction) { Button("Keep draft", action: close) }
+                ToolbarItem(placement: .primaryAction) {
+                    if imports.activeJobID == jobID {
+                        Button("Pause", systemImage: "pause") { imports.pause() }
+                            .accessibilityHint("Keeps checked batches so you can resume later")
                     } else {
-                        Text("\(progress.preview.concepts) concepts · \(progress.preview.facts) facts · \(progress.preview.connections) connections")
-                            .font(.callout).monospacedDigit()
-                    }
-                    if !progress.preview.recentConcepts.isEmpty {
-                        Text("Recent concepts: " + progress.preview.recentConcepts.joined(separator: ", "))
-                            .font(.callout).foregroundStyle(.secondary)
+                        Button("Resume", systemImage: "play") { imports.start(jobID: jobID) }
+                            .disabled(imports.selectedModel.isEmpty || imports.activeJobID != nil)
+                            .accessibilityHint("Processes only unfinished batches using the selected model")
                     }
                 }
-            }
-            if progress.total > 0 {
-                ProgressView(value: Double(progress.completed), total: Double(progress.total))
-                    .accessibilityLabel(progress.savedDescription)
-                Text(progress.savedDescription).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 4)
+        .task { if imports.models.isEmpty { await imports.loadModels() } }
+        .sheet(isPresented: $showModelPicker) {
+            NavigationStack {
+                Form { ImportModelPicker() }
+                    .navigationTitle("Import model")
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showModelPicker = false } } }
+            }
+            .presentationDetents([.medium, .large])
+        }
     }
-
-    private func elapsed(at now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(progress.startedAt)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
+    private func close() { if let onClose { onClose() } else { dismiss() } }
 }

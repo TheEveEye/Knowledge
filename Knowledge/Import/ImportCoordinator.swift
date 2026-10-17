@@ -9,9 +9,11 @@ import SwiftData
     private(set) var isPreparing = false
     private(set) var activeJobID: UUID?
     private(set) var progress: ExtractionProgress?
+    private(set) var progressJobID: UUID?
     var modelError: String?
     var message: String?
     @ObservationIgnored let repository: KnowledgeRepository
+    @ObservationIgnored let organization: TopicOrganizationCoordinator
     @ObservationIgnored private let authentication: AuthenticationStore
     @ObservationIgnored private let client: any ChatGPTPlanRequesting
     @ObservationIgnored private let extractor: any ConceptExtractor
@@ -19,13 +21,19 @@ import SwiftData
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var runID = UUID()
     @ObservationIgnored private var catalogRunID = UUID()
+    @ObservationIgnored private var pendingProgress: ExtractionProgress?
+    @ObservationIgnored private var progressTask: Task<Void, Never>?
+    @ObservationIgnored private var lastProgressEmission = Date.distantPast
 
     init(authentication: AuthenticationStore, container: ModelContainer,
          client: (any ChatGPTPlanRequesting)? = nil, extractor: (any ConceptExtractor)? = nil,
          preferences: UserDefaults = .standard) {
-        self.authentication = authentication; repository = .init(container: container)
+        self.authentication = authentication
+        let repository = KnowledgeRepository(container: container)
+        self.repository = repository
         let client = client ?? PlanUsageAPIClient()
         self.client = client; self.extractor = extractor ?? ChatGPTConceptExtractor(client: client); self.preferences = preferences
+        organization = .init(authentication: authentication, repository: repository, client: client, preferences: preferences)
     }
 
     func loadModels() async {
@@ -87,12 +95,15 @@ import SwiftData
             let context = try repository.snapshot(subjectID: job.subjectID)
             job.accountID = accountID; job.model = selectedModel
             try repository.update(jobID: jobID, status: .extracting)
-            let run = UUID(); runID = run; activeJobID = jobID; progress = nil
+            let initialFeed = progressJobID == jobID ? (pendingProgress ?? progress)?.feed ?? [] : []
+            let run = UUID(); runID = run; activeJobID = jobID; progress = nil; progressJobID = jobID
+            progressTask?.cancel(); progressTask = nil; pendingProgress = nil; lastProgressEmission = .distantPast
             let model = job.model
             task = Task { [weak self] in
                 guard let self else { return }
                 do {
                     let draft = try await self.extractor.extract(source: source, context: context, model: model, checkpoint: checkpoint,
+                        initialFeed: initialFeed,
                         accessToken: { [weak self] in
                             guard let self else { throw CancellationError() }
                             try self.check(run: run, account: accountID)
@@ -105,7 +116,7 @@ import SwiftData
                             try self.repository.checkpoint(value, jobID: jobID)
                         }, onProgress: { [weak self] progress in
                             guard let self, self.runID == run, !Task.isCancelled else { return }
-                            self.progress = progress
+                            self.receive(progress, run: run)
                             // Persist stage changes, not each streaming update.
                             do {
                                 let job = try self.repository.job(jobID)
@@ -122,12 +133,12 @@ import SwiftData
                     }
                     #endif
                     let canceled = error is CancellationError || (error as? URLError)?.code == .cancelled
-                    let detail = (self.progress.map { "\($0.description) stopped. " } ?? "") + error.localizedDescription
+                    let detail = error.localizedDescription
                     do { try self.repository.update(jobID: jobID, status: canceled ? .interrupted : .failed,
                          message: canceled ? "Processing paused. Completed batches were kept." : detail) }
                     catch { self.message = "The import status could not be saved: \(error.localizedDescription)" }
                 }
-                if self.runID == run { self.activeJobID = nil; self.progress = nil; self.task = nil }
+                if self.runID == run { self.activeJobID = nil; self.task = nil }
             }
         } catch {
             message = error.localizedDescription
@@ -137,15 +148,96 @@ import SwiftData
     }
 
     func pause(message: String = "Processing paused. Completed passages were kept.") {
+        organization.cancelAll()
         guard let id = activeJobID else { return }
-        runID = UUID(); task?.cancel(); task = nil; activeJobID = nil; progress = nil
+        runID = UUID(); task?.cancel(); task = nil; activeJobID = nil
+        progressTask?.cancel(); progressTask = nil
+        if var snapshot = pendingProgress ?? progress {
+            for index in snapshot.batches.indices where snapshot.batches[index].state == .active {
+                snapshot.batches[index].state = .paused; snapshot.batches[index].label = "Paused"
+            }
+            for index in snapshot.feed.indices {
+                if snapshot.feed[index].draftID == nil { snapshot.feed[index].validation = .notValidated }
+                for factIndex in snapshot.feed[index].facts.indices where snapshot.feed[index].facts[factIndex].draftID == nil {
+                    snapshot.feed[index].facts[factIndex].validation = .notValidated
+                }
+            }
+            progress = snapshot
+        }
+        pendingProgress = nil
         do { try repository.update(jobID: id, status: .interrupted, message: message) }
         catch { self.message = "The paused draft could not be saved: \(error.localizedDescription)" }
     }
+    func deleteDraft(jobID: UUID) throws {
+        guard try repository.job(jobID).status != .saved else {
+            throw ImportError.invalidSelection("This import has already been saved to your library.")
+        }
+        if activeJobID == jobID { pause() }
+        let cleanupMessage = try repository.deleteDraft(jobID: jobID)
+        if progressJobID == jobID {
+            progressTask?.cancel(); progressTask = nil
+            pendingProgress = nil; progress = nil; progressJobID = nil
+        }
+        if let cleanupMessage { message = cleanupMessage }
+    }
+
+    func deleteSubject(subjectID: UUID) throws {
+        let jobs = try repository.container.mainContext.fetch(
+            FetchDescriptor<KnowledgeImportJob>(predicate: #Predicate { $0.subjectID == subjectID }))
+        let jobIDs = Set(jobs.map(\.id))
+        if let activeJobID, jobIDs.contains(activeJobID) { pause() }
+        let cleanupMessage = try repository.deleteSubject(subjectID)
+        organization.cancel(subjectID: subjectID)
+        if let progressJobID, jobIDs.contains(progressJobID) {
+            progressTask?.cancel(); progressTask = nil
+            pendingProgress = nil; progress = nil; self.progressJobID = nil
+        }
+        if let cleanupMessage { message = cleanupMessage }
+    }
+
     func accountChanged() {
         pause(message: ImportError.accountChanged.localizedDescription)
         catalogRunID = UUID(); isLoadingModels = false
         models = []; selectedModel = ""; modelError = nil
+    }
+    func sceneDidEnterBackground() { pause(message: "Processing paused in the background. Checked batches were kept.") }
+
+    @discardableResult func save(_ draft: ImportDraft, jobID: UUID) throws -> UUID {
+        let subjectID = try repository.job(jobID).subjectID
+        let sourceID = try repository.commit(draft, jobID: jobID)
+        organization.start(subjectID: subjectID, model: selectedModel)
+        return sourceID
+    }
+
+    /// UI updates coalesce across all workers. Parsing and checkpoint writes are never throttled.
+    private func receive(_ snapshot: ExtractionProgress, run: UUID) {
+        pendingProgress = snapshot
+        let delay = max(0, 0.25 - Date.now.timeIntervalSince(lastProgressEmission))
+        if delay == 0 { publishProgress(run: run) }
+        else if progressTask == nil {
+            progressTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                guard let self, self.runID == run, !Task.isCancelled else { return }
+                self.progressTask = nil; self.publishProgress(run: run)
+            }
+        }
+    }
+    private func publishProgress(run: UUID) {
+        guard runID == run, let snapshot = pendingProgress else { return }
+        progress = snapshot; pendingProgress = nil; lastProgressEmission = .now
+    }
+
+    func progressSnapshot(for job: KnowledgeImportJob) throws -> ExtractionProgress {
+        if progressJobID == job.id, let progress { return progress }
+        let source = try job.prepared(), checkpoint = try job.checkpoint()
+        let chunks = checkpoint.chunks(for: source)
+        try checkpoint.validateIndices(batchCount: chunks.count)
+        let run = ImportRunProgress(source: source, chunks: chunks, checkpoint: checkpoint, report: { _ in })
+        if let draft = checkpoint.draft {
+            let total = (checkpoint.parts.flatMap(\.concepts).count + 11) / 12
+            run.reconciling(draft, completed: checkpoint.reconciledPartCount, total: total)
+        }
+        return run.value
     }
     private func check(run: UUID, account: String) throws {
         try Task.checkCancellation()

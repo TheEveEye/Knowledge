@@ -178,30 +178,6 @@ nonisolated struct ExcludedConnectionReview: Codable, Sendable, Identifiable {
     let evidence: [EvidenceReference]
 }
 
-nonisolated struct ConnectionRepairInput: Codable, Sendable {
-    let concepts: [ExtractedConcept]
-    let facts: [ExtractedFact]
-    let connections: [ExtractedConnection]
-}
-
-nonisolated struct ExcludedConnectionDecision: Codable, Sendable {
-    let id: String
-    let reason: String
-}
-
-nonisolated struct ConnectionRepairPayload: Codable, Sendable {
-    let connections: [RepairedConnectionReferences]
-    let excludedConnections: [ExcludedConnectionDecision]
-}
-
-nonisolated struct RepairedConnectionReferences: Codable, Sendable {
-    let id: String
-    let fromConceptID: String
-    let toConceptID: String
-    let supportingFactIDs: [String]
-    let reviewReason: String?
-}
-
 nonisolated struct SavedConceptSummary: Codable, Sendable {
     let id: UUID
     let name: String
@@ -253,19 +229,126 @@ nonisolated struct ImportRequestUsage: Codable, Sendable {
     let outputTokens: Int?
 }
 nonisolated struct ImportCheckpoint: Codable, Sendable {
-    var version = 1
+    let version = 2
     // Missing in older checkpoints: keep their original batch boundaries when resuming.
     var chunking: ImportChunking? = .compact
-    var parts: [ImportDraft] = []
+    var completedBatches: [CompletedImportBatch] = []
+    var batchErrors: [ImportBatchError] = []
+    // Source-checked batches can still have optional, isolated patch work. Never library entries.
+    var pendingPatches: [PendingImportPatch] = []
     var draft: ImportDraft? = nil
     var reconciledPartCount = 0
     var usage: [ImportRequestUsage] = []
+
+    /// Assembly order is independent of the order in which workers finish.
+    var parts: [ImportDraft] { completedBatches.sorted { $0.index < $1.index }.map(\.draft) }
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case version, chunking, parts, completedBatches, batchErrors, pendingPatches, draft, reconciledPartCount, usage
+    }
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        switch try values.decode(Int.self, forKey: .version) {
+        case 1:
+            completedBatches = try values.decode([ImportDraft].self, forKey: .parts).enumerated().map {
+                CompletedImportBatch(index: $0.offset, draft: $0.element)
+            }
+        case 2:
+            completedBatches = try values.decode([CompletedImportBatch].self, forKey: .completedBatches)
+            batchErrors = try values.decodeIfPresent([ImportBatchError].self, forKey: .batchErrors) ?? []
+        default: throw ImportError.damagedCheckpoint
+        }
+        chunking = try values.decodeIfPresent(ImportChunking.self, forKey: .chunking)
+        pendingPatches = try values.decodeIfPresent([PendingImportPatch].self, forKey: .pendingPatches) ?? []
+        draft = try values.decodeIfPresent(ImportDraft.self, forKey: .draft)
+        reconciledPartCount = try values.decode(Int.self, forKey: .reconciledPartCount)
+        usage = try values.decode([ImportRequestUsage].self, forKey: .usage)
+        try validateIndices()
+    }
+    func encode(to encoder: any Encoder) throws {
+        try validateIndices()
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version)
+        try values.encodeIfPresent(chunking, forKey: .chunking)
+        try values.encode(completedBatches.sorted { $0.index < $1.index }, forKey: .completedBatches)
+        try values.encode(batchErrors, forKey: .batchErrors)
+        try values.encode(pendingPatches, forKey: .pendingPatches)
+        try values.encodeIfPresent(draft, forKey: .draft)
+        try values.encode(reconciledPartCount, forKey: .reconciledPartCount)
+        try values.encode(usage, forKey: .usage)
+    }
+    func validateIndices(batchCount: Int? = nil) throws {
+        let completed = completedBatches.map(\.index), failed = batchErrors.map(\.index), patches = pendingPatches.map(\.index)
+        guard reconciledPartCount >= 0, Set(completed).count == completed.count,
+              Set(patches).count == patches.count, Set(patches).isSubset(of: completed),
+              pendingPatches.isEmpty || (draft == nil && reconciledPartCount == 0),
+              Set(failed).count == failed.count, Set(completed).isDisjoint(with: failed),
+              (completed + failed).allSatisfy({ $0 >= 0 && (batchCount == nil || $0 < batchCount!) }) else {
+            throw ImportError.damagedCheckpoint
+        }
+    }
 
     func chunks(for source: PreparedSource) -> [SourceChunk] {
         switch chunking {
         case .compact: SourcePreparation.chunks(for: source, maximumCharacters: 4_000, maximumPassages: 24)
         case nil: SourcePreparation.chunks(for: source)
         }
+    }
+}
+
+nonisolated struct PendingImportPatch: Codable, Sendable {
+    let index: Int
+    let concepts: [ExtractedConcept]
+    let facts: [ExtractedFact]
+    var connections: [PendingConnectionPatch]
+    var passageIDs: [String]
+}
+
+nonisolated struct PendingConnectionPatch: Codable, Sendable {
+    let key: String
+    let suggestion: ExtractedConnection
+    let exclusionID: UUID
+}
+
+nonisolated struct ConnectionPatchPayload: Codable, Sendable {
+    let decisions: [String: ConnectionPatchDecision]
+}
+
+nonisolated struct ConnectionPatchDecision: Codable, Sendable {
+    let disposition: String
+    let fromConceptID: String?
+    let toConceptID: String?
+    let supportingFactIDs: [String]
+    let reason: String
+}
+
+nonisolated struct CompletedImportBatch: Codable, Sendable {
+    let index: Int
+    let draft: ImportDraft
+}
+
+nonisolated struct ImportBatchError: Codable, Sendable, Equatable, Identifiable {
+    let index: Int
+    let message: String
+    var id: Int { index }
+}
+
+nonisolated struct ImportProcessingConfiguration: Sendable {
+    static let maximumConcurrentExtractionBatches = Int.max
+    let maximumConcurrentBatches: Int
+    init(maximumConcurrentExtractionBatches: Int = Self.maximumConcurrentExtractionBatches) {
+        precondition(maximumConcurrentExtractionBatches > 0)
+        maximumConcurrentBatches = maximumConcurrentExtractionBatches
+    }
+    func workerCount(pendingBatchCount: Int) -> Int { min(maximumConcurrentBatches, pendingBatchCount) }
+}
+
+nonisolated struct ImportBatchFailures: Error, LocalizedError {
+    let failures: [ImportBatchError]
+    var errorDescription: String? {
+        "\(failures.count) \(failures.count == 1 ? "batch needs" : "batches need") attention. Resume retries unfinished batches; checked batches are kept."
     }
 }
 

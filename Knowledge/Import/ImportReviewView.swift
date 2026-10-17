@@ -25,7 +25,7 @@ struct ImportReviewView: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    do { _ = try imports.repository.commit(draft, jobID: jobID); saved = true }
+                    do { _ = try imports.save(draft, jobID: jobID); saved = true }
                     catch { self.error = error.localizedDescription }
                 }.disabled(!loaded || saved)
             }
@@ -102,7 +102,7 @@ struct ImportReviewView: View {
             }
             if let excluded = draft.excludedConnections, !excluded.isEmpty {
                 Section("Connection suggestions needing review") {
-                    Text("These suggestions could not be supported. Their source facts are kept; supported connections appear above.")
+                    Text("These suggestions remain excluded and need review. Inspect each reason and its supporting passages.")
                         .font(.callout).foregroundStyle(.secondary)
                     ForEach(excluded) { value in
                         DisclosureGroup(value.title) {

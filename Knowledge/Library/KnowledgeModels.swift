@@ -131,7 +131,6 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     func prepared() throws -> PreparedSource { try JSONDecoder().decode(PreparedSource.self, from: preparedData) }
     func checkpoint() throws -> ImportCheckpoint {
         let value = try JSONDecoder().decode(ImportCheckpoint.self, from: checkpointData)
-        guard value.version == 1 else { throw ImportError.damagedCheckpoint }
         return value
     }
     func draft() throws -> ImportDraft? {
@@ -141,10 +140,11 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
 }
 
 enum KnowledgePersistence {
-    /// Adding models is a lightweight SwiftData migration. Item's stored schema stays intact.
+    /// Additive models use lightweight migration; the existing knowledge schema stays intact.
     static var schema: Schema {
         Schema([Item.self, KnowledgeSubject.self, KnowledgeSource.self, KnowledgeConcept.self,
-                KnowledgeFact.self, KnowledgeConnection.self, KnowledgeImportJob.self])
+                KnowledgeFact.self, KnowledgeConnection.self, KnowledgeImportJob.self,
+                KnowledgeTopic.self, KnowledgeConceptPlacement.self])
     }
     static func container(inMemory: Bool = false, url: URL? = nil) throws -> ModelContainer {
         let configuration: ModelConfiguration

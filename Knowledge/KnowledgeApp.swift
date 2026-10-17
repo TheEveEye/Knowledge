@@ -28,6 +28,12 @@ struct KnowledgeApp: App {
 
     var body: some Scene {
         WindowGroup {
+            authenticatedContent
+        }
+        .modelContainer(sharedModelContainer)
+    }
+
+    private var authenticatedContent: some View {
             AuthenticationRootView()
                 .environment(authentication)
                 .environment(imports)
@@ -38,7 +44,5 @@ struct KnowledgeApp: App {
                 .onChange(of: authentication.activeAccount?.credentials?.planEnabled) { _, enabled in
                     if enabled != true { imports.pause(message: "ChatGPT plan permission changed. Your draft was kept.") }
                 }
-        }
-        .modelContainer(sharedModelContainer)
     }
 }

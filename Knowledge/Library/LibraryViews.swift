@@ -10,11 +10,15 @@ nonisolated enum LibraryDestination: Hashable {
 
 struct SubjectLibraryView: View {
     let subject: KnowledgeSubject
+    @Environment(ImportCoordinator.self) private var imports
+    @Environment(AuthenticationStore.self) private var authentication
     @Query private var concepts: [KnowledgeConcept]
     @Query private var sources: [KnowledgeSource]
     @Query private var jobs: [KnowledgeImportJob]
     @State private var showImport = false
+    @State private var showSettings = false
     @State private var search = ""
+    @State private var topicActions = TopicLibraryActions()
     init(subject: KnowledgeSubject) {
         self.subject = subject
         let id = subject.id
@@ -29,24 +33,18 @@ struct SubjectLibraryView: View {
                 Section("Draft imports") {
                     ForEach(drafts) { job in
                         NavigationLink(value: LibraryDestination.importJob(job.id)) { ImportJobLabel(job: job) }
+                            .draftImportDeletion(for: job)
                     }
                 }
             }
-            Section("Concepts") {
-                if concepts.isEmpty {
+            if concepts.isEmpty {
+                Section("Concepts") {
                     ContentUnavailableView("Add your first notes", systemImage: "doc.badge.plus",
                         description: Text("Import a searchable PDF or text, then review the concepts before saving."))
                     Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
                 }
-                ForEach(concepts.filter { search.isEmpty || ($0.name + " " + $0.aliases.joined(separator: " ")).localizedCaseInsensitiveContains(search) }) { concept in
-                    NavigationLink(value: LibraryDestination.concept(concept.id)) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(concept.name).font(.headline)
-                            Text(concept.explanation).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                    }
-                }
             }
+            ConceptHierarchySection(subject: subject, concepts: concepts, search: search, actions: topicActions)
             if !sources.isEmpty {
                 Section("Sources") {
                     ForEach(sources) { source in
@@ -58,11 +56,40 @@ struct SubjectLibraryView: View {
         .navigationTitle(subject.name)
         .searchable(text: $search, prompt: "Find a concept or alias")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .topBarTrailing) {
+                TopicOrganizationMenu(subjectID: subject.id, conceptIDs: concepts.map(\.id))
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Subject settings", systemImage: "gearshape") { showSettings = true }
+                    .labelStyle(.iconOnly)
+            }
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            ToolbarSpacer(.fixed, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
                 Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
+                    .labelStyle(.iconOnly)
             }
         }
+        .task(id: automaticOrganizationKey) {
+            imports.organization.start(subjectID: subject.id, model: imports.selectedModel)
+        }
+        .sheet(item: $topicActions.movingConcept) { MoveConceptTopicView(concept: $0) }
+        .alert("Rename topic", isPresented: Binding(get: { topicActions.renamingTopic != nil },
+            set: { if !$0 { topicActions.renamingTopic = nil } })) {
+            TextField("Topic name", text: $topicActions.topicName)
+            Button("Cancel", role: .cancel) { topicActions.renamingTopic = nil }
+            Button("Save") { topicActions.rename(repository: imports.repository) }
+        }
+        .alert("Organization", isPresented: Binding(get: { topicActions.error != nil }, set: { if !$0 { topicActions.error = nil } })) {
+            Button("OK", role: .cancel) { topicActions.error = nil }
+        } message: { Text(topicActions.error ?? "") }
         .sheet(isPresented: $showImport) { NewImportView(subject: subject) }
+        .sheet(isPresented: $showSettings) {
+            SubjectSettingsView(subject: subject)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationSizing(.form)
+        }
         .navigationDestination(for: LibraryDestination.self) { destination in
             switch destination {
             case .concept(let id):
@@ -81,6 +108,72 @@ struct SubjectLibraryView: View {
                 ImportJobView(jobID: id)
             }
         }
+    }
+    private var automaticOrganizationKey: String {
+        subject.id.uuidString + concepts.map { $0.id.uuidString }.sorted().joined()
+            + (authentication.activeAccount?.id ?? "")
+            + String(authentication.activeAccount?.credentials?.planEnabled == true) + String(authentication.isBusy)
+    }
+}
+
+struct SubjectSettingsView: View {
+    private let subjectID: UUID
+    private let originalName: String
+    @Environment(ImportCoordinator.self) private var imports
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var error: String?
+    @State private var showDeleteConfirmation = false
+
+    init(subject: KnowledgeSubject) {
+        subjectID = subject.id
+        originalName = subject.name
+        _name = State(initialValue: subject.name)
+    }
+
+    private var canSave: Bool { !name.trimmed.isEmpty && name.trimmed != originalName }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Subject name", text: $name)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .onSubmit(save)
+                } header: { Text("Subject name") }
+                if let error { Section { Text(error).foregroundStyle(.red) } }
+                Section {
+                    Button("Delete subject", systemImage: "trash", role: .destructive) { showDeleteConfirmation = true }
+                }
+            }
+            .navigationTitle("Subject settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: save).disabled(!canSave)
+                }
+            }
+        }
+        .interactiveDismissDisabled(name != originalName)
+        .alert("Delete subject?", isPresented: $showDeleteConfirmation) {
+            Button("Delete subject", role: .destructive, action: delete)
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This permanently deletes “\(originalName)” and all its knowledge, source files, and draft imports. This can’t be undone.")
+        }
+    }
+
+    private func save() {
+        guard canSave else { return }
+        do { try imports.repository.renameSubject(subjectID, name: name); dismiss() }
+        catch { self.error = error.localizedDescription }
+    }
+
+    private func delete() {
+        do { try imports.deleteSubject(subjectID: subjectID); dismiss() }
+        catch { self.error = "The subject could not be deleted: \(error.localizedDescription)" }
     }
 }
 
@@ -105,6 +198,7 @@ struct ConceptDetailView: View {
                 if !concept.aliases.isEmpty { Text("Also known as: " + concept.aliases.joined(separator: ", ")).foregroundStyle(.secondary) }
                 Button("View source") { showEvidence(title: concept.name, load: concept.evidence) }
             }
+            ConceptTopicSection(concept: concept)
             Section("Facts") {
                 ForEach(facts) { fact in
                     VStack(alignment: .leading, spacing: 8) {

@@ -54,34 +54,23 @@ import SwiftData
 
 #Preview("Import progress") {
     NavigationStack {
-        Form {
-            Section {
-                ImportProgressView(progress: .init(stage: .extracting, completed: 0, total: 9, activity: .receiving,
-                    startedAt: .now.addingTimeInterval(-38), lastActivityAt: .now, receivedCharacters: 4_200,
-                    preview: .init(concepts: 8, facts: 12, connections: 2,
-                        recentConcepts: ["REM sleep", "Circadian rhythm", "Suprachiasmatic nucleus"]),
-                    location: "Module 1.5a – Module 1.5b · Page 1", passagesInBatch: 24), model: "GPT-5.6-Luna")
-                Button("Pause processing") { }
-            } header: { Text("digitized_psychology_notes") } footer: {
-                Text("Each batch is checked and saved before the next starts. You can pause and resume without repeating saved batches.")
+        ImportProgressView(progress: ImportProgressSample.progress(), model: "GPT-5.6-Luna",
+            title: ImportProgressSample.source.title, source: ImportProgressSample.source)
+            .navigationTitle("Import").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Keep draft") { } }
+                ToolbarItem(placement: .primaryAction) { Button("Pause", systemImage: "pause") { } }
             }
-        }
-        .navigationTitle("Import")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Keep draft") { } } }
     }
 }
 
 #Preview("Import waiting") {
     NavigationStack {
-        Form {
-            Section("digitized_psychology_notes") {
-                ImportProgressView(progress: .init(stage: .extracting, completed: 0, total: 9, activity: .processing,
-                    startedAt: .now.addingTimeInterval(-60), lastActivityAt: .now.addingTimeInterval(-59),
-                    location: "Module 1.5a · Page 1", passagesInBatch: 24), model: "GPT-5.6-Luna")
-                Button("Pause processing") { }
-            }
-        }
-        .navigationTitle("Import")
+        ImportProgressView(progress: .init(stage: .extracting, completed: 0, total: 9, activity: .processing,
+            startedAt: .now.addingTimeInterval(-60), lastActivityAt: .now.addingTimeInterval(-59),
+            batches: [.init(index: 0, state: .active, label: "Waiting for ChatGPT…", location: "Module 1.5a · Page 1")]),
+            model: "GPT-5.6-Luna", title: "digitized_psychology_notes")
+            .navigationTitle("Import").navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -94,5 +83,11 @@ import SwiftData
             .presentationDetents([.large])
     }
     .transaction { $0.disablesAnimations = true }
+}
+#Preview("Subject bottom toolbar") {
+    let data = try! LibraryPreviewData()
+    let subject = try! data.container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>()).first!
+    NavigationStack { SubjectLibraryView(subject: subject) }
+        .environment(data.authentication).environment(data.imports).modelContainer(data.container)
 }
 #endif

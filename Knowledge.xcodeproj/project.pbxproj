@@ -10,30 +10,14 @@
 		A11000000000000000000001 /* JWTKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11000000000000000000002 /* JWTKit */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXContainerItemProxy section */
-		A11000000000000000000003 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 75FDB43530740D3400463F99 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 75FDB43C30740D3400463F99;
-			remoteInfo = Knowledge;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin PBXFileReference section */
 		75FDB43D30740D3400463F99 /* Knowledge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Knowledge.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A11000000000000000000004 /* KnowledgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KnowledgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		75FDB43F30740D3400463F99 /* Knowledge */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Knowledge;
-			sourceTree = "<group>";
-		};
-		A11000000000000000000005 /* KnowledgeTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = KnowledgeTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -45,11 +29,6 @@
 				A11000000000000000000001 /* JWTKit in Frameworks */,
 			);
 		};
-		A11000000000000000000006 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			files = (
-			);
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -57,7 +36,6 @@
 			isa = PBXGroup;
 			children = (
 				75FDB43F30740D3400463F99 /* Knowledge */,
-				A11000000000000000000005 /* KnowledgeTests */,
 				75FDB43E30740D3400463F99 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -66,7 +44,6 @@
 			isa = PBXGroup;
 			children = (
 				75FDB43D30740D3400463F99 /* Knowledge.app */,
-				A11000000000000000000004 /* KnowledgeTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,27 +72,6 @@
 			productReference = 75FDB43D30740D3400463F99 /* Knowledge.app */;
 			productType = "com.apple.product-type.application";
 		};
-		A11000000000000000000007 /* KnowledgeTests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = A11000000000000000000008 /* Build configuration list for PBXNativeTarget "KnowledgeTests" */;
-			buildPhases = (
-				A11000000000000000000009 /* Sources */,
-				A11000000000000000000006 /* Frameworks */,
-				A1100000000000000000000A /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				A1100000000000000000000B /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				A11000000000000000000005 /* KnowledgeTests */,
-			);
-			name = KnowledgeTests;
-			productName = KnowledgeTests;
-			productReference = A11000000000000000000004 /* KnowledgeTests.xctest */;
-			productType = "com.apple.product-type.bundle.unit-test";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -128,10 +84,6 @@
 				TargetAttributes = {
 					75FDB43C30740D3400463F99 = {
 						CreatedOnToolsVersion = 27.0;
-					};
-					A11000000000000000000007 = {
-						CreatedOnToolsVersion = 27.0;
-						TestTargetID = 75FDB43C30740D3400463F99;
 					};
 				};
 			};
@@ -153,18 +105,12 @@
 			projectRoot = "";
 			targets = (
 				75FDB43C30740D3400463F99 /* Knowledge */,
-				A11000000000000000000007 /* KnowledgeTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		75FDB43B30740D3400463F99 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			files = (
-			);
-		};
-		A1100000000000000000000A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
 			);
@@ -177,20 +123,7 @@
 			files = (
 			);
 		};
-		A11000000000000000000009 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			files = (
-			);
-		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		A1100000000000000000000B /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 75FDB43C30740D3400463F99 /* Knowledge */;
-			targetProxy = A11000000000000000000003 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		75FDB44830740D3400463F99 /* Debug configuration for PBXProject "Knowledge" */ = {
@@ -230,7 +163,6 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 5KP38NQP6R;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
@@ -380,50 +312,6 @@
 			};
 			name = Release;
 		};
-		A1100000000000000000000D /* Debug configuration for PBXNativeTarget "KnowledgeTests" */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 5KP38NQP6R;
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.kiwiapps.KnowledgeTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Knowledge.app/Knowledge";
-			};
-			name = Debug;
-		};
-		A1100000000000000000000E /* Release configuration for PBXNativeTarget "KnowledgeTests" */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 5KP38NQP6R;
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.kiwiapps.KnowledgeTests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Knowledge.app/Knowledge";
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -440,14 +328,6 @@
 			buildConfigurations = (
 				75FDB44B30740D3400463F99 /* Debug configuration for PBXNativeTarget "Knowledge" */,
 				75FDB44C30740D3400463F99 /* Release configuration for PBXNativeTarget "Knowledge" */,
-			);
-			defaultConfigurationName = Release;
-		};
-		A11000000000000000000008 /* Build configuration list for PBXNativeTarget "KnowledgeTests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				A1100000000000000000000D /* Debug configuration for PBXNativeTarget "KnowledgeTests" */,
-				A1100000000000000000000E /* Release configuration for PBXNativeTarget "KnowledgeTests" */,
 			);
 			defaultConfigurationName = Release;
 		};

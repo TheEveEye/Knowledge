@@ -40,13 +40,10 @@ struct AuthenticationRootView: View {
         }
         .task {
             await authentication.restore()
-            #if DEBUG
-            await ImportDiagnostics.runIfRequested(authentication: authentication, imports: imports)
-            #endif
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
-                imports.pause()
+                imports.sceneDidEnterBackground()
                 authentication.sceneDidEnterBackground()
             }
         }

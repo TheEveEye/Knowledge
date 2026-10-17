@@ -24,6 +24,10 @@ Completed chunks and reconciliation progress are checkpointed in SwiftData. Paus
 
 Concepts, facts, and connections have stable UUIDs. Connections can be browsed from either endpoint, supporting shared functions such as several concepts contributing to attention. Question generation, scheduling, OCR/images, Office files, cloud sync, and a visual graph are future features.
 
+Saved concepts are automatically organized into a subject-wide topic outline, with at most three topic levels. Organization starts after saving an import and when opening a subject with concepts that have no placement yet. It uses the selected ChatGPT model, or the account's saved/default model. A bounded outline request uses concept summaries and source headings; subsequent requests place up to 25 concepts at a time. Topics are browsing headings and do not change source-grounded concepts, facts, or knowledge connections.
+
+The library shows collapsible topics with descendant concept counts and remembers expanded branches per subject. Search includes aliases and topic paths. Uncertain placements remain visible under Unsorted. Use the Organize menu to organize new concepts, reconsider unlocked placements with Reorganize subject, or collapse the tree. Long-press a topic to rename it. Move a concept from its detail screen, context menu, or leading swipe; manual moves lock its placement until unlocked. Existing topic names and parents remain stable during automatic runs. The entire organization result is validated and saved together; interrupted requests, invalid output, and library changes during a request leave the previous structure intact. Existing stores gain the two organization models through additive migration.
+
 ## ChatGPT sign-in
 
 The app uses OpenAI’s dynamic registration flow for local, personal, and open-source apps. It needs no API key, client secret, or pre-issued partner client ID. Identity sign-in and permission to use a ChatGPT plan are separate: declining the optional plan permission still lets the user sign in.
@@ -46,54 +50,13 @@ OpenAI receives the required HTTP loopback redirect URI. After validating that c
 
 The listener binds to IPv4 loopback, limits request sizes and concurrent connections, validates the request host/path and OAuth state, and accepts one callback per attempt. Cancellation, timeout, or backgrounding closes the browser and listener. No broad ATS exception or Bonjour advertisement is configured.
 
-**The native bridge passed a controlled iOS 27 iPhone simulator probe, and login has been confirmed on the physical iPhone.** Apple documents authentication sessions and loopback listeners separately; keep testing this adaptation when updating supported iOS versions. Keep Knowledge in the foreground during sign-in. Automated protocol, listener, token, and state tests do not substitute for a real browser authorization and token exchange.
 
-## Build and test
+## Build
 
-The shared scheme includes the hosted Swift Testing target `KnowledgeTests`. JWTKit and its transitive dependencies are resolved through Swift Package Manager.
+JWTKit and its transitive dependencies are resolved through Swift Package Manager.
 
 ```sh
-xcodebuild -resolvePackageDependencies -project Knowledge.xcodeproj -scheme Knowledge
 xcodebuild build -project Knowledge.xcodeproj -scheme Knowledge -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
-xcodebuild test -project Knowledge.xcodeproj -scheme Knowledge -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' CODE_SIGNING_ALLOWED=NO
 ```
 
-The optional `KnowledgeNativeAuthProbe` scheme runs a controlled, local browser redirect without exchanging tokens or creating a ChatGPT registration. Run it with the app visible and approve the system browser notice:
-
-```sh
-xcodebuild test -project Knowledge.xcodeproj -scheme KnowledgeNativeAuthProbe \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' \
-  -parallel-testing-enabled NO -only-testing:KnowledgeTests/OAuthBrowserSessionProbeTests
-```
-
-The standard scheme skips this interactive probe. Automated protocol, API, Keychain, and session tests passed, as did iPhone/iPad simulator and unsigned iOS device builds. The live OpenAI sign-in page opened on the iPad simulator, cancellation returned cleanly, and the login layout was checked in light/dark appearance and at the largest text size. Login has been confirmed on the paired iPhone. A real plan request also completed on that iPhone using its saved OAuth connection, returning text and input/output token counts. The live service omitted the stream Content-Type header, so the reader validates the actual events and requires `response.completed` to confirm success.
-
-Concept-import tests cover native PDF/text preparation, coverage and citation validation, alias reconciliation, shared-function retrieval, checkpoint reuse, ambiguous merges, selection dependencies, transactional rollback, idempotent saving, account cancellation, model preferences, and migration from the original `Item` store. The psychological acceptance fixture is a representative excerpt of the supplied notes; deterministic fixtures test the app's behavior, while live model quality is checked separately.
-
-`ConceptImportLiveProbeTests` is opt-in through `KNOWLEDGE_RUN_LIVE_IMPORT=1` in the test host's environment. It requires an unlocked device with an existing authorized ChatGPT plan connection and makes real requests. For device test-runner issues, a Debug-only launch argument `-knowledge-live-import-probe` exercises the same pipeline directly in the app and writes a count/validation report to `Documents/knowledge-import-probe.json`. Neither probe commits material into the knowledge library. Normal launches and Release builds do not run the diagnostic. `LibraryPreviews.swift` provides isolated library and review previews with no AI requests.
-
-For an explicitly requested repair of an existing import, `-knowledge-resume-import-probe <storedFilename>` resumes only the matching draft through the real coordinator with the account's selected model. It preserves completed batches, records streaming activity and the final outcome in `Documents/knowledge-import-resume-probe.json`, and stops at editable review. It does not press Save or run on normal launches. Streaming and citation regression tests cover provisional progress, truncated responses, evidence derived from facts, and both legacy and compact checkpoints.
-
-**Concept import validation:** 89 automated tests passed on the iOS 27 iPad simulator, including the original-store migration. The signed physical-device build succeeded. The direct live probe completed two Structured Outputs requests through the iPhone's saved ChatGPT connection using the first visible model, GPT-6 Astra: 11 concepts, 13 facts, 6 connections, and coverage for all 15 passages in the psychology excerpt. The probe verified the REM alias, parallel processing, four separately classified dream theories, and the sleep-cycle quantity; schema, references, and evidence validation passed. Library/review previews were checked in light/dark appearance and at the largest Dynamic Type size. Xcode's physical XCTest runner hung before connecting, so the direct in-app probe provided live inference validation.
-
-**Full-document and progress validation (October 6, 2026):** 107 automated tests passed in 13 suites after adding live stream previews, compact/legacy checkpoint compatibility, connection reference repair, uncited passage extraction, citation-based coverage preparation, and safe fallbacks for missing merge proposals. The signed iPhone build succeeded without compiler warnings. The actual uploaded psychology PDF resumed through the saved GPT-5.6 Luna connection and reached editable review: 147 concepts, 182 facts, 145 connections, and coverage dispositions for all 202 passages. The live run exercised the targeted coverage and connection repair paths and preserved the REM/paradoxical-sleep alias, parallel processing, theory classifications, and the sleep-cycle quantity. It stopped at review without saving the material into the library. Progress previews were checked in light/dark appearance and with accessibility text sizes, and live progress was observed on the phone.
-
-Manual checks on simulator and physical device:
-
-1. Sign in with optional plan permission accepted and declined; verify identity, selected account, and first-plan welcome behavior.
-2. Relaunch, switch registrations, add another account, and sign back in to a saved registration after sign-out.
-3. Cancel the browser, background the app, lose the network, and retry; verify no stale callback activates an account.
-4. Grant plan permission later and open **Manage ChatGPT usage**. Verify sign-out removes credentials and preserves local items.
-5. Inspect the sign-in and account views in light/dark appearance, at accessibility text sizes, and with VoiceOver.
-
-## References
-
-- [OpenAI registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
-- [OpenAI accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
-- [OpenAI UI/UX guidelines](https://developers.openai.com/siwc/ui-ux-guidelines)
-- [OpenAI streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses)
-- [ChatGPT usage settings](https://chatgpt.com/settings/usage)
-- [Apple authentication sessions](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession)
-- [Apple local network privacy](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
-
-The ChatGPT logo asset comes from [OpenAI’s approved sign-in assets](https://developers.openai.com/assets/siwc/sign-in-buttons/chatgpt-logo-black.svg). The integration configuration follows the local/open-source flow; paid or remotely hosted distribution requires the applicable OpenAI access approval.
+This project has no test target or test harnesses. Follow the no-tests policy in `AGENTS.md`.

@@ -3,10 +3,7 @@ import SwiftData
 
 @MainActor final class KnowledgeRepository {
     let container: ModelContainer
-    private let commitSave: (@MainActor (ModelContext) throws -> Void)?
-    init(container: ModelContainer, commitSave: (@MainActor (ModelContext) throws -> Void)? = nil) {
-        self.container = container; self.commitSave = commitSave
-    }
+    init(container: ModelContainer) { self.container = container }
 
     func createSubject(name: String) throws -> KnowledgeSubject {
         guard !name.trimmed.isEmpty else { throw ImportError.invalidSelection("Give this subject a name.") }
@@ -17,6 +14,70 @@ import SwiftData
         context.insert(subject)
         do { try context.save(); return subject }
         catch { context.delete(subject); throw error }
+    }
+
+    func renameSubject(_ id: UUID, name: String) throws {
+        let name = name.trimmed
+        guard !name.isEmpty else { throw ImportError.invalidSelection("Give this subject a name.") }
+        let context = container.mainContext
+        let subjects = try context.fetch(FetchDescriptor<KnowledgeSubject>())
+        guard let subject = subjects.first(where: { $0.id == id }) else {
+            throw ImportError.invalidSelection("This subject is unavailable.")
+        }
+        guard !subjects.contains(where: { $0.id != id && $0.name.normalizedName == name.normalizedName }) else {
+            throw ImportError.invalidSelection("A subject with this name already exists.")
+        }
+        let previousName = subject.name
+        subject.name = name
+        do { try context.save() }
+        catch { subject.name = previousName; throw error }
+    }
+
+    @discardableResult func deleteSubject(_ id: UUID, sourceDirectory: URL? = nil) throws -> String? {
+        let context = container.mainContext
+        guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == id })).first else {
+            throw ImportError.invalidSelection("This subject is unavailable.")
+        }
+        let allSources = try context.fetch(FetchDescriptor<KnowledgeSource>())
+        let allJobs = try context.fetch(FetchDescriptor<KnowledgeImportJob>())
+        let sources = allSources.filter { $0.subjectID == id }, jobs = allJobs.filter { $0.subjectID == id }
+        let concepts = try context.fetch(FetchDescriptor<KnowledgeConcept>(predicate: #Predicate { $0.subjectID == id }))
+        let facts = try context.fetch(FetchDescriptor<KnowledgeFact>(predicate: #Predicate { $0.subjectID == id }))
+        let connections = try context.fetch(FetchDescriptor<KnowledgeConnection>(predicate: #Predicate { $0.subjectID == id }))
+        let topics = try context.fetch(FetchDescriptor<KnowledgeTopic>(predicate: #Predicate { $0.subjectID == id }))
+        let placements = try context.fetch(FetchDescriptor<KnowledgeConceptPlacement>(predicate: #Predicate { $0.subjectID == id }))
+        let otherSources = allSources.filter { $0.subjectID != id }, otherJobs = allJobs.filter { $0.subjectID != id }
+        let retainedIDs = Set(otherSources.map(\.id) + otherJobs.map(\.sourceID))
+        // Corrupt draft data must not prevent deletion, and another subject may still use a source copy.
+        let prepared = sources.compactMap { try? $0.prepared() } + jobs.compactMap { try? $0.prepared() }
+        let retainedFiles = Set(otherSources.compactMap { try? $0.prepared().storedFilename }
+            + otherJobs.compactMap { try? $0.prepared().storedFilename })
+        let filenames = Set(prepared.filter { !retainedIDs.contains($0.id) }.map(\.storedFilename)).subtracting(retainedFiles)
+        let folder = filenames.isEmpty ? nil : try (sourceDirectory ?? SourcePreparation.directory())
+        let autosave = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = autosave }
+        for connection in connections { context.delete(connection) }
+        for fact in facts { context.delete(fact) }
+        for placement in placements { context.delete(placement) }
+        for concept in concepts { context.delete(concept) }
+        for topic in topics { context.delete(topic) }
+        for job in jobs { context.delete(job) }
+        for source in sources { context.delete(source) }
+        context.delete(subject)
+        do {
+            try context.save()
+        } catch { context.rollback(); throw error }
+        // Delete bytes only after the database commit, so a failed save retains all source material.
+        var failedCopies = 0
+        if let folder {
+            for filename in filenames {
+                do { try FileManager.default.removeItem(at: folder.appendingPathComponent(filename)) }
+                catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { }
+                catch { failedCopies += 1 }
+            }
+        }
+        return failedCopies == 0 ? nil : "The subject was deleted, but some local source copies could not be removed."
     }
 
     func job(_ id: UUID, context: ModelContext? = nil) throws -> KnowledgeImportJob {
@@ -71,6 +132,37 @@ import SwiftData
         job.draftData = try JSONEncoder().encode(draft)
         job.status = .review; job.lastError = nil; job.updatedAt = Date()
         try container.mainContext.save()
+    }
+
+    /// A source-copy cleanup failure is nonfatal once the draft deletion has been saved.
+    @discardableResult func deleteDraft(jobID: UUID, sourceDirectory: URL? = nil) throws -> String? {
+        let context = container.mainContext
+        let job = try job(jobID)
+        guard job.status != .saved else {
+            throw ImportError.invalidSelection("This import has already been saved to your library.")
+        }
+        let sourceID = job.sourceID
+        let savedSources = try context.fetchCount(FetchDescriptor<KnowledgeSource>(predicate: #Predicate { $0.id == sourceID }))
+        let otherJobs = try context.fetchCount(FetchDescriptor<KnowledgeImportJob>(predicate: #Predicate { $0.sourceID == sourceID && $0.id != jobID }))
+        var sourceURL: URL?
+        // An unreadable draft can still be removed. Shared or saved source files are retained.
+        if savedSources == 0, otherJobs == 0, let source = try? job.prepared() {
+            let folder = try sourceDirectory ?? SourcePreparation.directory()
+            sourceURL = folder.appendingPathComponent(source.storedFilename)
+        }
+        let autosave = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = autosave }
+        context.delete(job)
+        do {
+            try context.save()
+        } catch { context.rollback(); throw error }
+        if let sourceURL {
+            do { try FileManager.default.removeItem(at: sourceURL) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { }
+            catch { return "The draft was deleted, but its local source copy could not be removed: \(error.localizedDescription)" }
+        }
+        return nil
     }
 
     /// Repository mutations are synchronous on the main actor; autosaving cannot split this commit.
@@ -148,7 +240,7 @@ import SwiftData
             }
             job.draftData = try JSONEncoder().encode(draft)
             job.status = .saved; job.savedAt = Date(); job.updatedAt = Date(); job.lastError = nil
-            if let commitSave { try commitSave(context) } else { try context.save() }
+            try context.save()
         } catch { context.rollback(); throw error }
         return source.id
     }
