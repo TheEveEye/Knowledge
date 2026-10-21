@@ -21,7 +21,7 @@ nonisolated struct ConceptResolutionSuggestion: Codable, Sendable, Equatable {
     let model: String
     var status: Status = .pending
     var previousName: String? = nil
-    var changedLibraryName: Bool? = nil
+    var changedLibraryName = false
 
     var namingNote: String {
         basis.label + ". Proposed name: " + (suggestedName ?? "unchanged")
@@ -95,7 +95,7 @@ private nonisolated struct ResolutionResponse: Decodable, Sendable {
     }
 
     static func hasPending(_ draft: ImportDraft) -> Bool {
-        !Set(candidateIDs(in: draft)).subtracting(draft.resolutionReviewedConceptIDs ?? []).isEmpty
+        !Set(candidateIDs(in: draft)).subtracting(draft.resolutionReviewedConceptIDs).isEmpty
     }
 
     func resolve(_ original: ImportDraft, source: PreparedSource, subject: String, model: String,
@@ -104,7 +104,7 @@ private nonisolated struct ResolutionResponse: Decodable, Sendable {
         onProgress: @MainActor (Int, Int) -> Void) async throws -> ImportDraft {
         var draft = original
         let candidates = Self.candidateIDs(in: draft)
-        var reviewed = Set(draft.resolutionReviewedConceptIDs ?? [])
+        var reviewed = Set(draft.resolutionReviewedConceptIDs)
         let pending = candidates.filter { !reviewed.contains($0) }
         var cursor = 0
         onProgress(candidates.filter { reviewed.contains($0) }.count, candidates.count)
@@ -146,14 +146,14 @@ private nonisolated struct ResolutionResponse: Decodable, Sendable {
                     do {
                         draft.concepts[index].resolutionSuggestion = try Self.validate(decision, input: item, source: source, model: model)
                     } catch {
-                        draft.processingNotes = (draft.processingNotes ?? []) + [
+                        draft.processingNotes = draft.processingNotes + [
                             "A resolution suggestion for \(item.name) failed validation and was ignored. The original entry was kept."
                         ]
                     }
                 }
             } catch {
                 if error is CancellationError || (error as? URLError)?.code == .cancelled { throw error }
-                draft.processingNotes = (draft.processingNotes ?? []) + [
+                draft.processingNotes = draft.processingNotes + [
                     "AI suggestions could not be prepared for \(inputs.map(\.name).joined(separator: ", ")). Review the original entries. \(error.localizedDescription)"
                 ]
             }

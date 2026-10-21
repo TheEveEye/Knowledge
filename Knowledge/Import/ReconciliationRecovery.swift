@@ -61,8 +61,14 @@ nonisolated extension Reconciliation {
         }
         var draft = try apply(.init(decisions: decisions, connections: connections, factReviews: reviews),
             to: original, input: input, context: context)
-        draft.processingNotes = (draft.processingNotes ?? []) + notes
-        draft.excludedConnections = (draft.excludedConnections ?? []) + excluded
+        let updateIDs = Set(context.concepts.map(\.id)).intersection(concepts)
+            .union(Set(context.facts.map(\.id)).intersection(facts.keys)).union(input.savedConnections.map(\.id))
+        draft.libraryProposals = draft.libraryProposals + (payload.updates ?? []).filter { proposal in
+            updateIDs.contains(proposal.entityID) && !proposal.reason.trimmed.isEmpty && proposal.value.count <= 12_000
+                && !proposal.supportingFactIDs.isEmpty && proposal.supportingFactIDs.allSatisfy { facts[$0] != nil }
+        }
+        draft.processingNotes = draft.processingNotes + notes
+        draft.excludedConnections = draft.excludedConnections + excluded
         return draft
     }
 }

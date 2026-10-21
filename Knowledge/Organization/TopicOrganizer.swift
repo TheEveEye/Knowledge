@@ -5,7 +5,10 @@ nonisolated struct TopicProposal: Codable, Sendable {
     let parentTopicID: String?
     let name: String
 }
-nonisolated struct TopicOutlineResponse: Codable, Sendable { let topics: [TopicProposal] }
+nonisolated struct TopicOutlineResponse: Codable, Sendable {
+    let topics: [TopicProposal]
+    var updates: [LibraryContentProposal]? = nil
+}
 nonisolated struct TopicAssignmentResponse: Codable, Sendable {
     let placements: [TopicAssignment]
 }
@@ -18,6 +21,7 @@ nonisolated struct TopicOutlineInput: Encodable, Sendable {
     let subject: String
     let existingTopics: [TopicRecord]
     let conceptSample: [OrganizableConcept]
+    var existingPlacements: [ConceptPlacementRecord] = []
 }
 nonisolated struct TopicAssignmentInput: Encodable, Sendable {
     let subject: String
@@ -44,16 +48,21 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
         let sorted = snapshot.concepts.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let count = min(120, sorted.count)
         var sample = (0..<count).map { compact(sorted[$0 * sorted.count / count]) }
-        while try JSONEncoder().encode(TopicOutlineInput(subject: snapshot.subjectName,
-            existingTopics: snapshot.topics, conceptSample: sample)).count > 110_000, sample.count > 1 {
+        func input(_ sample: [OrganizableConcept]) -> TopicOutlineInput {
+            let ids = Set(sample.map(\.id))
+            return .init(subject: snapshot.subjectName, existingTopics: snapshot.topics, conceptSample: sample,
+                existingPlacements: snapshot.placements.filter { ids.contains($0.conceptID) })
+        }
+        while try JSONEncoder().encode(input(sample)).count > 110_000, sample.count > 1 {
             sample = sample.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
         }
+        let outlineInput = input(sample)
         let outline: TopicOutlineResponse = try await request(
-            TopicOutlineInput(subject: snapshot.subjectName, existingTopics: snapshot.topics, conceptSample: sample),
+            outlineInput,
             model: model, name: "knowledge_topic_outline_v1", instructions: Self.outlineInstructions,
             schema: .record(["topics": .list(.record([
                 "id": .text, "parentTopicID": .nullableText, "name": .text
-            ]))]), accessToken: accessToken)
+            ])), "updates": .list(ImportSchemas.libraryProposalSchema)]), accessToken: accessToken)
         let added = try Self.resolve(outline.topics, existing: snapshot.topics)
         let topics = snapshot.topics + added
         var placements: [ConceptPlacementRecord] = []
@@ -89,7 +98,12 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
         }
         try Task.checkCancellation()
         onProgress(.init(label: "Topics ready to review", topics: topics, placements: placements, isComplete: true))
-        return .init(addedTopics: added, placements: placements)
+        let known = Set(snapshot.topics.map(\.id))
+        let assigned = Set(outlineInput.existingPlacements.map(\.conceptID))
+        let updates = (outline.updates ?? []).filter {
+            ((known.contains($0.entityID) && ["name", "parentID"].contains($0.field)) || (assigned.contains($0.entityID) && $0.field == "topicID")) && !$0.reason.trimmed.isEmpty
+        }
+        return .init(addedTopics: added, placements: placements, updates: updates)
     }
 
     static func resolve(_ proposals: [TopicProposal], existing: [TopicRecord]) throws -> [TopicRecord] {
@@ -145,7 +159,12 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
     These are organizational headings, not new scientific concepts or factual claims. Use the supplied material only.
     Aim for a small useful outline: roughly 4–10 broad topics for a large subject, with subtopics where useful, at most 3 levels.
     Small subjects need fewer topics. Avoid a topic per concept and avoid empty or redundant branches.
-    Existing topics and IDs are immutable, including manually renamed topics. Reuse them whenever possible.
+    Existing topic IDs are immutable. Reuse topics whenever possible, including equivalent categories under different names.
+    Return optional updates only for useful improvements to an existing topic's name or parentID, with its existing entityID,
+    a field of name or parentID, the new value, a concise reason and supportingFactIDs []. Use an existing topic UUID for a parent,
+    or an empty value for a root. The app asks before changing manually edited names or organization. Return updates [] if none are needed.
+    An update may also improve an existing placement: use its conceptID as entityID, field topicID, and an existing topic UUID as value.
+    Propose placement changes only when they materially improve organization. Preserve manual decisions unless there is a clear reason to ask.
     Return ONLY additional topics needed for this material, at most 60, with unique local IDs such as new-1.
     parentTopicID is null for a root, or an existing topic UUID copied exactly, or another new topic's local ID.
     No cycles, repeated sibling names or duplicate existing topics. Return an empty topics array if no additions are needed.

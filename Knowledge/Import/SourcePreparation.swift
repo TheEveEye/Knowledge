@@ -85,7 +85,7 @@ nonisolated enum SourcePreparation {
         return result
     }
 
-    static func chunks(for source: PreparedSource, maximumCharacters: Int = 8_000, maximumPassages: Int = 60) -> [SourceChunk] {
+    static func chunks(for source: PreparedSource, maximumCharacters: Int = 4_000, maximumPassages: Int = 24) -> [SourceChunk] {
         var chunks: [SourceChunk] = []
         var pending: [SourceSegment] = []
         var length = 0

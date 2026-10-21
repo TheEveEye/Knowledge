@@ -240,14 +240,17 @@ struct ImportJobLabel: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(isActive ? "Import in progress" : "")
     }
-    private var isActive: Bool { imports.activeJobID == job.id }
+    private var isActive: Bool { imports.activeJobID == job.id || imports.merges.isSaving(job.id) }
     private var activityDescription: String {
+        if imports.merges.isSaving(job.id) { return "Updating your subject…" }
         guard imports.progressJobID == job.id else { return "Processing…" }
         return imports.progress?.description ?? "Processing…"
     }
     private var status: String {
-        switch job.status {
-        case .review: (try? job.draft())?.topicOrganization == nil ? "Finish import" : "Ready to review"
+        if imports.merges.states[job.id]?.phase == .review { return "Review changes" }
+        if imports.merges.states[job.id]?.phase == .failed { return "Needs attention" }
+        return switch job.status {
+        case .review: "Ready to review"
         case .failed: "Needs attention"
         case .saved: "Saved"
         default: "Ready to resume"
@@ -288,12 +291,12 @@ struct ImportJobView: View {
     var body: some View {
         Group {
             if let job = jobs.first {
-                if readyForReview(job) {
+                if job.status == .review {
                     ImportReviewView(jobID: jobID, onClose: close)
                 } else if job.status == .saved {
                     VStack(spacing: 20) {
                         ContentUnavailableView("Added to your knowledge", systemImage: "checkmark.circle",
-                            description: Text("Your selected concepts are saved in their topics, with facts, connections, and sources."))
+                            description: Text(imports.merges.states[jobID]?.summary ?? "Your notes are saved in their topics, with facts, connections, and sources."))
                         Button("Done", action: close).buttonStyle(.borderedProminent)
                     }
                 } else {
@@ -315,7 +318,7 @@ struct ImportJobView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(jobs.first.map { $0.status != .saved } ?? false)
         .toolbar {
-            if let job = jobs.first, job.status != .saved, !readyForReview(job) {
+            if let job = jobs.first, job.status != .saved, job.status != .review {
                 ToolbarItem(placement: .topBarLeading) {
                     ImportBackButton(onKeep: keepAndClose, onDiscard: discardAndClose)
                 }
@@ -333,10 +336,6 @@ struct ImportJobView: View {
         }
         .task {
             if imports.models.isEmpty { await imports.loadModels() }
-            // Finish the missing import stage for drafts created before topic grouping was part of importing.
-            if let job = jobs.first, job.status == .review, !readyForReview(job), !imports.selectedModel.isEmpty {
-                imports.start(jobID: jobID)
-            }
         }
         .sheet(isPresented: $showModelPicker) {
             NavigationStack {
@@ -358,8 +357,4 @@ struct ImportJobView: View {
         catch { exitError = error.localizedDescription }
     }
     private func close() { if let onClose { onClose() } else { dismiss() } }
-    private func readyForReview(_ job: KnowledgeImportJob) -> Bool {
-        guard job.status == .review, let draft = try? job.draft() else { return false }
-        return draft.topicOrganization != nil && !ConceptResolutionPass.hasPending(draft)
-    }
 }

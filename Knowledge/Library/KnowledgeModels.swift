@@ -6,6 +6,7 @@ import SwiftData
     var name: String
     var createdAt: Date
     var currentRevisionID: UUID? = nil
+    var pendingUndoData: Data? = nil
     init(id: UUID = UUID(), name: String) { self.id = id; self.name = name; createdAt = Date() }
 }
 
@@ -17,9 +18,9 @@ import SwiftData
     var importedAt: Date
     var reviewNotes: [String]
     var isArchived = false
-    init(subjectID: UUID, source: PreparedSource, reviewNotes: [String] = []) throws {
+    init(subjectID: UUID, source: PreparedSource, reviewNotes: [String] = [], encodedPreparedData: Data? = nil) throws {
         id = source.id; self.subjectID = subjectID; title = source.title
-        preparedData = try JSONEncoder().encode(source); importedAt = Date(); self.reviewNotes = reviewNotes
+        preparedData = try encodedPreparedData ?? JSONEncoder().encode(source); importedAt = Date(); self.reviewNotes = reviewNotes
     }
     func prepared() throws -> PreparedSource { try JSONDecoder().decode(PreparedSource.self, from: preparedData) }
 }
@@ -42,18 +43,19 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var evidenceData: Data
     var isUserEdited: Bool
     var reviewNote: String?
-    var manualFieldsData: Data? = nil
+    var manualFields: [String] = []
     var isRetired = false
     var redirectID: UUID? = nil
-    init(subjectID: UUID, sourceID: UUID, draft: DraftConcept) throws {
+    init(subjectID: UUID, sourceID: UUID, draft: DraftConcept, encodedEvidenceData: Data? = nil, encodedWordingsData: Data? = nil) throws {
         id = draft.id; self.subjectID = subjectID; name = draft.name; aliases = draft.aliases
         explanation = draft.explanation; sourceIDs = [sourceID]
-        sourceWordingsData = try JSONEncoder().encode([SourceConceptWording(sourceID: sourceID,
+        sourceWordingsData = try encodedWordingsData ?? JSONEncoder().encode([SourceConceptWording(sourceID: sourceID,
             original: draft.original, edited: draft.isUserEdited ? .init(name: draft.name, aliases: draft.aliases, explanation: draft.explanation) : nil,
             resolutionSuggestion: draft.resolutionSuggestion?.status == .applied ? draft.resolutionSuggestion?.savedCopy(changesName: true) : nil)]
             + draft.otherSourceWordings.map { .init(sourceID: sourceID, original: $0, edited: nil) })
-        evidenceData = try JSONEncoder().encode(draft.evidence)
+        evidenceData = try encodedEvidenceData ?? JSONEncoder().encode(draft.evidence)
         isUserEdited = draft.isUserEdited; reviewNote = draft.reviewReason
+        manualFields = draft.isUserEdited ? ["name", "aliases", "explanation"] : []
     }
     func evidence() throws -> [EvidenceReference] { try JSONDecoder().decode([EvidenceReference].self, from: evidenceData) }
     func sourceWordings() throws -> [SourceConceptWording] { try JSONDecoder().decode([SourceConceptWording].self, from: sourceWordingsData) }
@@ -75,15 +77,16 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var evidenceData: Data
     var isUserEdited: Bool
     var reviewNote: String?
-    var manualFieldsData: Data? = nil
+    var manualFields: [String] = []
     var isRetired = false
     var redirectID: UUID? = nil
-    init(subjectID: UUID, sourceID: UUID, conceptID: UUID, draft: DraftFact) throws {
+    init(subjectID: UUID, sourceID: UUID, conceptID: UUID, draft: DraftFact, encodedEvidenceData: Data? = nil) throws {
         id = draft.id; self.subjectID = subjectID; self.sourceID = sourceID; self.conceptID = conceptID
         statement = draft.statement; kindRaw = draft.kind.rawValue; qualifications = draft.qualifications
         originalData = try JSONEncoder().encode(draft.original)
-        evidenceData = try JSONEncoder().encode(draft.evidence)
+        evidenceData = try encodedEvidenceData ?? JSONEncoder().encode(draft.evidence)
         isUserEdited = draft.isUserEdited; reviewNote = draft.reviewReason
+        manualFields = draft.isUserEdited ? ["statement", "kind", "qualifications", "conceptID"] : []
     }
     func evidence() throws -> [EvidenceReference] { try JSONDecoder().decode([EvidenceReference].self, from: evidenceData) }
     func original() throws -> FactWording { try JSONDecoder().decode(FactWording.self, from: originalData) }
@@ -103,16 +106,17 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var isInferred: Bool
     var isUserEdited: Bool
     var reviewNote: String?
-    var manualFieldsData: Data? = nil
+    var manualFields: [String] = []
     var isRetired = false
     var redirectID: UUID? = nil
-    init(subjectID: UUID, sourceID: UUID, from: UUID, to: UUID, draft: DraftConnection) throws {
+    init(subjectID: UUID, sourceID: UUID, from: UUID, to: UUID, draft: DraftConnection, encodedEvidenceData: Data? = nil) throws {
         id = draft.id; self.subjectID = subjectID; self.sourceID = sourceID
         fromConceptID = from; toConceptID = to; kindRaw = draft.kind.rawValue; explanation = draft.explanation
         supportingFactIDs = draft.supportingFactIDs
-        evidenceData = try JSONEncoder().encode(draft.evidence)
+        evidenceData = try encodedEvidenceData ?? JSONEncoder().encode(draft.evidence)
         originalData = try JSONEncoder().encode(draft.original)
         isInferred = draft.isInferred; isUserEdited = draft.isUserEdited; reviewNote = draft.reviewReason
+        manualFields = draft.isUserEdited ? ["fromID", "toID", "kind", "explanation"] : []
     }
     func evidence() throws -> [EvidenceReference] { try JSONDecoder().decode([EvidenceReference].self, from: evidenceData) }
     func original() throws -> ConnectionWording { try JSONDecoder().decode(ConnectionWording.self, from: originalData) }
@@ -133,13 +137,14 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var createdAt: Date
     var updatedAt: Date
     var savedAt: Date?
-    var branchData: Data? = nil
+    var branchData: Data
     var draftEditVersion = 0
 
-    init(subjectID: UUID, source: PreparedSource, accountID: String?, model: String) throws {
+    init(subjectID: UUID, source: PreparedSource, accountID: String?, model: String, baseRevisionID: UUID) throws {
         id = UUID(); self.subjectID = subjectID; sourceID = source.id; title = source.title
         preparedData = try JSONEncoder().encode(source)
         checkpointData = try JSONEncoder().encode(ImportCheckpoint())
+        branchData = try LibraryCoding.encode(DraftBranchState(baseRevisionID: baseRevisionID))
         statusRaw = ImportStatus.prepared.rawValue; self.accountID = accountID; self.model = model
         let timestamp = Date(); createdAt = timestamp; updatedAt = timestamp
     }
@@ -154,16 +159,13 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     }
     func draft() throws -> ImportDraft? {
         guard let draftData else { return nil }
-        var draft = try JSONDecoder().decode(ImportDraft.self, from: draftData)
-        draft.discardSelfConnections()
-        return draft
+        return try JSONDecoder().decode(ImportDraft.self, from: draftData)
     }
 }
 
 enum KnowledgePersistence {
-    /// Additive models use lightweight migration; the existing knowledge schema stays intact.
     static var schema: Schema {
-        Schema([Item.self, KnowledgeSubject.self, KnowledgeSource.self, KnowledgeConcept.self,
+        Schema([KnowledgeSubject.self, KnowledgeSource.self, KnowledgeConcept.self,
                 KnowledgeFact.self, KnowledgeConnection.self, KnowledgeImportJob.self,
                 KnowledgeTopic.self, KnowledgeConceptPlacement.self, LibraryEntityVersion.self,
                 SubjectRevisionRecord.self, KnowledgeContribution.self])

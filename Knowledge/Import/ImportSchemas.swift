@@ -1,6 +1,10 @@
 import Foundation
 
 nonisolated enum ImportSchemas {
+    static var libraryProposalSchema: SchemaValue {
+        .record(["entityID": .text, "field": .choices(["name", "explanation", "statement", "qualifications", "kind", "parentID", "topicID"]),
+            "value": .text, "reason": .text, "supportingFactIDs": .list(.text)])
+    }
     static let sourceFidelityPolicy = """
     Review extraction fidelity, not whether the notes provide a complete scientific explanation.
     Accept a claim that faithfully reflects the supplied text, including simplified, broad, or unqualified claims.
@@ -67,7 +71,7 @@ nonisolated enum ImportSchemas {
                 "kind": .choices(ConnectionKind.allCases.map(\.rawValue)), "explanation": .text,
                 "supportingFactIDs": .list(.text), "reviewReason": .nullableText
             ])),
-            "factReviews": .list(.record(["factID": .text, "reason": .text]))
+            "factReviews": .list(.record(["factID": .text, "reason": .text])), "updates": .list(libraryProposalSchema)
         ])
     }
 
@@ -86,7 +90,7 @@ nonisolated enum ImportSchemas {
                 "kind": .choices(ConnectionKind.allCases.map(\.rawValue)), "explanation": .text,
                 "supportingFactIDs": .list(factID), "reviewReason": .nullableText
             ])),
-            "factReviews": .list(.record(["factID": factID, "reason": .text]))
+            "factReviews": .list(.record(["factID": factID, "reason": .text])), "updates": .list(libraryProposalSchema)
         ])
     }
 
@@ -163,6 +167,11 @@ nonisolated enum ImportSchemas {
     Do not mechanically concatenate concept names and type labels, or strengthen the relationship just to make it read smoothly.
     Connect two distinct concepts only. Omit self-connections and connections whose endpoints become the same concept after merging.
     Do not repeat connections already supplied. Do not imply complete lists, exclusive functions, or causality without supporting facts.
+    Optional updates may improve a supplied existing concept's name/explanation, an existing fact's statement/qualifications/kind,
+    or a supplied saved connection's explanation/kind. Use its entityID, a supported field, concise value and reason,
+    and supplied supportingFactIDs. Preserve the SAME meaning, qualifications and named attribution; do not erase contradictory claims.
+    Do not propose cosmetic changes without a useful improvement. Return updates [] when none are needed.
+    Never propose an update using an entry not supplied in this input. Original source wordings are retained separately.
     Every referenced ID must appear in the input. Return only the requested JSON.
     """
 }

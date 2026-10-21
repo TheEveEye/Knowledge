@@ -39,10 +39,16 @@ struct KnowledgeApp: App {
                 .environment(imports)
                 .onChange(of: authentication.activeAccount?.id) { _, _ in imports.accountChanged() }
                 .onChange(of: authentication.isBusy) { _, busy in
-                    if busy { imports.pause(message: "Your ChatGPT connection is changing. Your draft was kept.") }
+                    if busy {
+                        imports.merges.interrupt()
+                        imports.pause(message: "Your ChatGPT connection is changing. Your draft was kept.")
+                    }
                 }
                 .onChange(of: authentication.activeAccount?.credentials?.planEnabled) { _, enabled in
-                    if enabled != true { imports.pause(message: "ChatGPT plan permission changed. Your draft was kept.") }
+                    if enabled != true {
+                        imports.merges.interrupt()
+                        imports.pause(message: "ChatGPT plan permission changed. Your draft was kept.")
+                    }
                 }
     }
 }

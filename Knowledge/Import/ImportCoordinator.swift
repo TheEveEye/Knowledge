@@ -13,6 +13,7 @@ import SwiftData
     var modelError: String?
     var message: String?
     @ObservationIgnored let repository: KnowledgeRepository
+    let merges: LibraryMergeCoordinator
     @ObservationIgnored private let authentication: AuthenticationStore
     @ObservationIgnored private let client: any ChatGPTPlanRequesting
     @ObservationIgnored private let extractor: any ConceptExtractor
@@ -31,6 +32,7 @@ import SwiftData
         let repository = KnowledgeRepository(container: container)
         self.repository = repository
         let client = client ?? PlanUsageAPIClient()
+        self.merges = LibraryMergeCoordinator(repository: repository, authentication: authentication, client: client)
         self.client = client; self.extractor = extractor ?? ChatGPTConceptExtractor(client: client); self.preferences = preferences
     }
 
@@ -88,14 +90,11 @@ import SwiftData
               !selectedModel.isEmpty else { message = "Connect your ChatGPT plan and choose a model before processing."; return }
         do {
             let job = try repository.job(jobID)
-            guard job.status != .saved else { return }
+            guard job.status != .saved, job.status != .review else { return }
             let source = try job.prepared(), checkpoint = try job.checkpoint()
-            let storedDraft = try job.draft()
-            // A paused resolution pass may be newer than the last reviewed draft.
-            let existingDraft = job.status != .review && checkpoint.draft?.isComplete == true ? checkpoint.draft : storedDraft
-            if job.status == .review, let existingDraft, existingDraft.topicOrganization != nil,
-               !ConceptResolutionPass.hasPending(existingDraft) { return }
-            let context = try repository.snapshot(subjectID: job.subjectID)
+            let existingDraft = checkpoint.draft
+            let base = try repository.baseSnapshot(for: job)
+            let context = base.extractionContext()
             job.accountID = accountID; job.model = selectedModel
             try repository.update(jobID: jobID, status: existingDraft?.isComplete == true ? .connecting : .extracting)
             let initialFeed = progressJobID == jobID ? (pendingProgress ?? progress)?.feed ?? [] : []
@@ -108,7 +107,7 @@ import SwiftData
                 do {
                     var draft: ImportDraft
                     if let existingDraft, existingDraft.isComplete {
-                        // Older reviewed drafts keep their edits and only finish the missing import stage.
+                        // Resume resolution or organization from the most recent checkpoint.
                         draft = existingDraft
                     } else {
                         draft = try await self.extractor.extract(source: source, context: context, model: model, checkpoint: checkpoint,
@@ -163,7 +162,7 @@ import SwiftData
                     if draft.topicOrganization == nil {
                         try self.repository.update(jobID: jobID, status: .connecting)
                         let topicSnapshot = try self.repository.importOrganizationSnapshot(draft: draft,
-                            source: source, subjectID: context.subjectID)
+                            source: source, subjectID: context.subjectID, base: base)
                         let overviewConcepts = draft.concepts.map { (id: $0.id, name: $0.name) }
                         let organizationTotal = topicSnapshot.candidates.count
                         let plan = try await ChatGPTTopicOrganizer(client: self.client).organize(topicSnapshot, model: model,
@@ -243,6 +242,7 @@ import SwiftData
         guard try repository.job(jobID).status != .saved else {
             throw ImportError.invalidSelection("This import has already been saved to your library.")
         }
+        merges.cancel(jobID: jobID)
         if activeJobID == jobID { pause() }
         let cleanupMessage = try repository.deleteDraft(jobID: jobID)
         if progressJobID == jobID {
@@ -253,6 +253,7 @@ import SwiftData
     }
 
     func deleteSubject(subjectID: UUID) throws {
+        merges.cancelSubject(subjectID)
         let jobs = try repository.container.mainContext.fetch(
             FetchDescriptor<KnowledgeImportJob>(predicate: #Predicate { $0.subjectID == subjectID }))
         let jobIDs = Set(jobs.map(\.id))
@@ -266,15 +267,17 @@ import SwiftData
     }
 
     func accountChanged() {
+        merges.interrupt()
         pause(message: ImportError.accountChanged.localizedDescription)
         catalogRunID = UUID(); isLoadingModels = false
         models = []; selectedModel = ""; modelError = nil
     }
-    func sceneDidEnterBackground() { pause(message: "Processing paused in the background. Checked batches were kept.") }
-
-    @discardableResult func save(_ draft: ImportDraft, jobID: UUID) throws -> UUID {
-        try repository.commit(draft, jobID: jobID)
+    func sceneDidEnterBackground() {
+        merges.interrupt()
+        pause(message: "Processing paused in the background. Checked batches were kept.")
     }
+
+    func save(_ draft: ImportDraft, jobID: UUID) { merges.save(draft, jobID: jobID, model: selectedModel) }
 
     /// UI updates coalesce across all workers. Parsing and checkpoint writes are never throttled.
     private func receive(_ snapshot: ExtractionProgress, run: UUID) {
@@ -297,18 +300,18 @@ import SwiftData
     func progressSnapshot(for job: KnowledgeImportJob) throws -> ExtractionProgress {
         if progressJobID == job.id, let progress { return progress }
         let source = try job.prepared(), checkpoint = try job.checkpoint()
-        let chunks = checkpoint.chunks(for: source)
+        let chunks = SourcePreparation.chunks(for: source)
         try checkpoint.validateIndices(batchCount: chunks.count)
         let run = ImportRunProgress(source: source, chunks: chunks, checkpoint: checkpoint, report: { _ in })
         if let draft = checkpoint.draft {
             let total = (checkpoint.parts.flatMap(\.concepts).count + 11) / 12
             run.reconciling(draft, completed: checkpoint.reconciledPartCount, total: total,
-                context: try repository.snapshot(subjectID: job.subjectID))
+                context: try repository.baseSnapshot(for: job).extractionContext())
         }
         var snapshot = run.value
         if let draft = checkpoint.draft, draft.isComplete, ConceptResolutionPass.hasPending(draft) {
             let candidates = ConceptResolutionPass.candidateIDs(in: draft)
-            let reviewed = Set(draft.resolutionReviewedConceptIDs ?? [])
+            let reviewed = Set(draft.resolutionReviewedConceptIDs)
             snapshot.isResolving = true
             snapshot.resolutionCompleted = candidates.filter { reviewed.contains($0) }.count
             snapshot.resolutionTotal = candidates.count

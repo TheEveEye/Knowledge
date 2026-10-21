@@ -33,6 +33,13 @@ nonisolated struct LibraryRecord: Codable, Sendable, Equatable, Identifiable {
         return kind == .placement ? "Topic assignment" : kind.rawValue.capitalized
     }
     var detail: String { kind == .fact ? text("qualifications") : text("explanation") }
+    private enum CodingKeys: String, CodingKey { case id, kind, fields, protectedFields, isRetired, redirectID }
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id); try values.encode(kind, forKey: .kind); try values.encode(fields, forKey: .fields)
+        try values.encode(protectedFields.sorted(), forKey: .protectedFields); try values.encode(isRetired, forKey: .isRetired)
+        try values.encodeIfPresent(redirectID, forKey: .redirectID)
+    }
 }
 
 nonisolated struct SubjectVersionSnapshot: Codable, Sendable, Equatable {
@@ -55,11 +62,16 @@ nonisolated struct SubjectVersionSnapshot: Codable, Sendable, Equatable {
     }
     func extractionContext() -> SubjectSnapshot {
         .init(subjectID: subjectID, name: name,
-            concepts: active(.concept).map { .init(id: $0.id, name: $0.text("name"), aliases: $0.strings("aliases"), explanation: $0.text("explanation")) },
+            concepts: active(.concept).map {
+                .init(id: $0.id, name: $0.text("name"), aliases: $0.strings("aliases"), explanation: $0.text("explanation"), namingNote: $0.text("namingNote").isEmpty ? nil : $0.text("namingNote"))
+            },
             facts: active(.fact).compactMap { record in
                 guard let owner = record.reference("conceptID"), let kind = FactKind(rawValue: record.text("kind")) else { return nil }
                 return .init(id: record.id, conceptID: owner, statement: record.text("statement"), kind: kind,
                     qualifications: record.text("qualifications"), evidence: record.evidence)
+            }, connections: active(.connection).compactMap { record in
+                guard let from = record.reference("fromID"), let to = record.reference("toID"), let kind = ConnectionKind(rawValue: record.text("kind")) else { return nil }
+                return .init(id: record.id, fromConceptID: from, toConceptID: to, kind: kind, explanation: record.text("explanation"), supportingFactIDs: record.references("supportingFactIDs"))
             })
     }
     func organizationContext() -> TopicOrganizationSnapshot {
@@ -85,6 +97,7 @@ nonisolated struct LibraryChangeSet: Codable, Sendable, Equatable {
     let draftVersion: Int
     let fingerprint: String
     var changes: [LibraryChange]
+    var explanations: [String] = []
     static func diff(from before: SubjectVersionSnapshot, to after: SubjectVersionSnapshot, draftVersion: Int = 0, fingerprint: String = "") -> Self {
         .init(baseRevisionID: before.revisionID, draftVersion: draftVersion, fingerprint: fingerprint,
             changes: Set(before.records.keys).union(after.records.keys).sorted().compactMap { key in
@@ -105,6 +118,8 @@ nonisolated struct LibraryMergeConflict: Codable, Sendable, Equatable, Identifia
     let current: String
     let incoming: String
     let proposedValue: LibraryValue?
+    var originalValue: LibraryValue? = nil
+    var combination: [LibraryChange]? = nil
     var choice: LibraryReviewChoice? = nil
 }
 
@@ -119,21 +134,42 @@ nonisolated struct MergePlan: Codable, Sendable, Equatable {
     var identityMappings: [String: UUID] = [:]
     var undoesRevisionID: UUID? = nil
     var retainedCount = 0
+    var checkedSemanticKeys: [String] = []
     var needsReview: Bool { conflicts.contains { $0.choice == nil } }
     mutating func choose(_ choice: LibraryReviewChoice, conflictID: String) {
         guard let index = conflicts.firstIndex(where: { $0.id == conflictID }) else { return }
         conflicts[index].choice = choice
         let conflict = conflicts[index]
-        if choice == .incoming { result.records[conflict.key]?.fields[conflict.field] = conflict.proposedValue }
+        if let changes = conflict.combination {
+            // Two decisions can affect different endpoints of the same connection. Apply only
+            // this decision's fields, so choosing either order preserves the other decision.
+            for change in changes {
+                let target = choice == .incoming ? change.after : change.before
+                if let before = change.before, let after = change.after, var record = result.records[change.key], let target {
+                    for field in Set(before.fields.keys).union(after.fields.keys) where before.fields[field] != after.fields[field] {
+                        record.fields[field] = target.fields[field]
+                    }
+                    if before.isRetired != after.isRetired { record.isRetired = target.isRetired }
+                    if before.redirectID != after.redirectID { record.redirectID = target.redirectID }
+                    let changedProtection = before.protectedFields.symmetricDifference(after.protectedFields)
+                    record.protectedFields.subtract(changedProtection)
+                    record.protectedFields.formUnion(target.protectedFields.intersection(changedProtection))
+                    result.records[change.key] = record
+                } else { result.records[change.key] = target }
+            }
+        } else {
+            result.records[conflict.key]?.fields[conflict.field] = choice == .incoming ? conflict.proposedValue : conflict.originalValue
+        }
     }
 }
 
 nonisolated struct DraftBranchState: Codable, Sendable {
-    var baseRevisionID: UUID?
+    let baseRevisionID: UUID
     var operationID = UUID()
     var changeSet: LibraryChangeSet? = nil
     var plan: MergePlan? = nil
     var explanations: [String] = []
+    var semanticResults: [LibrarySemanticResult]? = nil
 }
 
 nonisolated struct LibraryContentProposal: Codable, Sendable {
@@ -156,6 +192,7 @@ nonisolated enum LibraryMergeError: Error, LocalizedError {
 }
 
 nonisolated enum LibraryCoding {
+    @concurrent static func encodeAsync<T: Encodable & Sendable>(_ value: T) async throws -> Data { try encode(value) }
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
@@ -188,6 +225,7 @@ nonisolated enum LibraryCoding {
     var mappingsData: Data
     var jobID: UUID?
     var undoesRevisionID: UUID?
+    var summary: String? = nil
     init(id: UUID, operationID: UUID, subjectID: UUID, parentID: UUID?, origin: String, title: String,
         manifestData: Data, changesData: Data, explanationsData: Data, mappingsData: Data, jobID: UUID? = nil, undoesRevisionID: UUID? = nil) {
         self.id = id; self.operationID = operationID; self.subjectID = subjectID; self.parentID = parentID

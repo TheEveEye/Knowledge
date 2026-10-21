@@ -35,7 +35,7 @@ struct ConceptHierarchySection: View {
         self.subject = subject; self.concepts = concepts; self.search = search
         self.actions = actions
         let id = subject.id
-        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == id })
+        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == id && !$0.isRetired })
         _placements = Query(filter: #Predicate<KnowledgeConceptPlacement> { $0.subjectID == id })
         _expandedTopicIDs = AppStorage(wrappedValue: "", "knowledge.expandedTopics." + id.uuidString)
     }
@@ -90,23 +90,26 @@ struct ConceptHierarchySection: View {
     }
 }
 
-struct TopicOutlineMenu: View {
+struct SubjectOptionsMenu: View {
     let subjectID: UUID
     @Query private var topics: [KnowledgeTopic]
     @AppStorage private var expandedTopicIDs: String
+    @State private var showHistory = false
     init(subjectID: UUID) {
         self.subjectID = subjectID
-        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID })
+        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID && !$0.isRetired })
         _expandedTopicIDs = AppStorage(wrappedValue: "", "knowledge.expandedTopics." + subjectID.uuidString)
     }
     var body: some View {
-        Menu("Topics", systemImage: "folder") {
+        Menu("Subject", systemImage: "ellipsis") {
             Button("Expand all", systemImage: "rectangle.expand.vertical") {
                 expandedTopicIDs = topics.map { $0.id.uuidString }.sorted().joined(separator: ",")
-            }
-            Button("Collapse all", systemImage: "rectangle.compress.vertical") { expandedTopicIDs = "" }
+            }.disabled(topics.isEmpty)
+            Button("Collapse all", systemImage: "rectangle.compress.vertical") { expandedTopicIDs = "" }.disabled(topics.isEmpty)
+            Divider()
+            Button("History", systemImage: "clock.arrow.circlepath") { showHistory = true }
         }
-        .disabled(topics.isEmpty)
+        .sheet(isPresented: $showHistory) { NavigationStack { LibraryHistoryView(subjectID: subjectID) } }
     }
 }
 
@@ -188,7 +191,7 @@ struct MoveConceptTopicView: View {
     init(concept: KnowledgeConcept) {
         self.concept = concept
         let subjectID = concept.subjectID, conceptID = concept.id
-        _savedTopics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID })
+        _savedTopics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID && !$0.isRetired })
         _placements = Query(filter: #Predicate<KnowledgeConceptPlacement> { $0.conceptID == conceptID })
     }
     private var topics: [TopicRecord] { savedTopics.map(\.record) }
@@ -239,7 +242,7 @@ struct ConceptTopicSection: View {
     init(concept: KnowledgeConcept) {
         self.concept = concept
         let subjectID = concept.subjectID, conceptID = concept.id
-        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID })
+        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID && !$0.isRetired })
         _placements = Query(filter: #Predicate<KnowledgeConceptPlacement> { $0.conceptID == conceptID })
     }
     var body: some View {

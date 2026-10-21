@@ -21,8 +21,8 @@ struct SubjectLibraryView: View {
     init(subject: KnowledgeSubject) {
         self.subject = subject
         let id = subject.id
-        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == id }, sort: \KnowledgeConcept.name)
-        _sources = Query(filter: #Predicate<KnowledgeSource> { $0.subjectID == id }, sort: \KnowledgeSource.importedAt, order: .reverse)
+        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == id && !$0.isRetired }, sort: \KnowledgeConcept.name)
+        _sources = Query(filter: #Predicate<KnowledgeSource> { $0.subjectID == id && !$0.isArchived }, sort: \KnowledgeSource.importedAt, order: .reverse)
         _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.subjectID == id }, sort: \KnowledgeImportJob.updatedAt, order: .reverse)
     }
     var body: some View {
@@ -56,7 +56,7 @@ struct SubjectLibraryView: View {
         .searchable(text: $search, prompt: "Find a concept or alias")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                TopicOutlineMenu(subjectID: subject.id)
+                SubjectOptionsMenu(subjectID: subject.id)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Subject settings", systemImage: "gearshape") { showSettings = true }
@@ -180,9 +180,9 @@ struct ConceptDetailView: View {
     init(concept: KnowledgeConcept) {
         self.concept = concept
         let id = concept.id, subjectID = concept.subjectID
-        _facts = Query(filter: #Predicate<KnowledgeFact> { $0.conceptID == id })
-        _connections = Query(filter: #Predicate<KnowledgeConnection> { $0.fromConceptID == id || $0.toConceptID == id })
-        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == subjectID })
+        _facts = Query(filter: #Predicate<KnowledgeFact> { $0.conceptID == id && !$0.isRetired })
+        _connections = Query(filter: #Predicate<KnowledgeConnection> { ($0.fromConceptID == id || $0.toConceptID == id) && !$0.isRetired })
+        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == subjectID && !$0.isRetired })
     }
     var body: some View {
         List {
@@ -198,7 +198,7 @@ struct ConceptDetailView: View {
                     ForEach(Array(resolutionSuggestions.enumerated()), id: \.offset) { _, suggestion in
                         VStack(alignment: .leading, spacing: 12) {
                             ConceptResolutionProvenance(suggestion: suggestion)
-                            if suggestion.changedLibraryName == false, suggestion.suggestedName != nil {
+                            if !suggestion.changedLibraryName, suggestion.suggestedName != nil {
                                 Text("The existing concept’s name was retained when this source was merged.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }

@@ -15,10 +15,13 @@ struct ImportReviewView: View {
     @State private var error: String?
     @State private var evidence: EvidencePresentation?
     @State private var organizationContext: TopicOrganizationSnapshot?
+    @State private var showChanges = false
 
     var body: some View {
         Group {
-            if loaded { review }
+            if imports.merges.isSaving(jobID) {
+                ImportActivityLabel(title: "Updating your subject…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if loaded { review }
             else { ImportActivityLabel(title: "Loading your draft…") }
         }
         .navigationTitle("Review import")
@@ -29,9 +32,8 @@ struct ImportReviewView: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    do { _ = try imports.save(draft, jobID: jobID); saved = true }
-                    catch { self.error = error.localizedDescription }
-                }.disabled(!loaded || saved)
+                    imports.save(draft, jobID: jobID)
+                }.disabled(!loaded || saved || imports.merges.isSaving(jobID))
             }
         }
         .task {
@@ -39,8 +41,11 @@ struct ImportReviewView: View {
             do {
                 let job = try imports.repository.job(jobID)
                 guard let value = try job.draft() else { throw ImportError.damagedCheckpoint }
-                draft = value; source = try job.prepared(); context = try imports.repository.snapshot(subjectID: job.subjectID)
-                organizationContext = try imports.repository.organizationSnapshot(subjectID: job.subjectID)
+                let base = try imports.repository.baseSnapshot(for: job)
+                draft = value; source = try job.prepared(); context = base.extractionContext()
+                organizationContext = base.organizationContext()
+                imports.merges.restore(jobID: jobID)
+                showChanges = imports.merges.states[jobID]?.phase == .review
                 loaded = true
             } catch { self.error = error.localizedDescription }
         }
@@ -53,6 +58,11 @@ struct ImportReviewView: View {
             if loaded, !saved, !discarded, !persist() { imports.message = error }
         }
         .sheet(item: $evidence) { EvidenceView(presentation: $0) }
+        .sheet(isPresented: $showChanges) { LibraryChangesReviewView(requestID: jobID) }
+        .onChange(of: imports.merges.states[jobID]?.phase) { _, phase in
+            if phase == .review { showChanges = true }
+            if phase == .saved { saved = true }
+        }
         .alert("Review", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK", role: .cancel) { error = nil }
         } message: { Text(error ?? "") }
@@ -61,6 +71,12 @@ struct ImportReviewView: View {
     private var review: some View {
         let issues = reviewIssues
         return Form {
+            if let state = imports.merges.states[jobID] {
+                if let error = state.error {
+                    Section { Text(error); Button("Try again") { imports.save(draft, jobID: jobID) } }
+                }
+                if state.phase == .review || state.plan?.conflicts.isEmpty == false { Section { Button("Review changes") { showChanges = true } } }
+            }
             Section {
                 Text(source?.title ?? "Notes").font(.headline)
                 Text("\(draft.concepts.filter(\.selected).count) concepts · \(draft.facts.filter(\.selected).count) facts · \(draft.connections.filter(\.selected).count) connections")
@@ -126,7 +142,8 @@ struct ImportReviewView: View {
                     }
                 }
             }
-            if let excluded = draft.excludedConnections, !excluded.isEmpty {
+            if !draft.excludedConnections.isEmpty {
+                let excluded = draft.excludedConnections
                 Section("Connection suggestions needing review") {
                     Text("These suggestions remain excluded and need review. Inspect each reason and its supporting passages.")
                         .font(.callout).foregroundStyle(.secondary)
@@ -141,7 +158,8 @@ struct ImportReviewView: View {
                     }
                 }
             }
-            if let notes = draft.processingNotes, !notes.isEmpty {
+            if !draft.processingNotes.isEmpty {
+                let notes = draft.processingNotes
                 Section("Import notes") {
                     ForEach(notes.indices, id: \.self) { index in Text(notes[index]).font(.callout).foregroundStyle(.secondary) }
                 }
@@ -241,7 +259,7 @@ struct ImportReviewView: View {
                         + draft.name(for: connection.toConceptID, in: context), reason: reason))
             }
         }
-        for connection in draft.excludedConnections ?? [] {
+        for connection in draft.excludedConnections {
             issues.append(.init(target: .excludedConnection(connection.id), category: "Excluded connection",
                 title: connection.title, reason: connection.reason))
         }
@@ -272,7 +290,7 @@ struct ImportReviewView: View {
             case .connection(let id):
                 if let index = draft.connections.firstIndex(where: { $0.id == id }) { connectionReview(index) }
             case .excludedConnection(let id):
-                if let value = draft.excludedConnections?.first(where: { $0.id == id }) {
+                if let value = draft.excludedConnections.first(where: { $0.id == id }) {
                     Text(value.title).font(.headline)
                     Text(value.originalExplanation)
                     ReviewFlag(text: value.reason)
@@ -374,7 +392,7 @@ struct ImportReviewView: View {
             + draft.connections.indices.filter { draft.connections[$0].reviewReason == nil }
     }
 
-    private func edited() { revision += 1 }
+    private func edited() { revision += 1; imports.merges.invalidateReview(jobID) }
     private func conceptBinding(_ index: Int) -> Binding<DraftConcept> {
         .init(get: { draft.concepts[index] }, set: { draft.concepts[index] = $0; edited() })
     }

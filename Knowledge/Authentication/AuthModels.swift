@@ -113,12 +113,6 @@ nonisolated struct OAuthTokenResponse: Sendable {
     func verifyRefreshedIdentity(idToken: String, clientID: String, receivedAt: Date?) async throws -> ChatGPTIdentity
 }
 
-extension ChatGPTAuthenticating {
-    func verifyRefreshedIdentity(idToken: String, clientID: String, receivedAt: Date?) async throws -> ChatGPTIdentity {
-        try await verifyIdentity(idToken: idToken, clientID: clientID, nonce: nil)
-    }
-}
-
 @MainActor protocol ChatGPTBrowserAuthenticating {
     func authorize(_ request: OAuthBrowserRequest) async throws -> OAuthAuthorization
     func cancel()

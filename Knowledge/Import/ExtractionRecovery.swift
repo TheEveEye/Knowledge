@@ -65,7 +65,7 @@ nonisolated enum ExtractionRecovery {
                 let id = UUID()
                 let task = PendingConnectionPatch(key: "suggestion_\(index)", suggestion: connection, exclusionID: id)
                 connections.append(task)
-                draft.excludedConnections = (draft.excludedConnections ?? []) + [exclusion(task, concepts: concepts, facts: facts,
+                draft.excludedConnections = draft.excludedConnections + [exclusion(task, concepts: concepts, facts: facts,
                     draft: draft, reason: "This suggestion failed reference checks and is awaiting a patch.")]
             }
         }
@@ -98,11 +98,11 @@ nonisolated enum ExtractionRecovery {
         var draft = original
         let expected = Set(patch.connections.map(\.key))
         if !Set(payload.decisions.keys).isSubset(of: expected) {
-            draft.processingNotes = (draft.processingNotes ?? []) + ["The connection patch returned unexpected suggestions; they were ignored."]
+            draft.processingNotes = draft.processingNotes + ["The connection patch returned unexpected suggestions; they were ignored."]
         }
         for task in patch.connections {
             if task.suggestion.fromConceptID == task.suggestion.toConceptID {
-                draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+                draft.excludedConnections.removeAll { $0.id == task.exclusionID }
                 continue
             }
             var reason = "The patch did not resolve this suggestion. It remains excluded for review."
@@ -111,7 +111,7 @@ nonisolated enum ExtractionRecovery {
                     reason = ImportValidator.reason(decision.reason) ?? reason
                 } else if decision.disposition == "correct", let from = decision.fromConceptID, let to = decision.toConceptID {
                     guard from != to else {
-                        draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+                        draft.excludedConnections.removeAll { $0.id == task.exclusionID }
                         continue
                     }
                     let corrected = ExtractedConnection(id: task.suggestion.id, fromConceptID: from, toConceptID: to,
@@ -121,7 +121,7 @@ nonisolated enum ExtractionRecovery {
                         let connection = try checkedConnection(corrected, concepts: patch.concepts, facts: patch.facts,
                             draft: original, repaired: true)
                         draft.connections.append(connection)
-                        draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+                        draft.excludedConnections.removeAll { $0.id == task.exclusionID }
                         continue
                     } catch { reason = "The correction still has invalid references or content. This suggestion remains excluded for review." }
                 }
@@ -138,10 +138,10 @@ nonisolated enum ExtractionRecovery {
     }
 
     private static func replaceExclusion(_ task: PendingConnectionPatch, patch: PendingImportPatch, draft: inout ImportDraft, reason: String) {
-        draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+        draft.excludedConnections.removeAll { $0.id == task.exclusionID }
         guard task.suggestion.fromConceptID != task.suggestion.toConceptID else { return }
         let review = exclusion(task, concepts: patch.concepts, facts: patch.facts, draft: draft, reason: reason)
-        draft.excludedConnections = (draft.excludedConnections ?? []) + [review]
+        draft.excludedConnections = draft.excludedConnections + [review]
     }
 
     private static func exclusion(_ task: PendingConnectionPatch, concepts: [ExtractedConcept], facts: [ExtractedFact],

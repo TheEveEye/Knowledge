@@ -21,6 +21,7 @@ nonisolated struct ReconciliationInput: Codable, Sendable {
     var candidates: [SavedConceptSummary]
     var facts: [SavedFactSummary]
     let existingConnections: [DraftConnection]
+    var savedConnections: [SavedConnectionSummary] = []
 }
 
 nonisolated private struct ImportBatchResult: Sendable {
@@ -50,10 +51,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
                  onCheckpoint: @escaping @MainActor (ImportCheckpoint) throws -> Void,
                  onProgress: @escaping @MainActor (ExtractionProgress) -> Void) async throws -> ImportDraft {
         var checkpoint = original
-        if checkpoint.chunking == nil, checkpoint.parts.isEmpty, checkpoint.draft == nil {
-            checkpoint.chunking = .compact
-        }
-        let chunks = checkpoint.chunks(for: source)
+        let chunks = SourcePreparation.chunks(for: source)
         try checkpoint.validateIndices(batchCount: chunks.count)
         let emptyContext = SubjectSnapshot(subjectID: context.subjectID, name: context.name, concepts: [], facts: [])
         for completion in checkpoint.completedBatches {
@@ -183,8 +181,8 @@ nonisolated private enum ImportBatchOutcome: Sendable {
                     passes.append(.init(scope: scope, payload: recovered.payload, draft: extra,
                         conceptOrdinals: recovered.conceptOrdinals, factOrdinals: recovered.factOrdinals))
                     part.concepts += extra.concepts; part.facts += extra.facts; part.connections += extra.connections
-                    part.excludedConnections = (part.excludedConnections ?? []) + (extra.excludedConnections ?? [])
-                    part.processingNotes = (part.processingNotes ?? []) + (extra.processingNotes ?? [])
+                    part.excludedConnections = part.excludedConnections + extra.excludedConnections
+                    part.processingNotes = part.processingNotes + extra.processingNotes
                     // Only one source patch pass; unresolved passages remain honest, inspectable coverage gaps.
                     let unresolved = Set(recovered.patch?.passageIDs ?? [])
                     let coverage = extra.coverage.map { value in
@@ -194,7 +192,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
                     part.coverage = part.coverage.filter { !required.contains($0.segmentID) } + coverage
                 } catch {
                     if Self.stopsImport(error) { throw error }
-                    part.processingNotes = (part.processingNotes ?? []) + ["A source patch could not be completed. Uncertain passages remain available for review. \(error.localizedDescription)"]
+                    part.processingNotes = part.processingNotes + ["A source patch could not be completed. Uncertain passages remain available for review. \(error.localizedDescription)"]
                 }
             }
             try Task.checkCancellation()
@@ -210,8 +208,8 @@ nonisolated private enum ImportBatchOutcome: Sendable {
             checkpoint.draft = ImportDraft(sourceID: source.id,
                 concepts: checkpoint.parts.flatMap(\.concepts), facts: checkpoint.parts.flatMap(\.facts),
                 connections: checkpoint.parts.flatMap(\.connections), coverage: checkpoint.parts.flatMap(\.coverage),
-                excludedConnections: checkpoint.parts.flatMap { $0.excludedConnections ?? [] },
-                processingNotes: checkpoint.parts.flatMap { $0.processingNotes ?? [] })
+                excludedConnections: checkpoint.parts.flatMap { $0.excludedConnections },
+                processingNotes: checkpoint.parts.flatMap { $0.processingNotes })
             try onCheckpoint(checkpoint)
         }
         // Immutable original IDs keep the reconciliation cursor stable after duplicates are combined.
@@ -237,7 +235,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
                     draft = try Reconciliation.applyRecovering(payload, to: draft, input: input, context: context)
                 } catch let error as ImportError {
                     guard case .invalidExtraction = error else { throw error }
-                    draft.processingNotes = (draft.processingNotes ?? []) + [
+                    draft.processingNotes = draft.processingNotes + [
                         "This reconciliation response could not be validated. Source concepts and facts were kept; no changes from this response were applied."
                     ]
                 }
@@ -312,7 +310,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
               Set(patch.passageIDs).isSubset(of: Set(chunk.requiredSegmentIDs)),
               Set(patch.connections.map(\.key)).count == patch.connections.count,
               patch.connections.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 100 }),
-              patch.connections.allSatisfy({ task in draft.excludedConnections?.contains { $0.id == task.exclusionID } == true }),
+              patch.connections.allSatisfy({ task in draft.excludedConnections.contains { $0.id == task.exclusionID } }),
               zip(patch.concepts, draft.concepts).allSatisfy({ $0.0.name == $0.1.original.name && $0.0.aliases == $0.1.original.aliases
                   && $0.0.explanation == $0.1.original.explanation
                   && $0.0.evidence.map { EvidenceReference(sourceID: sourceID, segmentID: $0.segmentID, quote: $0.quote) } == $0.1.evidence }),
@@ -393,6 +391,11 @@ nonisolated private enum ImportBatchOutcome: Sendable {
             next.facts += extra
             if try JSONEncoder().encode(next).count <= 80_000 { input = next }
         }
+        let included = Set((input.batchConcepts + input.candidates).map(\.id))
+        for connection in context.connections.filter({ included.contains($0.fromConceptID) && included.contains($0.toConceptID) }).prefix(24) {
+            var next = input; next.savedConnections.append(connection)
+            if try JSONEncoder().encode(next).count <= 80_000 { input = next }
+        }
         return input
     }
 }
@@ -443,7 +446,7 @@ nonisolated enum Reconciliation {
         }
         for id in internalMap.keys { _ = try canonical(id) }
         var draft = original
-        draft.processingNotes = (draft.processingNotes ?? []) + notes
+        draft.processingNotes = draft.processingNotes + notes
         for decision in decisions {
             guard let index = draft.concepts.firstIndex(where: { $0.id == decision.conceptID }) else {
                 throw ImportValidator.invalid("A concept changed during reconciliation.")

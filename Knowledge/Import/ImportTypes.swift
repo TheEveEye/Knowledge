@@ -157,30 +157,30 @@ nonisolated struct ImportDraft: Codable, Sendable {
     var connections: [DraftConnection]
     var coverage: [CoverageDecision]
     var existingFactReviews: [FactReview] = []
-    var excludedConnections: [ExcludedConnectionReview]? = nil
-    var processingNotes: [String]? = nil
+    var excludedConnections: [ExcludedConnectionReview] = []
+    var processingNotes: [String] = []
     var topicOrganization: TopicOrganizationPlan? = nil
     var isComplete: Bool = false
-    var resolutionReviewedConceptIDs: [UUID]? = nil
+    var resolutionReviewedConceptIDs: [UUID] = []
     /// User acknowledgements preserve the model's coverage decision and original reason.
-    var reviewedPassageIDs: [String]? = nil
-    var libraryProposals: [LibraryContentProposal]? = nil
+    var reviewedPassageIDs: [String] = []
+    var libraryProposals: [LibraryContentProposal] = []
 
     var passagesNeedingReview: [CoverageDecision] {
-        let reviewed = Set(reviewedPassageIDs ?? [])
+        let reviewed = Set(reviewedPassageIDs)
         return coverage.filter { $0.disposition == .uncertain && !reviewed.contains($0.segmentID) }
     }
 
     func isPassageReviewed(_ segmentID: String) -> Bool {
-        reviewedPassageIDs?.contains(segmentID) == true
+        reviewedPassageIDs.contains(segmentID)
     }
 
     mutating func setPassageReviewed(_ segmentID: String, reviewed: Bool) {
         guard coverage.contains(where: { $0.segmentID == segmentID && $0.disposition == .uncertain }) else { return }
-        var ids = reviewedPassageIDs ?? []
+        var ids = reviewedPassageIDs
         ids.removeAll { $0 == segmentID }
         if reviewed { ids.append(segmentID) }
-        reviewedPassageIDs = ids.isEmpty ? nil : ids
+        reviewedPassageIDs = ids
     }
 
     func name(for id: UUID, in context: SubjectSnapshot) -> String {
@@ -189,12 +189,7 @@ nonisolated struct ImportDraft: Codable, Sendable {
     var unresolvedCount: Int {
         concepts.filter { $0.reviewReason != nil }.count + facts.filter { $0.reviewReason != nil }.count
         + connections.filter { $0.reviewReason != nil }.count + passagesNeedingReview.count + existingFactReviews.count
-        + (excludedConnections?.count ?? 0)
-    }
-
-    mutating func discardSelfConnections() {
-        connections.removeAll { $0.fromConceptID == $0.toConceptID }
-        excludedConnections?.removeAll(where: \.isSelfConnection)
+        + excludedConnections.count
     }
 }
 
@@ -204,18 +199,8 @@ nonisolated struct ExcludedConnectionReview: Codable, Sendable, Identifiable {
     let originalExplanation: String
     let reason: String
     let evidence: [EvidenceReference]
-    var fromConceptID: String? = nil
-    var toConceptID: String? = nil
-
-    var isSelfConnection: Bool {
-        if let fromConceptID, let toConceptID { return fromConceptID == toConceptID }
-        // Older drafts stored only a display title, without endpoint IDs.
-        return ConnectionKind.allCases.contains { kind in
-            let endpoints = title.components(separatedBy: " \(kind.label) ")
-            return endpoints.count == 2 && !endpoints[0].trimmed.isEmpty
-                && endpoints[0].normalizedName == endpoints[1].normalizedName
-        }
-    }
+    let fromConceptID: String
+    let toConceptID: String
 }
 
 nonisolated struct SavedConceptSummary: Codable, Sendable {
@@ -238,6 +223,16 @@ nonisolated struct SubjectSnapshot: Codable, Sendable {
     let name: String
     var concepts: [SavedConceptSummary]
     var facts: [SavedFactSummary]
+    var connections: [SavedConnectionSummary] = []
+}
+
+nonisolated struct SavedConnectionSummary: Codable, Sendable {
+    let id: UUID
+    let fromConceptID: UUID
+    let toConceptID: UUID
+    let kind: ConnectionKind
+    let explanation: String
+    let supportingFactIDs: [UUID]
 }
 
 nonisolated struct MergeDecision: Codable, Sendable {
@@ -262,6 +257,7 @@ nonisolated struct ReconciliationPayload: Codable, Sendable {
     let decisions: [MergeDecision]
     let connections: [SuggestedConnection]
     let factReviews: [FactReview]
+    var updates: [LibraryContentProposal]? = nil
 }
 
 nonisolated struct ImportRequestUsage: Codable, Sendable {
@@ -270,9 +266,6 @@ nonisolated struct ImportRequestUsage: Codable, Sendable {
     let outputTokens: Int?
 }
 nonisolated struct ImportCheckpoint: Codable, Sendable {
-    let version = 2
-    // Missing in older checkpoints: keep their original batch boundaries when resuming.
-    var chunking: ImportChunking? = .compact
     var completedBatches: [CompletedImportBatch] = []
     var batchErrors: [ImportBatchError] = []
     // Source-checked batches can still have optional, isolated patch work. Never library entries.
@@ -287,22 +280,13 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case version, chunking, parts, completedBatches, batchErrors, pendingPatches, draft, reconciledPartCount, usage
+        case completedBatches, batchErrors, pendingPatches, draft, reconciledPartCount, usage
     }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        switch try values.decode(Int.self, forKey: .version) {
-        case 1:
-            completedBatches = try values.decode([ImportDraft].self, forKey: .parts).enumerated().map {
-                CompletedImportBatch(index: $0.offset, draft: $0.element)
-            }
-        case 2:
-            completedBatches = try values.decode([CompletedImportBatch].self, forKey: .completedBatches)
-            batchErrors = try values.decodeIfPresent([ImportBatchError].self, forKey: .batchErrors) ?? []
-        default: throw ImportError.damagedCheckpoint
-        }
-        chunking = try values.decodeIfPresent(ImportChunking.self, forKey: .chunking)
-        pendingPatches = try values.decodeIfPresent([PendingImportPatch].self, forKey: .pendingPatches) ?? []
+        completedBatches = try values.decode([CompletedImportBatch].self, forKey: .completedBatches)
+        batchErrors = try values.decode([ImportBatchError].self, forKey: .batchErrors)
+        pendingPatches = try values.decode([PendingImportPatch].self, forKey: .pendingPatches)
         draft = try values.decodeIfPresent(ImportDraft.self, forKey: .draft)
         reconciledPartCount = try values.decode(Int.self, forKey: .reconciledPartCount)
         usage = try values.decode([ImportRequestUsage].self, forKey: .usage)
@@ -311,8 +295,6 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
     func encode(to encoder: any Encoder) throws {
         try validateIndices()
         var values = encoder.container(keyedBy: CodingKeys.self)
-        try values.encode(version, forKey: .version)
-        try values.encodeIfPresent(chunking, forKey: .chunking)
         try values.encode(completedBatches.sorted { $0.index < $1.index }, forKey: .completedBatches)
         try values.encode(batchErrors, forKey: .batchErrors)
         try values.encode(pendingPatches, forKey: .pendingPatches)
@@ -328,13 +310,6 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
               Set(failed).count == failed.count, Set(completed).isDisjoint(with: failed),
               (completed + failed).allSatisfy({ $0 >= 0 && (batchCount == nil || $0 < batchCount!) }) else {
             throw ImportError.damagedCheckpoint
-        }
-    }
-
-    func chunks(for source: PreparedSource) -> [SourceChunk] {
-        switch chunking {
-        case .compact: SourcePreparation.chunks(for: source, maximumCharacters: 4_000, maximumPassages: 24)
-        case nil: SourcePreparation.chunks(for: source)
         }
     }
 }
@@ -392,8 +367,6 @@ nonisolated struct ImportBatchFailures: Error, LocalizedError {
         "\(failures.count) \(failures.count == 1 ? "batch needs" : "batches need") attention. Resume retries unfinished batches; checked batches are kept."
     }
 }
-
-nonisolated enum ImportChunking: String, Codable, Sendable { case compact }
 
 nonisolated enum ImportError: Error, LocalizedError, Equatable {
     case unsupportedFile, unreadablePDF, lockedPDF, needsOCR([Int]), unreadableText, emptySource, sourceTooLarge

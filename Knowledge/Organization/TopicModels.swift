@@ -9,13 +9,14 @@ import SwiftData
     var name: String
     var sortOrder: Int
     var isUserEdited: Bool
-    var manualFieldsData: Data? = nil
+    var manualFields: [String] = []
     var isRetired = false
     var redirectID: UUID? = nil
 
     init(subjectID: UUID, record: TopicRecord) {
         id = record.id; self.subjectID = subjectID; parentTopicID = record.parentTopicID
         name = record.name; sortOrder = record.sortOrder; isUserEdited = record.isUserEdited
+        manualFields = record.isUserEdited ? ["name", "parentID"] : []
     }
     var record: TopicRecord {
         .init(id: id, parentTopicID: parentTopicID, name: name, sortOrder: sortOrder, isUserEdited: isUserEdited)
@@ -81,6 +82,7 @@ nonisolated struct TopicOrganizationSnapshot: Sendable, Equatable {
 nonisolated struct TopicOrganizationPlan: Codable, Sendable {
     let addedTopics: [TopicRecord]
     let placements: [ConceptPlacementRecord]
+    var updates: [LibraryContentProposal]? = nil
 }
 
 nonisolated struct TopicOrganizationProgress: Sendable {
