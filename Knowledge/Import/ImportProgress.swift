@@ -38,6 +38,7 @@ nonisolated struct ExtractionProgress: Sendable {
     var isPatching = false
     var repairLabel = "Checking connection suggestions with ChatGPT…"
     var location: String? = nil
+    var activeConceptNames: [String] = []
     var passagesInBatch = 0
     var batchIndex: Int? = nil
     var previewEntries: [ScopedImportPreview] = []
@@ -46,9 +47,21 @@ nonisolated struct ExtractionProgress: Sendable {
     var latestChange: ImportFeedChange? = nil
     var reconciliationCompleted = 0
     var reconciliationTotal = 0
+    var connectionPreviews: [ImportConnectionPreview] = []
+    var organizationLabel: String? = nil
+    var organizationCompleted = 0
+    var organizationTotal = 0
+    var isResolving = false
+    var resolutionCompleted = 0
+    var resolutionTotal = 0
+    var topicOverview: [ImportTopicSummary] = []
+    var topicOverviewReady = false
+    var sourceSections: [ImportSourceSection] = []
     var activeWorkerCount: Int { batches.filter { $0.state == .active }.count }
 
     var description: String {
+        if isResolving { return "Considering names and classifications" }
+        if organizationLabel != nil { return "Organizing concepts into topics" }
         if !batches.isEmpty {
             if stage == .connecting { return "Combining concepts and finding connections" }
             if isPatching { return "Patching unresolved entries" }
@@ -58,6 +71,8 @@ nonisolated struct ExtractionProgress: Sendable {
         return stage == .extracting ? "Extracting batch \(batch) of \(total)" : "Connecting batch \(batch) of \(total)"
     }
     var activityLabel: String {
+        if isResolving { return "Considering names and classifications…" }
+        if let organizationLabel { return organizationLabel }
         if isRepairing, [.authorizing, .waiting, .processing, .receiving].contains(activity) {
             return repairLabel
         }
@@ -239,6 +254,7 @@ nonisolated struct ImportBatchActivity: Sendable, Identifiable {
     var startedAt: Date?
     var error: String?
     var counts = ImportStreamSummary()
+    var isChecking = false
     var id: Int { index }
 }
 
@@ -256,6 +272,7 @@ nonisolated struct ImportBatchActivity: Sendable, Identifiable {
          report: @escaping @MainActor (ExtractionProgress) -> Void) {
         self.source = source; self.report = report
         value = .init(stage: checkpoint.draft == nil ? .extracting : .connecting, completed: checkpoint.completedBatches.count, total: chunks.count)
+        value.sourceSections = ImportSourceSection.make(source: source, chunks: chunks)
         let completed = Dictionary(uniqueKeysWithValues: checkpoint.completedBatches.map { ($0.index, $0.draft) })
         let failed = Dictionary(uniqueKeysWithValues: checkpoint.batchErrors.map { ($0.index, $0.message) })
         value.batches = chunks.map { chunk in
@@ -278,24 +295,28 @@ nonisolated struct ImportBatchActivity: Sendable, Identifiable {
         publish()
     }
 
-    func begin(_ index: Int) {
+    func begin(_ index: Int, checking: Bool = false) {
         guard acceptingUpdates else { return }
         value.batches[index].state = .active; value.batches[index].error = nil
+        value.batches[index].isChecking = checking
         value.batches[index].label = ImportActivity.authorizing.label
         value.batches[index].startedAt = .now
         publish()
     }
     func beginPatch(_ index: Int) {
         value.isPatching = true
-        begin(index)
+        begin(index, checking: true)
     }
     func receive(_ update: ExtractionProgress) {
         guard acceptingUpdates, !Task.isCancelled else { return }
         value.activity = update.activity; value.lastActivityAt = update.lastActivityAt
         value.receivedCharacters = update.receivedCharacters
         value.isRepairing = update.isRepairing; value.repairLabel = update.repairLabel
+        if value.stage == .connecting { value.activeConceptNames = update.activeConceptNames }
         if let index = update.batchIndex, value.batches[index].state == .active {
             value.batches[index].label = update.activityLabel
+            value.batches[index].isChecking = update.isRepairing || value.isPatching
+                || update.activity == .validating || update.activity == .saving
             value.batches[index].counts = update.preview
             feed.receive(update.previewEntries, source: source)
         }
@@ -339,10 +360,11 @@ nonisolated struct ImportBatchActivity: Sendable, Identifiable {
         if fatalError == nil { fatalError = error }
         stop()
     }
-    func reconciling(_ draft: ImportDraft, completed: Int, total: Int) {
+    func reconciling(_ draft: ImportDraft, completed: Int, total: Int, context: SubjectSnapshot) {
         value = replacingStage(.connecting)
         value.reconciliationCompleted = completed; value.reconciliationTotal = total
         value.preview = Self.counts(draft)
+        value.connectionPreviews = ImportConnectionPreview.make(draft: draft, context: context)
         feed.reconcile(draft, source: source)
         publish()
     }
@@ -361,6 +383,7 @@ nonisolated struct ImportBatchActivity: Sendable, Identifiable {
     private func replacingStage(_ stage: ImportStatus) -> ExtractionProgress {
         var next = ExtractionProgress(stage: stage, completed: value.completed, total: value.total, startedAt: value.startedAt)
         next.batches = value.batches; next.preview = value.preview
+        next.sourceSections = value.sourceSections
         return next
     }
     private static func counts(_ draft: ImportDraft) -> ImportStreamSummary {

@@ -41,14 +41,16 @@ nonisolated extension Reconciliation {
                 reviewReason: "The proposed merges formed a cycle. This concept was kept separate for review.") : value
         }
         let connections = payload.connections.filter { value in
+            guard value.fromConceptID != value.toConceptID else { return false }
             let valid = concepts.contains(value.fromConceptID) && concepts.contains(value.toConceptID)
-                && value.fromConceptID != value.toConceptID && !value.supportingFactIDs.isEmpty
+                && !value.supportingFactIDs.isEmpty
                 && value.supportingFactIDs.allSatisfy { facts[$0] != nil }
                 && !value.explanation.trimmed.isEmpty && value.explanation.count <= 12_000
             if !valid {
                 excluded.append(.init(id: UUID(), title: "Unresolved suggested connection", originalExplanation: value.explanation,
                     reason: "This reconciliation suggestion failed reference or content checks and was excluded.",
-                    evidence: uniqueEvidence(value.supportingFactIDs.compactMap { facts[$0] }.flatMap(\.evidence))))
+                    evidence: uniqueEvidence(value.supportingFactIDs.compactMap { facts[$0] }.flatMap(\.evidence)),
+                    fromConceptID: value.fromConceptID.uuidString, toConceptID: value.toConceptID.uuidString))
             }
             return valid
         }

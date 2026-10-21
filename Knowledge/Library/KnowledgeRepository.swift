@@ -27,10 +27,7 @@ import SwiftData
         guard !subjects.contains(where: { $0.id != id && $0.name.normalizedName == name.normalizedName }) else {
             throw ImportError.invalidSelection("A subject with this name already exists.")
         }
-        let previousName = subject.name
-        subject.name = name
-        do { try context.save() }
-        catch { subject.name = previousName; throw error }
+        try libraryMutation(subjectID: id, title: "Renamed subject") { subject.name = name }
     }
 
     @discardableResult func deleteSubject(_ id: UUID, sourceDirectory: URL? = nil) throws -> String? {
@@ -64,6 +61,8 @@ import SwiftData
         for topic in topics { context.delete(topic) }
         for job in jobs { context.delete(job) }
         for source in sources { context.delete(source) }
+        for revision in try context.fetch(FetchDescriptor<SubjectRevisionRecord>(predicate: #Predicate { $0.subjectID == id })) { context.delete(revision) }
+        for contribution in try context.fetch(FetchDescriptor<KnowledgeContribution>(predicate: #Predicate { $0.subjectID == id })) { context.delete(contribution) }
         context.delete(subject)
         do {
             try context.save()
@@ -91,10 +90,11 @@ import SwiftData
         guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else {
             throw ImportError.invalidSelection("This subject is unavailable.")
         }
-        let concepts = try context.fetch(FetchDescriptor<KnowledgeConcept>(predicate: #Predicate { $0.subjectID == subjectID }))
-        let facts = try context.fetch(FetchDescriptor<KnowledgeFact>(predicate: #Predicate { $0.subjectID == subjectID }))
+        let concepts = try context.fetch(FetchDescriptor<KnowledgeConcept>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
+        let facts = try context.fetch(FetchDescriptor<KnowledgeFact>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
         return try SubjectSnapshot(subjectID: subjectID, name: subject.name,
-            concepts: concepts.map { .init(id: $0.id, name: $0.name, aliases: $0.aliases, explanation: $0.explanation) },
+            concepts: concepts.map { .init(id: $0.id, name: $0.name, aliases: $0.aliases, explanation: $0.explanation,
+                namingNote: try $0.namingNote()) },
             facts: facts.map {
                 guard let kind = FactKind(rawValue: $0.kindRaw) else { throw ImportError.damagedCheckpoint }
                 return .init(id: $0.id, conceptID: $0.conceptID, statement: $0.statement, kind: kind,
@@ -103,8 +103,9 @@ import SwiftData
     }
 
     func createJob(subjectID: UUID, source: PreparedSource, accountID: String?, model: String) throws -> UUID {
-        _ = try snapshot(subjectID: subjectID)
+        let baseID = try ensureRevision(subjectID: subjectID)
         let job = try KnowledgeImportJob(subjectID: subjectID, source: source, accountID: accountID, model: model)
+        job.branchData = try LibraryCoding.encode(DraftBranchState(baseRevisionID: baseID))
         container.mainContext.insert(job)
         do { try container.mainContext.save(); return job.id }
         catch { container.mainContext.delete(job); throw error }
@@ -128,8 +129,10 @@ import SwiftData
     func keepDraft(_ draft: ImportDraft, jobID: UUID) throws {
         let job = try job(jobID)
         guard job.status != .saved else { return }
-        guard draft.isComplete else { throw ImportError.incompleteDraft }
-        job.draftData = try JSONEncoder().encode(draft)
+        guard draft.isComplete, draft.topicOrganization != nil else { throw ImportError.incompleteDraft }
+        let data = try LibraryCoding.encode(draft)
+        if job.draftData != data { job.draftEditVersion += 1 }
+        job.draftData = data
         job.status = .review; job.lastError = nil; job.updatedAt = Date()
         try container.mainContext.save()
     }
@@ -187,6 +190,7 @@ import SwiftData
         for concept in selectedConcepts {
             conceptMap[concept.id] = concept.acceptMerge ? (concept.mergeTargetID ?? concept.id) : concept.id
         }
+        let organization = try prepareImportOrganization(draft: draft, subjectID: subjectID, conceptMap: conceptMap)
         let factIDs = Set(selectedFacts.map(\.id) + snapshot.facts.map(\.id))
         for fact in selectedFacts where conceptMap[fact.conceptID] == nil {
             throw ImportError.invalidSelection("Include the concept for every selected fact, or exclude its facts.")
@@ -223,7 +227,8 @@ import SwiftData
                     target.sourceIDs = Array(Set(target.sourceIDs + [source.id]))
                     target.evidenceData = try JSONEncoder().encode(Reconciliation.uniqueEvidence(try target.evidence() + concept.evidence))
                     let wording = SourceConceptWording(sourceID: source.id, original: concept.original,
-                        edited: concept.isUserEdited ? .init(name: concept.name, aliases: concept.aliases, explanation: concept.explanation) : nil)
+                        edited: concept.isUserEdited ? .init(name: concept.name, aliases: concept.aliases, explanation: concept.explanation) : nil,
+                        resolutionSuggestion: concept.resolutionSuggestion?.status == .applied ? concept.resolutionSuggestion?.savedCopy(changesName: false) : nil)
                     target.sourceWordingsData = try JSONEncoder().encode(try target.sourceWordings() + [wording]
                         + concept.otherSourceWordings.map { .init(sourceID: source.id, original: $0, edited: nil) })
                     target.isUserEdited = target.isUserEdited || concept.isUserEdited
@@ -238,6 +243,7 @@ import SwiftData
                 context.insert(try KnowledgeConnection(subjectID: job.subjectID, sourceID: source.id,
                     from: conceptMap[connection.fromConceptID]!, to: conceptMap[connection.toConceptID]!, draft: connection))
             }
+            try insertImportOrganization(organization, subjectID: subjectID)
             job.draftData = try JSONEncoder().encode(draft)
             job.status = .saved; job.savedAt = Date(); job.updatedAt = Date(); job.lastError = nil
             try context.save()

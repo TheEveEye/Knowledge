@@ -33,7 +33,8 @@ nonisolated enum ImportProgressSample {
             lastActivityAt: .now, preview: .init(concepts: count, facts: count, connections: 2),
             batches: [.init(index: 0, state: .active, label: "Receiving concepts and facts…", location: "Module 0.3 · Scientific method"),
                 .init(index: 1, state: .active, label: "Checking connection suggestions with ChatGPT…", location: "Module 1.5b · Sleep")],
-            feed: feed.cards, latestChange: feed.latestChange)
+            feed: feed.cards, latestChange: feed.latestChange,
+            sourceSections: ImportSourceSection.make(source: source, chunks: SourcePreparation.chunks(for: source)))
     }
 }
 

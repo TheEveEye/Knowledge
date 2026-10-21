@@ -111,6 +111,7 @@ nonisolated struct DraftConcept: Codable, Sendable, Identifiable {
     var mergeTargetID: UUID? = nil
     var mergeReason: String? = nil
     var acceptMerge: Bool = false
+    var resolutionSuggestion: ConceptResolutionSuggestion? = nil
     var isUserEdited: Bool { (reviewBaseline ?? original) != ConceptWording(name: name, aliases: aliases, explanation: explanation) }
 }
 nonisolated struct FactWording: Codable, Sendable, Equatable {
@@ -158,15 +159,42 @@ nonisolated struct ImportDraft: Codable, Sendable {
     var existingFactReviews: [FactReview] = []
     var excludedConnections: [ExcludedConnectionReview]? = nil
     var processingNotes: [String]? = nil
+    var topicOrganization: TopicOrganizationPlan? = nil
     var isComplete: Bool = false
+    var resolutionReviewedConceptIDs: [UUID]? = nil
+    /// User acknowledgements preserve the model's coverage decision and original reason.
+    var reviewedPassageIDs: [String]? = nil
+    var libraryProposals: [LibraryContentProposal]? = nil
+
+    var passagesNeedingReview: [CoverageDecision] {
+        let reviewed = Set(reviewedPassageIDs ?? [])
+        return coverage.filter { $0.disposition == .uncertain && !reviewed.contains($0.segmentID) }
+    }
+
+    func isPassageReviewed(_ segmentID: String) -> Bool {
+        reviewedPassageIDs?.contains(segmentID) == true
+    }
+
+    mutating func setPassageReviewed(_ segmentID: String, reviewed: Bool) {
+        guard coverage.contains(where: { $0.segmentID == segmentID && $0.disposition == .uncertain }) else { return }
+        var ids = reviewedPassageIDs ?? []
+        ids.removeAll { $0 == segmentID }
+        if reviewed { ids.append(segmentID) }
+        reviewedPassageIDs = ids.isEmpty ? nil : ids
+    }
 
     func name(for id: UUID, in context: SubjectSnapshot) -> String {
         concepts.first { $0.id == id }?.name ?? context.concepts.first { $0.id == id }?.name ?? "Unavailable concept"
     }
     var unresolvedCount: Int {
         concepts.filter { $0.reviewReason != nil }.count + facts.filter { $0.reviewReason != nil }.count
-        + connections.filter { $0.reviewReason != nil }.count + coverage.filter { $0.disposition == .uncertain }.count + existingFactReviews.count
+        + connections.filter { $0.reviewReason != nil }.count + passagesNeedingReview.count + existingFactReviews.count
         + (excludedConnections?.count ?? 0)
+    }
+
+    mutating func discardSelfConnections() {
+        connections.removeAll { $0.fromConceptID == $0.toConceptID }
+        excludedConnections?.removeAll(where: \.isSelfConnection)
     }
 }
 
@@ -176,6 +204,18 @@ nonisolated struct ExcludedConnectionReview: Codable, Sendable, Identifiable {
     let originalExplanation: String
     let reason: String
     let evidence: [EvidenceReference]
+    var fromConceptID: String? = nil
+    var toConceptID: String? = nil
+
+    var isSelfConnection: Bool {
+        if let fromConceptID, let toConceptID { return fromConceptID == toConceptID }
+        // Older drafts stored only a display title, without endpoint IDs.
+        return ConnectionKind.allCases.contains { kind in
+            let endpoints = title.components(separatedBy: " \(kind.label) ")
+            return endpoints.count == 2 && !endpoints[0].trimmed.isEmpty
+                && endpoints[0].normalizedName == endpoints[1].normalizedName
+        }
+    }
 }
 
 nonisolated struct SavedConceptSummary: Codable, Sendable {
@@ -183,6 +223,7 @@ nonisolated struct SavedConceptSummary: Codable, Sendable {
     let name: String
     let aliases: [String]
     let explanation: String
+    var namingNote: String? = nil
 }
 nonisolated struct SavedFactSummary: Codable, Sendable {
     let id: UUID

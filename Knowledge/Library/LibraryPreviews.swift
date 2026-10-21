@@ -35,8 +35,10 @@ import SwiftData
             supportingFactIDs: [facts[2].id], evidence: facts[2].evidence, original: .init(kind: .regulates,
                 explanation: "The notes describe the SCN controlling circadian rhythm through adjustments to melatonin production."),
             isInferred: true, reviewReason: nil, selected: false)
-        let draft = ImportDraft(sourceID: source.id, concepts: concepts, facts: facts, connections: [connection],
+        var draft = ImportDraft(sourceID: source.id, concepts: concepts, facts: facts, connections: [connection],
             coverage: source.segments.map { .init(segmentID: $0.id, disposition: .extracted, reason: "Study material") }, isComplete: true)
+        let topic = TopicRecord(id: UUID(), parentTopicID: nil, name: "Sleep and consciousness", sortOrder: 0)
+        draft.topicOrganization = .init(addedTopics: [topic], placements: concepts.map { .init(conceptID: $0.id, topicID: topic.id) })
         try repository.keepDraft(draft, jobID: jobID)
     }
 }
@@ -55,10 +57,10 @@ import SwiftData
 #Preview("Import progress") {
     NavigationStack {
         ImportProgressView(progress: ImportProgressSample.progress(), model: "GPT-5.6-Luna",
-            title: ImportProgressSample.source.title, source: ImportProgressSample.source)
+            title: ImportProgressSample.source.title)
             .navigationTitle("Import").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Keep draft") { } }
+                ToolbarItem(placement: .topBarLeading) { ImportBackButton(onKeep: {}, onDiscard: {}) }
                 ToolbarItem(placement: .primaryAction) { Button("Pause", systemImage: "pause") { } }
             }
     }
@@ -68,7 +70,9 @@ import SwiftData
     NavigationStack {
         ImportProgressView(progress: .init(stage: .extracting, completed: 0, total: 9, activity: .processing,
             startedAt: .now.addingTimeInterval(-60), lastActivityAt: .now.addingTimeInterval(-59),
-            batches: [.init(index: 0, state: .active, label: "Waiting for ChatGPT…", location: "Module 1.5a · Page 1")]),
+            batches: [.init(index: 0, state: .active, label: "Waiting for ChatGPT…", location: "Module 1.5a · Page 1")],
+            sourceSections: ImportSourceSection.make(source: ImportProgressSample.source,
+                chunks: SourcePreparation.chunks(for: ImportProgressSample.source))),
             model: "GPT-5.6-Luna", title: "digitized_psychology_notes")
             .navigationTitle("Import").navigationBarTitleDisplayMode(.inline)
     }

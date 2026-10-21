@@ -9,6 +9,9 @@ import SwiftData
     var name: String
     var sortOrder: Int
     var isUserEdited: Bool
+    var manualFieldsData: Data? = nil
+    var isRetired = false
+    var redirectID: UUID? = nil
 
     init(subjectID: UUID, record: TopicRecord) {
         id = record.id; self.subjectID = subjectID; parentTopicID = record.parentTopicID
@@ -19,7 +22,7 @@ import SwiftData
     }
 }
 
-/// A nil topic is an explicit, retryable Unsorted placement, rather than lost content.
+/// A nil topic keeps an uncertain concept visible under Unsorted.
 @Model final class KnowledgeConceptPlacement {
     @Attribute(.unique) var conceptID: UUID
     var subjectID: UUID
@@ -66,27 +69,32 @@ nonisolated struct TopicOrganizationSnapshot: Sendable, Equatable {
     let topics: [TopicRecord]
     let placements: [ConceptPlacementRecord]
 
-    func candidates(reorganize: Bool) -> [OrganizableConcept] {
+    var candidates: [OrganizableConcept] {
         let placed = Dictionary(uniqueKeysWithValues: placements.map { ($0.conceptID, $0) })
         return concepts.filter { concept in
             guard let placement = placed[concept.id] else { return true }
-            return reorganize && !placement.isLocked
+            return placement.topicID == nil && !placement.isLocked
         }
     }
 }
 
-nonisolated struct TopicOrganizationPlan: Sendable {
+nonisolated struct TopicOrganizationPlan: Codable, Sendable {
     let addedTopics: [TopicRecord]
     let placements: [ConceptPlacementRecord]
 }
 
+nonisolated struct TopicOrganizationProgress: Sendable {
+    let label: String
+    var topics: [TopicRecord] = []
+    var placements: [ConceptPlacementRecord] = []
+    var isComplete = false
+}
+
 nonisolated enum TopicOrganizationError: LocalizedError, Equatable {
     case invalid(String)
-    case libraryChanged
     var errorDescription: String? {
         switch self {
         case .invalid(let reason): "Topics could not be organized: \(reason)"
-        case .libraryChanged: "Your library changed during organization. Try again to use your latest changes."
         }
     }
 }

@@ -5,6 +5,7 @@ import SwiftData
     @Attribute(.unique) var id: UUID
     var name: String
     var createdAt: Date
+    var currentRevisionID: UUID? = nil
     init(id: UUID = UUID(), name: String) { self.id = id; self.name = name; createdAt = Date() }
 }
 
@@ -15,6 +16,7 @@ import SwiftData
     var preparedData: Data
     var importedAt: Date
     var reviewNotes: [String]
+    var isArchived = false
     init(subjectID: UUID, source: PreparedSource, reviewNotes: [String] = []) throws {
         id = source.id; self.subjectID = subjectID; title = source.title
         preparedData = try JSONEncoder().encode(source); importedAt = Date(); self.reviewNotes = reviewNotes
@@ -26,6 +28,7 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     let sourceID: UUID
     let original: ConceptWording
     let edited: ConceptWording?
+    var resolutionSuggestion: ConceptResolutionSuggestion? = nil
 }
 
 @Model final class KnowledgeConcept {
@@ -39,17 +42,25 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var evidenceData: Data
     var isUserEdited: Bool
     var reviewNote: String?
+    var manualFieldsData: Data? = nil
+    var isRetired = false
+    var redirectID: UUID? = nil
     init(subjectID: UUID, sourceID: UUID, draft: DraftConcept) throws {
         id = draft.id; self.subjectID = subjectID; name = draft.name; aliases = draft.aliases
         explanation = draft.explanation; sourceIDs = [sourceID]
         sourceWordingsData = try JSONEncoder().encode([SourceConceptWording(sourceID: sourceID,
-            original: draft.original, edited: draft.isUserEdited ? .init(name: draft.name, aliases: draft.aliases, explanation: draft.explanation) : nil)]
+            original: draft.original, edited: draft.isUserEdited ? .init(name: draft.name, aliases: draft.aliases, explanation: draft.explanation) : nil,
+            resolutionSuggestion: draft.resolutionSuggestion?.status == .applied ? draft.resolutionSuggestion?.savedCopy(changesName: true) : nil)]
             + draft.otherSourceWordings.map { .init(sourceID: sourceID, original: $0, edited: nil) })
         evidenceData = try JSONEncoder().encode(draft.evidence)
         isUserEdited = draft.isUserEdited; reviewNote = draft.reviewReason
     }
     func evidence() throws -> [EvidenceReference] { try JSONDecoder().decode([EvidenceReference].self, from: evidenceData) }
     func sourceWordings() throws -> [SourceConceptWording] { try JSONDecoder().decode([SourceConceptWording].self, from: sourceWordingsData) }
+    func namingNote() throws -> String? {
+        let notes = try sourceWordings().compactMap(\.resolutionSuggestion).filter { $0.status == .applied }.map(\.namingNote)
+        return notes.isEmpty ? nil : notes.joined(separator: "\n")
+    }
 }
 
 @Model final class KnowledgeFact {
@@ -64,6 +75,9 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var evidenceData: Data
     var isUserEdited: Bool
     var reviewNote: String?
+    var manualFieldsData: Data? = nil
+    var isRetired = false
+    var redirectID: UUID? = nil
     init(subjectID: UUID, sourceID: UUID, conceptID: UUID, draft: DraftFact) throws {
         id = draft.id; self.subjectID = subjectID; self.sourceID = sourceID; self.conceptID = conceptID
         statement = draft.statement; kindRaw = draft.kind.rawValue; qualifications = draft.qualifications
@@ -89,6 +103,9 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var isInferred: Bool
     var isUserEdited: Bool
     var reviewNote: String?
+    var manualFieldsData: Data? = nil
+    var isRetired = false
+    var redirectID: UUID? = nil
     init(subjectID: UUID, sourceID: UUID, from: UUID, to: UUID, draft: DraftConnection) throws {
         id = draft.id; self.subjectID = subjectID; self.sourceID = sourceID
         fromConceptID = from; toConceptID = to; kindRaw = draft.kind.rawValue; explanation = draft.explanation
@@ -116,6 +133,8 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     var createdAt: Date
     var updatedAt: Date
     var savedAt: Date?
+    var branchData: Data? = nil
+    var draftEditVersion = 0
 
     init(subjectID: UUID, source: PreparedSource, accountID: String?, model: String) throws {
         id = UUID(); self.subjectID = subjectID; sourceID = source.id; title = source.title
@@ -135,7 +154,9 @@ nonisolated struct SourceConceptWording: Codable, Sendable {
     }
     func draft() throws -> ImportDraft? {
         guard let draftData else { return nil }
-        return try JSONDecoder().decode(ImportDraft.self, from: draftData)
+        var draft = try JSONDecoder().decode(ImportDraft.self, from: draftData)
+        draft.discardSelfConnections()
+        return draft
     }
 }
 
@@ -144,7 +165,8 @@ enum KnowledgePersistence {
     static var schema: Schema {
         Schema([Item.self, KnowledgeSubject.self, KnowledgeSource.self, KnowledgeConcept.self,
                 KnowledgeFact.self, KnowledgeConnection.self, KnowledgeImportJob.self,
-                KnowledgeTopic.self, KnowledgeConceptPlacement.self])
+                KnowledgeTopic.self, KnowledgeConceptPlacement.self, LibraryEntityVersion.self,
+                SubjectRevisionRecord.self, KnowledgeContribution.self])
     }
     static func container(inMemory: Bool = false, url: URL? = nil) throws -> ModelContainer {
         let configuration: ModelConfiguration

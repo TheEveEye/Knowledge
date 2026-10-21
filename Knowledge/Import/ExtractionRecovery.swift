@@ -54,6 +54,8 @@ nonisolated enum ExtractionRecovery {
         let connectionCounts = Dictionary(grouping: raw.connections, by: \.id).mapValues(\.count)
         var connections: [PendingConnectionPatch] = []
         for (index, connection) in raw.connections.enumerated() {
+            // Self-connections have no useful repair or review outcome.
+            guard connection.fromConceptID != connection.toConceptID else { continue }
             do {
                 guard connectionCounts[connection.id] == 1, !connection.id.isEmpty, connection.id.utf8.count <= 100 else {
                     throw ImportValidator.invalid("Repeated or invalid connection IDs are ambiguous.")
@@ -99,11 +101,19 @@ nonisolated enum ExtractionRecovery {
             draft.processingNotes = (draft.processingNotes ?? []) + ["The connection patch returned unexpected suggestions; they were ignored."]
         }
         for task in patch.connections {
+            if task.suggestion.fromConceptID == task.suggestion.toConceptID {
+                draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+                continue
+            }
             var reason = "The patch did not resolve this suggestion. It remains excluded for review."
             if let decision = payload.decisions[task.key] {
                 if decision.disposition == "exclude" {
                     reason = ImportValidator.reason(decision.reason) ?? reason
                 } else if decision.disposition == "correct", let from = decision.fromConceptID, let to = decision.toConceptID {
+                    guard from != to else {
+                        draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+                        continue
+                    }
                     let corrected = ExtractedConnection(id: task.suggestion.id, fromConceptID: from, toConceptID: to,
                         kind: task.suggestion.kind, explanation: task.suggestion.explanation,
                         supportingFactIDs: decision.supportingFactIDs, reviewReason: nil)
@@ -128,8 +138,9 @@ nonisolated enum ExtractionRecovery {
     }
 
     private static func replaceExclusion(_ task: PendingConnectionPatch, patch: PendingImportPatch, draft: inout ImportDraft, reason: String) {
-        let review = exclusion(task, concepts: patch.concepts, facts: patch.facts, draft: draft, reason: reason)
         draft.excludedConnections?.removeAll { $0.id == task.exclusionID }
+        guard task.suggestion.fromConceptID != task.suggestion.toConceptID else { return }
+        let review = exclusion(task, concepts: patch.concepts, facts: patch.facts, draft: draft, reason: reason)
         draft.excludedConnections = (draft.excludedConnections ?? []) + [review]
     }
 
@@ -140,6 +151,7 @@ nonisolated enum ExtractionRecovery {
         let value = task.suggestion
         return .init(id: task.exclusionID, title: "\(name(value.fromConceptID)) \(value.kind.label) \(name(value.toConceptID))",
             originalExplanation: value.explanation, reason: reason,
-            evidence: Reconciliation.uniqueEvidence(value.supportingFactIDs.compactMap { factMap[$0] }.flatMap(\.evidence)))
+            evidence: Reconciliation.uniqueEvidence(value.supportingFactIDs.compactMap { factMap[$0] }.flatMap(\.evidence)),
+            fromConceptID: value.fromConceptID, toConceptID: value.toConceptID)
     }
 }

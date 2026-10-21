@@ -11,7 +11,6 @@ nonisolated enum LibraryDestination: Hashable {
 struct SubjectLibraryView: View {
     let subject: KnowledgeSubject
     @Environment(ImportCoordinator.self) private var imports
-    @Environment(AuthenticationStore.self) private var authentication
     @Query private var concepts: [KnowledgeConcept]
     @Query private var sources: [KnowledgeSource]
     @Query private var jobs: [KnowledgeImportJob]
@@ -57,7 +56,7 @@ struct SubjectLibraryView: View {
         .searchable(text: $search, prompt: "Find a concept or alias")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                TopicOrganizationMenu(subjectID: subject.id, conceptIDs: concepts.map(\.id))
+                TopicOutlineMenu(subjectID: subject.id)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Subject settings", systemImage: "gearshape") { showSettings = true }
@@ -69,9 +68,6 @@ struct SubjectLibraryView: View {
                 Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
                     .labelStyle(.iconOnly)
             }
-        }
-        .task(id: automaticOrganizationKey) {
-            imports.organization.start(subjectID: subject.id, model: imports.selectedModel)
         }
         .sheet(item: $topicActions.movingConcept) { MoveConceptTopicView(concept: $0) }
         .alert("Rename topic", isPresented: Binding(get: { topicActions.renamingTopic != nil },
@@ -108,11 +104,6 @@ struct SubjectLibraryView: View {
                 ImportJobView(jobID: id)
             }
         }
-    }
-    private var automaticOrganizationKey: String {
-        subject.id.uuidString + concepts.map { $0.id.uuidString }.sorted().joined()
-            + (authentication.activeAccount?.id ?? "")
-            + String(authentication.activeAccount?.credentials?.planEnabled == true) + String(authentication.isBusy)
     }
 }
 
@@ -179,11 +170,13 @@ struct SubjectSettingsView: View {
 
 struct ConceptDetailView: View {
     let concept: KnowledgeConcept
+    @Environment(ImportCoordinator.self) private var imports
     @Query private var facts: [KnowledgeFact]
     @Query private var connections: [KnowledgeConnection]
     @Query private var concepts: [KnowledgeConcept]
     @State private var evidence: EvidencePresentation?
     @State private var error: String?
+    @State private var resolutionSuggestions: [ConceptResolutionSuggestion] = []
     init(concept: KnowledgeConcept) {
         self.concept = concept
         let id = concept.id, subjectID = concept.subjectID
@@ -195,10 +188,33 @@ struct ConceptDetailView: View {
         List {
             Section {
                 Text(concept.explanation)
-                if !concept.aliases.isEmpty { Text("Also known as: " + concept.aliases.joined(separator: ", ")).foregroundStyle(.secondary) }
+                let aliases = alternativeNames
+                if !aliases.isEmpty { Text("Also known as: " + aliases.joined(separator: ", ")).foregroundStyle(.secondary) }
                 Button("View source") { showEvidence(title: concept.name, load: concept.evidence) }
             }
             ConceptTopicSection(concept: concept)
+            if !resolutionSuggestions.isEmpty {
+                Section("AI-assisted interpretations") {
+                    ForEach(Array(resolutionSuggestions.enumerated()), id: \.offset) { _, suggestion in
+                        VStack(alignment: .leading, spacing: 12) {
+                            ConceptResolutionProvenance(suggestion: suggestion)
+                            if suggestion.changedLibraryName == false, suggestion.suggestedName != nil {
+                                Text("The existing concept’s name was retained when this source was merged.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            if !suggestion.evidence.isEmpty {
+                                Button("View supporting note context") {
+                                    evidence = .init(title: "Suggestion context", references: suggestion.evidence)
+                                }.buttonStyle(.borderless)
+                            }
+                            Button("Undo saved suggestion") {
+                                do { try imports.repository.undoResolutionSuggestion(suggestion, for: concept) }
+                                catch { self.error = error.localizedDescription }
+                            }.buttonStyle(.borderless)
+                        }.padding(.vertical, 4)
+                    }
+                }
+            }
             Section("Facts") {
                 ForEach(facts) { fact in
                     VStack(alignment: .leading, spacing: 8) {
@@ -235,6 +251,24 @@ struct ConceptDetailView: View {
         }
         .navigationTitle(concept.name)
         .sheet(item: $evidence) { EvidenceView(presentation: $0) }
+        .task(id: concept.sourceWordingsData) {
+            do {
+                resolutionSuggestions = try concept.sourceWordings().compactMap(\.resolutionSuggestion).filter { $0.status == .applied }
+            } catch { self.error = "The saved interpretation history could not be read." }
+        }
+    }
+    private var alternativeNames: [String] {
+        func key(_ name: String) -> String {
+            name.normalizedWhitespace.normalizedName
+                .replacingOccurrences(of: "’", with: "'")
+                .replacingOccurrences(of: "‘", with: "'")
+        }
+        var seen: Set<String> = [key(concept.name)]
+        return concept.aliases.compactMap { alias in
+            let name = alias.normalizedWhitespace
+            guard !name.isEmpty, seen.insert(key(name)).inserted else { return nil }
+            return name
+        }
     }
     private func name(_ id: UUID) -> String { concepts.first { $0.id == id }?.name ?? "Unavailable concept" }
     private func showEvidence(title: String, load: () throws -> [EvidenceReference]) {

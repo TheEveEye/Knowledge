@@ -26,20 +26,20 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
 }
 
 @MainActor protocol TopicOrganizing {
-    func organize(_ snapshot: TopicOrganizationSnapshot, reorganize: Bool, model: String,
+    func organize(_ snapshot: TopicOrganizationSnapshot, model: String,
         accessToken: @escaping @MainActor () async throws -> String,
-        onProgress: @escaping @MainActor (String) -> Void) async throws -> TopicOrganizationPlan
+        onProgress: @escaping @MainActor (TopicOrganizationProgress) -> Void) async throws -> TopicOrganizationPlan
 }
 
 @MainActor struct ChatGPTTopicOrganizer: TopicOrganizing {
     let client: any ChatGPTPlanRequesting
 
-    func organize(_ snapshot: TopicOrganizationSnapshot, reorganize: Bool, model: String,
+    func organize(_ snapshot: TopicOrganizationSnapshot, model: String,
         accessToken: @escaping @MainActor () async throws -> String,
-        onProgress: @escaping @MainActor (String) -> Void) async throws -> TopicOrganizationPlan {
-        let candidates = snapshot.candidates(reorganize: reorganize)
+        onProgress: @escaping @MainActor (TopicOrganizationProgress) -> Void) async throws -> TopicOrganizationPlan {
+        let candidates = snapshot.candidates
         guard !candidates.isEmpty else { return .init(addedTopics: [], placements: []) }
-        onProgress("Building topics…")
+        onProgress(.init(label: "Organizing import topics…"))
         // Sample across the entire subject rather than filling the prompt from its first chapter.
         let sorted = snapshot.concepts.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let count = min(120, sorted.count)
@@ -57,12 +57,14 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
         let added = try Self.resolve(outline.topics, existing: snapshot.topics)
         let topics = snapshot.topics + added
         var placements: [ConceptPlacementRecord] = []
+        onProgress(.init(label: "Placing concepts into topics…", topics: topics))
         for offset in stride(from: 0, to: candidates.count, by: 25) {
             try Task.checkCancellation()
             let batch = Array(candidates[offset..<min(offset + 25, candidates.count)])
-            onProgress("Organizing \(offset + 1)–\(offset + batch.count) of \(candidates.count) concepts…")
             if topics.isEmpty {
                 placements += batch.map { .init(conceptID: $0.id, topicID: nil, reason: "No suitable topic was found.") }
+                onProgress(.init(label: "Organized \(placements.count) of \(candidates.count) concepts",
+                    topics: topics, placements: placements))
                 continue
             }
             let result: TopicAssignmentResponse = try await request(
@@ -82,8 +84,11 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
                 return .init(conceptID: value.conceptID, topicID: reason == nil ? value.topicID : nil,
                     reason: reason ?? (value.topicID == nil ? "No suitable topic was found." : nil))
             }
+            onProgress(.init(label: "Organized \(placements.count) of \(candidates.count) concepts",
+                topics: topics, placements: placements))
         }
         try Task.checkCancellation()
+        onProgress(.init(label: "Topics ready to review", topics: topics, placements: placements, isComplete: true))
         return .init(addedTopics: added, placements: placements)
     }
 

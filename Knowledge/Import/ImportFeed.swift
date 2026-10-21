@@ -64,6 +64,7 @@ nonisolated struct ImportConceptFeedEntry: Sendable, Identifiable {
     var validation: ImportFeedValidation = .awaiting
     var reviewReason: String?
     var evidence: [EvidenceReference] = []
+    var sourceSegmentIDs: [String] = []
     var facts: [ImportFactFeedEntry] = []
     var batchIndex: Int { id.scope.batchIndex }
 }
@@ -93,6 +94,7 @@ nonisolated struct ImportFeedState {
                 cards[index].name = concept.name
                 cards[index].explanation = concept.explanation
                 cards[index].sourceLabel = label(concept.evidence.map(\.segmentID), in: source)
+                cards[index].sourceSegmentIDs = concept.evidence.map(\.segmentID)
                 cards[index].reviewReason = ImportValidator.reason(concept.reviewReason)
                 changed(cards[index].id)
             case .fact(_, let fact):
@@ -203,6 +205,7 @@ nonisolated struct ImportFeedState {
         cards[index].validation = concept.reviewReason == nil ? .checked : .needsReview
         cards[index].sourceLabel = label(concept.evidence.map(\.segmentID), in: source)
         cards[index].evidence = concept.evidence
+        cards[index].sourceSegmentIDs = concept.evidence.map(\.segmentID)
         changed(cards[index].id)
     }
     private mutating func updateFact(_ index: Int, factIndex: Int, with fact: DraftFact, source: PreparedSource) {

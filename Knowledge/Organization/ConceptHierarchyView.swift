@@ -43,14 +43,6 @@ struct ConceptHierarchySection: View {
     var body: some View {
         let index = TopicLibraryIndex(conceptIDs: concepts.map(\.id), topics: topics.map(\.record), placements: placements.map(\.record))
         Group {
-            if let status = imports.organization.progress[subject.id] {
-                Section { ProgressView(status) }
-            } else if let message = imports.organization.errors[subject.id], !concepts.isEmpty {
-                Section {
-                    Text(message).font(.callout).foregroundStyle(.secondary)
-                    Button("Organize concepts") { organize(reorganize: true) }
-                }
-            }
             if !search.trimmed.isEmpty {
                 searchResults(index: index)
             } else if !concepts.isEmpty {
@@ -93,36 +85,28 @@ struct ConceptHierarchySection: View {
         Binding(get: { Set(expandedTopicIDs.split(separator: ",").compactMap { UUID(uuidString: String($0)) }) },
             set: { expandedTopicIDs = $0.map(\.uuidString).sorted().joined(separator: ",") })
     }
-    private func organize(reorganize: Bool) {
-        imports.organization.start(subjectID: subject.id, model: imports.selectedModel, reorganize: reorganize)
-    }
     private func setLocked(_ conceptID: UUID, _ locked: Bool) {
         actions.setLocked(conceptID, locked, repository: imports.repository)
     }
 }
 
-struct TopicOrganizationMenu: View {
+struct TopicOutlineMenu: View {
     let subjectID: UUID
-    let conceptIDs: [UUID]
-    @Environment(ImportCoordinator.self) private var imports
-    @Query private var placements: [KnowledgeConceptPlacement]
+    @Query private var topics: [KnowledgeTopic]
     @AppStorage private var expandedTopicIDs: String
-    init(subjectID: UUID, conceptIDs: [UUID]) {
-        self.subjectID = subjectID; self.conceptIDs = conceptIDs
-        _placements = Query(filter: #Predicate<KnowledgeConceptPlacement> { $0.subjectID == subjectID })
+    init(subjectID: UUID) {
+        self.subjectID = subjectID
+        _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID })
         _expandedTopicIDs = AppStorage(wrappedValue: "", "knowledge.expandedTopics." + subjectID.uuidString)
     }
     var body: some View {
-        Menu("Organize", systemImage: "folder.badge.gearshape") {
-            Button("Organize new concepts", systemImage: "folder.badge.plus") { organize(reorganize: false) }
-                .disabled(Set(placements.map(\.conceptID)).isSuperset(of: conceptIDs))
-            Button("Reorganize subject", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") { organize(reorganize: true) }
+        Menu("Topics", systemImage: "folder") {
+            Button("Expand all", systemImage: "rectangle.expand.vertical") {
+                expandedTopicIDs = topics.map { $0.id.uuidString }.sorted().joined(separator: ",")
+            }
             Button("Collapse all", systemImage: "rectangle.compress.vertical") { expandedTopicIDs = "" }
         }
-        .disabled(conceptIDs.isEmpty || imports.organization.progress[subjectID] != nil)
-    }
-    private func organize(reorganize: Bool) {
-        imports.organization.start(subjectID: subjectID, model: imports.selectedModel, reorganize: reorganize)
+        .disabled(topics.isEmpty)
     }
 }
 
@@ -186,7 +170,7 @@ private struct HierarchyConceptRow: View {
         .contextMenu {
             Button("Move to topic", systemImage: "folder") { onMove() }
             if let placement {
-                Button(placement.isLocked ? "Allow automatic organization" : "Lock placement",
+                Button(placement.isLocked ? "Unlock placement" : "Lock placement",
                     systemImage: placement.isLocked ? "lock.open" : "lock") { onLock(!placement.isLocked) }
             }
         }
@@ -214,7 +198,7 @@ struct MoveConceptTopicView: View {
             List {
                 Section {
                     Text(concept.name).font(.headline)
-                    Text("Your choice stays locked during automatic organization. You can unlock it from the concept’s menu.")
+                    Text("Your choice stays locked during future imports. You can unlock it from the concept’s topic settings.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Section("Choose a topic") {

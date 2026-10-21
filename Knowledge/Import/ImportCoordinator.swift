@@ -13,7 +13,6 @@ import SwiftData
     var modelError: String?
     var message: String?
     @ObservationIgnored let repository: KnowledgeRepository
-    @ObservationIgnored let organization: TopicOrganizationCoordinator
     @ObservationIgnored private let authentication: AuthenticationStore
     @ObservationIgnored private let client: any ChatGPTPlanRequesting
     @ObservationIgnored private let extractor: any ConceptExtractor
@@ -33,7 +32,6 @@ import SwiftData
         self.repository = repository
         let client = client ?? PlanUsageAPIClient()
         self.client = client; self.extractor = extractor ?? ChatGPTConceptExtractor(client: client); self.preferences = preferences
-        organization = .init(authentication: authentication, repository: repository, client: client, preferences: preferences)
     }
 
     func loadModels() async {
@@ -90,39 +88,113 @@ import SwiftData
               !selectedModel.isEmpty else { message = "Connect your ChatGPT plan and choose a model before processing."; return }
         do {
             let job = try repository.job(jobID)
-            guard job.status != .saved, job.status != .review else { return }
+            guard job.status != .saved else { return }
             let source = try job.prepared(), checkpoint = try job.checkpoint()
+            let storedDraft = try job.draft()
+            // A paused resolution pass may be newer than the last reviewed draft.
+            let existingDraft = job.status != .review && checkpoint.draft?.isComplete == true ? checkpoint.draft : storedDraft
+            if job.status == .review, let existingDraft, existingDraft.topicOrganization != nil,
+               !ConceptResolutionPass.hasPending(existingDraft) { return }
             let context = try repository.snapshot(subjectID: job.subjectID)
             job.accountID = accountID; job.model = selectedModel
-            try repository.update(jobID: jobID, status: .extracting)
+            try repository.update(jobID: jobID, status: existingDraft?.isComplete == true ? .connecting : .extracting)
             let initialFeed = progressJobID == jobID ? (pendingProgress ?? progress)?.feed ?? [] : []
-            let run = UUID(); runID = run; activeJobID = jobID; progress = nil; progressJobID = jobID
+            let initialProgress = existingDraft?.isComplete == true ? try progressSnapshot(for: job) : nil
+            let run = UUID(); runID = run; activeJobID = jobID; progress = initialProgress; progressJobID = jobID
             progressTask?.cancel(); progressTask = nil; pendingProgress = nil; lastProgressEmission = .distantPast
             let model = job.model
             task = Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let draft = try await self.extractor.extract(source: source, context: context, model: model, checkpoint: checkpoint,
-                        initialFeed: initialFeed,
-                        accessToken: { [weak self] in
-                            guard let self else { throw CancellationError() }
-                            try self.check(run: run, account: accountID)
-                            let token = try await self.authentication.authorizedAccessToken()
-                            try self.check(run: run, account: accountID)
-                            return token
-                        }, onCheckpoint: { [weak self] value in
-                            guard let self else { throw CancellationError() }
-                            try self.check(run: run, account: accountID)
-                            try self.repository.checkpoint(value, jobID: jobID)
-                        }, onProgress: { [weak self] progress in
-                            guard let self, self.runID == run, !Task.isCancelled else { return }
-                            self.receive(progress, run: run)
-                            // Persist stage changes, not each streaming update.
-                            do {
-                                let job = try self.repository.job(jobID)
-                                if job.status != progress.stage { try self.repository.update(jobID: jobID, status: progress.stage) }
-                            } catch { self.message = "The import stage could not be saved: \(error.localizedDescription)" }
-                        })
+                    var draft: ImportDraft
+                    if let existingDraft, existingDraft.isComplete {
+                        // Older reviewed drafts keep their edits and only finish the missing import stage.
+                        draft = existingDraft
+                    } else {
+                        draft = try await self.extractor.extract(source: source, context: context, model: model, checkpoint: checkpoint,
+                            initialFeed: initialFeed,
+                            accessToken: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                try self.check(run: run, account: accountID)
+                                let token = try await self.authentication.authorizedAccessToken()
+                                try self.check(run: run, account: accountID)
+                                return token
+                            }, onCheckpoint: { [weak self] value in
+                                guard let self else { throw CancellationError() }
+                                try self.check(run: run, account: accountID)
+                                try self.repository.checkpoint(value, jobID: jobID)
+                            }, onProgress: { [weak self] progress in
+                                guard let self, self.runID == run, !Task.isCancelled else { return }
+                                self.receive(progress, run: run)
+                                // Persist stage changes, not each streaming update.
+                                do {
+                                    let job = try self.repository.job(jobID)
+                                    if job.status != progress.stage { try self.repository.update(jobID: jobID, status: progress.stage) }
+                                } catch { self.message = "The import stage could not be saved: \(error.localizedDescription)" }
+                            })
+                    }
+                    try self.check(run: run, account: accountID)
+                    if ConceptResolutionPass.hasPending(draft) {
+                        draft = try await ConceptResolutionPass(client: self.client).resolve(draft,
+                            source: source, subject: context.name, model: model,
+                            accessToken: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                try self.check(run: run, account: accountID)
+                                let token = try await self.authentication.authorizedAccessToken()
+                                try self.check(run: run, account: accountID)
+                                return token
+                            }, onCheckpoint: { [weak self] value, usage in
+                                guard let self else { throw CancellationError() }
+                                try self.check(run: run, account: accountID)
+                                var checkpoint = try self.repository.job(jobID).checkpoint()
+                                checkpoint.draft = value
+                                if let usage { checkpoint.usage.append(usage) }
+                                try self.repository.checkpoint(checkpoint, jobID: jobID)
+                            }, onProgress: { [weak self] completed, total in
+                                guard let self, self.runID == run, !Task.isCancelled else { return }
+                                var snapshot = self.pendingProgress ?? self.progress ?? .init(stage: .connecting, completed: 0, total: 0)
+                                snapshot.isResolving = true
+                                snapshot.resolutionCompleted = completed; snapshot.resolutionTotal = total
+                                snapshot.activity = .processing
+                                self.receive(snapshot, run: run)
+                            })
+                    }
+                    try self.check(run: run, account: accountID)
+                    if draft.topicOrganization == nil {
+                        try self.repository.update(jobID: jobID, status: .connecting)
+                        let topicSnapshot = try self.repository.importOrganizationSnapshot(draft: draft,
+                            source: source, subjectID: context.subjectID)
+                        let overviewConcepts = draft.concepts.map { (id: $0.id, name: $0.name) }
+                        let organizationTotal = topicSnapshot.candidates.count
+                        let plan = try await ChatGPTTopicOrganizer(client: self.client).organize(topicSnapshot, model: model,
+                            accessToken: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                try self.check(run: run, account: accountID)
+                                let token = try await self.authentication.authorizedAccessToken()
+                                try self.check(run: run, account: accountID)
+                                return token
+                            }, onProgress: { [weak self] update in
+                                guard let self, self.runID == run, !Task.isCancelled else { return }
+                                var snapshot = self.pendingProgress ?? self.progress ?? .init(stage: .connecting, completed: 0, total: 0)
+                                snapshot.organizationLabel = update.label; snapshot.activity = .processing
+                                snapshot.isResolving = false
+                                snapshot.organizationCompleted = update.placements.count
+                                snapshot.organizationTotal = organizationTotal
+                                snapshot.topicOverviewReady = update.isComplete
+                                let overview = ImportTopicSummary.make(topics: update.topics,
+                                    placements: update.placements, concepts: overviewConcepts, includeUnsorted: false)
+                                // Keep existing cards in place as later batches reveal other topics.
+                                let visibleIDs = snapshot.topicOverview.map(\.id)
+                                snapshot.topicOverview = visibleIDs.compactMap { id in overview.first { $0.id == id } }
+                                    + overview.filter { !visibleIDs.contains($0.id) }
+                                self.receive(snapshot, run: run)
+                            })
+                        try self.check(run: run, account: accountID)
+                        draft.topicOrganization = plan
+                        var completed = try self.repository.job(jobID).checkpoint()
+                        completed.draft = draft
+                        try self.repository.checkpoint(completed, jobID: jobID)
+                    }
                     try self.check(run: run, account: accountID)
                     try self.repository.keepDraft(draft, jobID: jobID)
                 } catch {
@@ -148,7 +220,6 @@ import SwiftData
     }
 
     func pause(message: String = "Processing paused. Completed passages were kept.") {
-        organization.cancelAll()
         guard let id = activeJobID else { return }
         runID = UUID(); task?.cancel(); task = nil; activeJobID = nil
         progressTask?.cancel(); progressTask = nil
@@ -187,7 +258,6 @@ import SwiftData
         let jobIDs = Set(jobs.map(\.id))
         if let activeJobID, jobIDs.contains(activeJobID) { pause() }
         let cleanupMessage = try repository.deleteSubject(subjectID)
-        organization.cancel(subjectID: subjectID)
         if let progressJobID, jobIDs.contains(progressJobID) {
             progressTask?.cancel(); progressTask = nil
             pendingProgress = nil; progress = nil; self.progressJobID = nil
@@ -203,10 +273,7 @@ import SwiftData
     func sceneDidEnterBackground() { pause(message: "Processing paused in the background. Checked batches were kept.") }
 
     @discardableResult func save(_ draft: ImportDraft, jobID: UUID) throws -> UUID {
-        let subjectID = try repository.job(jobID).subjectID
-        let sourceID = try repository.commit(draft, jobID: jobID)
-        organization.start(subjectID: subjectID, model: selectedModel)
-        return sourceID
+        try repository.commit(draft, jobID: jobID)
     }
 
     /// UI updates coalesce across all workers. Parsing and checkpoint writes are never throttled.
@@ -235,9 +302,20 @@ import SwiftData
         let run = ImportRunProgress(source: source, chunks: chunks, checkpoint: checkpoint, report: { _ in })
         if let draft = checkpoint.draft {
             let total = (checkpoint.parts.flatMap(\.concepts).count + 11) / 12
-            run.reconciling(draft, completed: checkpoint.reconciledPartCount, total: total)
+            run.reconciling(draft, completed: checkpoint.reconciledPartCount, total: total,
+                context: try repository.snapshot(subjectID: job.subjectID))
         }
-        return run.value
+        var snapshot = run.value
+        if let draft = checkpoint.draft, draft.isComplete, ConceptResolutionPass.hasPending(draft) {
+            let candidates = ConceptResolutionPass.candidateIDs(in: draft)
+            let reviewed = Set(draft.resolutionReviewedConceptIDs ?? [])
+            snapshot.isResolving = true
+            snapshot.resolutionCompleted = candidates.filter { reviewed.contains($0) }.count
+            snapshot.resolutionTotal = candidates.count
+        } else if checkpoint.draft?.isComplete == true, checkpoint.draft?.topicOrganization == nil {
+            snapshot.organizationLabel = "Organizing import topics…"
+        }
+        return snapshot
     }
     private func check(run: UUID, account: String) throws {
         try Task.checkCancellation()

@@ -219,12 +219,13 @@ nonisolated private enum ImportBatchOutcome: Sendable {
         let batches = stride(from: 0, to: allIDs.count, by: 12).map { Array(allIDs[$0..<min($0 + 12, allIDs.count)]) }
         guard checkpoint.reconciledPartCount <= batches.count, var draft = checkpoint.draft else { throw ImportError.damagedCheckpoint }
         try ImportValidator.validateDraft(draft, source: source, context: context, requireComplete: false)
-        progress.reconciling(draft, completed: checkpoint.reconciledPartCount, total: batches.count)
+        progress.reconciling(draft, completed: checkpoint.reconciledPartCount, total: batches.count, context: context)
         for index in checkpoint.reconciledPartCount..<batches.count {
             try Task.checkCancellation()
             let batch = draft.concepts.filter { batches[index].contains($0.id) }
             let batchProgress = ImportProgressReporter(.init(stage: .connecting, completed: index, total: batches.count,
-                location: "Reviewing: " + batch.prefix(3).map(\.name).joined(separator: ", ")), report: progress.receive)
+                location: "Reviewing: " + batch.prefix(3).map(\.name).joined(separator: ", "),
+                activeConceptNames: batch.prefix(3).map(\.name)), report: progress.receive)
             if !batch.isEmpty {
                 let input = try Self.reconciliationInput(batch: batch, draft: draft, context: context)
                 let receipt = try await send(model: model, input: input, name: "knowledge_connections_v1",
@@ -247,7 +248,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
             checkpoint.draft = draft
             batchProgress.transition(.saving)
             try onCheckpoint(checkpoint)
-            progress.reconciling(draft, completed: index + 1, total: batches.count)
+            progress.reconciling(draft, completed: index + 1, total: batches.count, context: context)
         }
         draft.isComplete = true
         let excludedConcepts = Set(draft.concepts.filter { !$0.selected }.map(\.id))
@@ -264,7 +265,7 @@ nonisolated private enum ImportBatchOutcome: Sendable {
         try Task.checkCancellation()
         checkpoint.draft = draft
         try onCheckpoint(checkpoint)
-        progress.reconciling(draft, completed: batches.count, total: batches.count)
+        progress.reconciling(draft, completed: batches.count, total: batches.count, context: context)
         progress.finish()
         return draft
     }
@@ -364,7 +365,10 @@ nonisolated private enum ImportBatchOutcome: Sendable {
     }
 
     static func reconciliationInput(batch: [DraftConcept], draft: ImportDraft, context: SubjectSnapshot) throws -> ReconciliationInput {
-        func summary(_ c: DraftConcept) -> SavedConceptSummary { .init(id: c.id, name: c.name, aliases: c.aliases, explanation: c.explanation) }
+        func summary(_ c: DraftConcept) -> SavedConceptSummary {
+            .init(id: c.id, name: c.name, aliases: c.aliases, explanation: c.explanation,
+                namingNote: c.resolutionSuggestion?.status == .applied ? c.resolutionSuggestion?.namingNote : nil)
+        }
         let batchIDs = Set(batch.map(\.id))
         let batchNames = Set(batch.flatMap { [$0.name] + $0.aliases }.map(\.normalizedName))
         let terms = Set(batchNames.flatMap { $0.split(whereSeparator: { !$0.isLetter }).map(String.init) }.filter { $0.count > 2 })
