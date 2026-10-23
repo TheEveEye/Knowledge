@@ -38,9 +38,12 @@ struct ImportReviewView: View {
                 ImportDraftActionsMenu(onDiscard: discard)
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button("Save", systemImage: "checkmark") {
                     imports.save(draft, jobID: jobID)
-                }.disabled(!loaded || saved || imports.merges.isSaving(jobID))
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderedProminent)
+                .disabled(!loaded || saved || imports.merges.isSaving(jobID))
             }
         }
         .task {
