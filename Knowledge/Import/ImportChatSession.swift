@@ -302,6 +302,7 @@ nonisolated struct ImportChatMessage: Identifiable {
     Changes remain in the draft until the user presses Save. Successful batches have an Undo control in the conversation.
     Reply briefly in the user's language. Distinguish actual completed changes, queued work, and failures.
     Use short paragraphs and simple bullet or numbered lists when helpful. You may use Markdown bold, italic, strikethrough, inline code, and links.
+    For math, use LaTeX with \\( ... \\) for inline formulas and \\[ ... \\] for display equations. Keep syntax examples inside inline code literal.
     Avoid headings, tables, HTML, images, underlining, and fenced code blocks. Keep lists unnested and separate paragraphs with blank lines.
     """
 }

@@ -243,14 +243,12 @@ private struct ImportChatConversation: View {
     }
 
     private func messageBubble(_ message: ImportChatMessage) -> some View {
-        let content = formattedContent(for: message)
         return VStack(alignment: .leading, spacing: 8) {
-            Text(content)
+            messageContent(message)
                 .font(.body)
                 .contentTransition(reduceMotion ? .identity : .interpolate)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: message.text)
                 .textSelection(.enabled)
-                .accessibilityLabel(message.role == .user ? "You: \(message.text)" : String(content.characters))
             if let id = message.retryID {
                 Button("Try again", systemImage: "arrow.clockwise") { session.retry(id) }
                     .buttonStyle(.borderless)
@@ -274,13 +272,13 @@ private struct ImportChatConversation: View {
         .onTapGesture(perform: onMessageTap)
     }
 
-    private func formattedContent(for message: ImportChatMessage) -> AttributedString {
-        guard message.role == .assistant else { return AttributedString(message.text) }
-        // Preserve paragraphs and simple list markers, including while a reply streams.
-        return (try? AttributedString(
-            markdown: message.text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(message.text)
+    @ViewBuilder private func messageContent(_ message: ImportChatMessage) -> some View {
+        if message.role == .assistant {
+            ImportChatMathText(source: message.text)
+        } else {
+            Text(message.text)
+                .accessibilityLabel(message.role == .user ? "You: \(message.text)" : message.text)
+        }
     }
 }
 

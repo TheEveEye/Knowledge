@@ -1,5 +1,5 @@
 {
-  "originHash" : "e0ac3fd34b7305dbde096625b8eefa11940bc1a3b6d213527e91bedce8a4b7ac",
+  "originHash" : "2134568b9ca470c2388d8eb91a60d96b00f005da4f326b50f33d85956acf236f",
   "pins" : [
     {
       "identity" : "jwt-kit",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "1b55c7529eff82cd9fa907e67a539404459a02e6",
         "version" : "5.7.1"
+      }
+    },
+    {
+      "identity" : "mathjaxswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/colinc86/MathJaxSwift",
+      "state" : {
+        "revision" : "00e9c3df6b1c82031c7fe3785028f3d21c0d73ba",
+        "version" : "3.5.0"
       }
     },
     {
@@ -44,6 +53,15 @@
       "state" : {
         "revision" : "9c6fb14227f55d8f711ce3847dc2f419fb0ecacb",
         "version" : "1.15.1"
+      }
+    },
+    {
+      "identity" : "swiftdraw",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swhitty/SwiftDraw",
+      "state" : {
+        "revision" : "82699f4bdf2f075793cfa0d392eb27c59b41a3fe",
+        "version" : "0.29.0"
       }
     }
   ],

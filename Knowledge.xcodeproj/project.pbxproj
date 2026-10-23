@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		A11000000000000000000001 /* JWTKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11000000000000000000002 /* JWTKit */; };
+		A12000000000000000000003 /* MathJaxSwift in Frameworks */ = {isa = PBXBuildFile; productRef = A12000000000000000000004 /* MathJaxSwift */; };
+		A12000000000000000000005 /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = A12000000000000000000006 /* SwiftDraw */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +29,8 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				A11000000000000000000001 /* JWTKit in Frameworks */,
+				A12000000000000000000003 /* MathJaxSwift in Frameworks */,
+				A12000000000000000000005 /* SwiftDraw in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -67,6 +71,8 @@
 			name = Knowledge;
 			packageProductDependencies = (
 				A11000000000000000000002 /* JWTKit */,
+				A12000000000000000000004 /* MathJaxSwift */,
+				A12000000000000000000006 /* SwiftDraw */,
 			);
 			productName = Knowledge;
 			productReference = 75FDB43D30740D3400463F99 /* Knowledge.app */;
@@ -98,6 +104,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */,
+				A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */,
+				A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 75FDB43E30740D3400463F99 /* Products */;
@@ -334,6 +342,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/colinc86/MathJaxSwift";
+			requirement = { kind = upToNextMajorVersion; minimumVersion = 3.5.0; };
+		};
+		A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swhitty/SwiftDraw";
+			requirement = { kind = upToNextMajorVersion; minimumVersion = 0.29.0; };
+		};
 		A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/vapor/jwt-kit.git";
@@ -345,6 +363,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A12000000000000000000004 /* MathJaxSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */;
+			productName = MathJaxSwift;
+		};
+		A12000000000000000000006 /* SwiftDraw */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */;
+			productName = SwiftDraw;
+		};
 		A11000000000000000000002 /* JWTKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */;
