@@ -44,7 +44,7 @@ nonisolated struct LibraryRecord: Codable, Sendable, Equatable, Identifiable {
 
 nonisolated struct SubjectVersionSnapshot: Codable, Sendable, Equatable {
     let subjectID: UUID
-    var revisionID: UUID?
+    let revisionID: UUID
     var records: [String: LibraryRecord]
     var name: String { records[LibraryRecord.key(.subject, subjectID)]?.text("name") ?? "Subject" }
     func active(_ kind: LibraryEntityKind) -> [LibraryRecord] {
@@ -93,13 +93,12 @@ nonisolated struct LibraryChange: Codable, Sendable, Equatable, Identifiable {
 }
 
 nonisolated struct LibraryChangeSet: Codable, Sendable, Equatable {
-    let baseRevisionID: UUID?
     let draftVersion: Int
     let fingerprint: String
     var changes: [LibraryChange]
     var explanations: [String] = []
     static func diff(from before: SubjectVersionSnapshot, to after: SubjectVersionSnapshot, draftVersion: Int = 0, fingerprint: String = "") -> Self {
-        .init(baseRevisionID: before.revisionID, draftVersion: draftVersion, fingerprint: fingerprint,
+        .init(draftVersion: draftVersion, fingerprint: fingerprint,
             changes: Set(before.records.keys).union(after.records.keys).sorted().compactMap { key in
                 let old = before.records[key], new = after.records[key]
                 return old == new ? nil : .init(key: key, before: old, after: new)
@@ -131,7 +130,6 @@ nonisolated struct MergePlan: Codable, Sendable, Equatable {
     var result: SubjectVersionSnapshot
     var explanations: [String] = []
     var conflicts: [LibraryMergeConflict] = []
-    var identityMappings: [String: UUID] = [:]
     var undoesRevisionID: UUID? = nil
     var retainedCount = 0
     var checkedSemanticKeys: [String] = []
@@ -166,10 +164,8 @@ nonisolated struct MergePlan: Codable, Sendable, Equatable {
 nonisolated struct DraftBranchState: Codable, Sendable {
     let baseRevisionID: UUID
     var operationID = UUID()
-    var changeSet: LibraryChangeSet? = nil
     var plan: MergePlan? = nil
-    var explanations: [String] = []
-    var semanticResults: [LibrarySemanticResult]? = nil
+    var semanticResults: [LibrarySemanticResult] = []
 }
 
 nonisolated struct LibraryContentProposal: Codable, Sendable {
@@ -206,9 +202,10 @@ nonisolated enum LibraryCoding {
 }
 
 @Model final class LibraryEntityVersion {
-    @Attribute(.unique) var hash: String
+    // Core Data reserves `hash` for managed-object identity.
+    @Attribute(.unique, originalName: "hash") var contentHash: String
     var payload: Data
-    init(hash: String, payload: Data) { self.hash = hash; self.payload = payload }
+    init(contentHash: String, payload: Data) { self.contentHash = contentHash; self.payload = payload }
 }
 
 @Model final class SubjectRevisionRecord {
@@ -222,16 +219,16 @@ nonisolated enum LibraryCoding {
     var manifestData: Data
     var changesData: Data
     var explanationsData: Data
-    var mappingsData: Data
     var jobID: UUID?
     var undoesRevisionID: UUID?
-    var summary: String? = nil
+    var summary: String
     init(id: UUID, operationID: UUID, subjectID: UUID, parentID: UUID?, origin: String, title: String,
-        manifestData: Data, changesData: Data, explanationsData: Data, mappingsData: Data, jobID: UUID? = nil, undoesRevisionID: UUID? = nil) {
+        manifestData: Data, changesData: Data, explanationsData: Data, summary: String, jobID: UUID? = nil, undoesRevisionID: UUID? = nil) {
         self.id = id; self.operationID = operationID; self.subjectID = subjectID; self.parentID = parentID
         self.origin = origin; self.title = title; self.createdAt = .now; self.manifestData = manifestData
-        self.changesData = changesData; self.explanationsData = explanationsData; self.mappingsData = mappingsData
+        self.changesData = changesData; self.explanationsData = explanationsData
         self.jobID = jobID; self.undoesRevisionID = undoesRevisionID
+        self.summary = summary
     }
 }
 
@@ -242,9 +239,10 @@ nonisolated enum LibraryCoding {
     var entityID: UUID
     var entityKind: String
     var originalData: Data
-    var isRetired = false
+    var isRetired: Bool
     init(id: UUID, subjectID: UUID, sourceID: UUID, entityID: UUID, entityKind: String, originalData: Data) {
         self.id = id; self.subjectID = subjectID; self.sourceID = sourceID; self.entityID = entityID
         self.entityKind = entityKind; self.originalData = originalData
+        isRetired = false
     }
 }

@@ -106,7 +106,7 @@ struct LibraryHistoryView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(revision.title).font(.headline)
                         Text(revision.createdAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
-                        if let summary = revision.summary { Text(summary).font(.caption).foregroundStyle(.secondary) }
+                        Text(revision.summary).font(.caption).foregroundStyle(.secondary)
                         if revisions.contains(where: { $0.undoesRevisionID == revision.id }) { Text("Undone").font(.caption).foregroundStyle(.secondary) }
                     }
                 }

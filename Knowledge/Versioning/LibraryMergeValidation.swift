@@ -119,7 +119,7 @@ extension KnowledgeRepository {
         if let undoes = plan.undoesRevisionID {
             let target = try revision(undoes)
             guard target.subjectID == subjectID, target.origin == "import" else { throw LibraryMergeError.invalid("This import cannot be undone.") }
-            guard try context.fetchCount(FetchDescriptor<SubjectRevisionRecord>(predicate: #Predicate { $0.undoesRevisionID == undoes })) == 0 else { return before.revisionID! }
+            guard try context.fetchCount(FetchDescriptor<SubjectRevisionRecord>(predicate: #Predicate { $0.undoesRevisionID == undoes })) == 0 else { return before.revisionID }
             title = "Undid “\(target.title)”"
         }
         try LibraryMergeValidation.structure(plan.result)
@@ -128,9 +128,9 @@ extension KnowledgeRepository {
         defer { context.autosaveEnabled = autosave }
         do {
             try materialize(plan.result, changes: changes, newSource: source, newSourceData: job?.preparedData, payloads: prepared.modelPayloads)
-            let revisionID = try appendRevision(snapshot: plan.result, origin: plan.undoesRevisionID == nil ? "import" : "undo",
+            let revisionID = try appendRevision(snapshot: plan.result, parentID: expectedSubjectRevision, origin: plan.undoesRevisionID == nil ? "import" : "undo",
                 title: title, operationID: operationID, changes: changes, explanations: plan.explanations,
-                mappings: prepared.mappings, jobID: jobID, undoes: plan.undoesRevisionID, prepared: prepared)
+                jobID: jobID, undoes: plan.undoesRevisionID, prepared: prepared)
             if let job {
                 job.status = .saved; job.savedAt = .now; job.updatedAt = .now; job.lastError = nil
             }
@@ -148,8 +148,7 @@ extension KnowledgeRepository {
 nonisolated enum LibraryUndoPlanner {
     @concurrent static func prepare(revisionID: UUID, operationID: UUID, changes: [LibraryChange], current: SubjectVersionSnapshot,
         laterManualFields: [String: Set<String>] = [:]) async throws -> MergePlan {
-        guard let head = current.revisionID else { throw LibraryMergeError.changed }
-        var plan = MergePlan(operationID: operationID, expectedRevisionID: head, draftVersion: 0, fingerprint: "",
+        var plan = MergePlan(operationID: operationID, expectedRevisionID: current.revisionID, draftVersion: 0, fingerprint: "",
             result: current, undoesRevisionID: revisionID)
         let introduced = Set(changes.filter { $0.before == nil }.map(\.key))
         var needed: Set<String> = []

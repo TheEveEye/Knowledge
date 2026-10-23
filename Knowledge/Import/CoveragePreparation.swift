@@ -7,6 +7,11 @@ nonisolated enum CoveragePreparation {
         let decisions = Dictionary(grouping: payload.coverage, by: \.segmentID)
         let coverage = chunk.requiredSegmentIDs.map { id -> CoverageDecision in
             let values = decisions[id] ?? []
+            if let request = values.compactMap({ ImportValidator.reason($0.contextRequest) }).first {
+                return .init(segmentID: id, disposition: .uncertain,
+                    reason: values.first(where: { !$0.reason.trimmed.isEmpty })?.reason ?? request,
+                    contextRequest: request, contentKind: values.first?.contentKind)
+            }
             let dispositions = Set(values.map { $0.disposition.rawValue })
             if values.contains(where: { $0.disposition == .uncertain }) || dispositions.count > 1 {
                 return .init(segmentID: id, disposition: .uncertain,
@@ -14,6 +19,9 @@ nonisolated enum CoveragePreparation {
                         ?? "ChatGPT gave conflicting coverage decisions for this passage. Inspect its original text and cited entries.")
             }
             if cited.contains(id) {
+                if let structural = values.first(where: { $0.disposition == .excluded && $0.contentKind == .structural }) {
+                    return structural
+                }
                 if values.contains(where: { $0.disposition == .excluded }) {
                     return .init(segmentID: id, disposition: .uncertain,
                         reason: "ChatGPT excluded this passage but also used it as evidence. Inspect the cited entries.")
@@ -27,10 +35,13 @@ nonisolated enum CoveragePreparation {
         return .init(concepts: payload.concepts, facts: payload.facts, connections: payload.connections, coverage: coverage)
     }
 
-    static func uncitedPassageIDs(_ payload: ExtractionPayload, chunk: SourceChunk) -> [String] {
+    static func passageIDsNeedingRecovery(_ payload: ExtractionPayload, chunk: SourceChunk) -> [String] {
         let cited = Set((payload.concepts.flatMap(\.evidence) + payload.facts.flatMap(\.evidence)).map(\.segmentID))
+        let decisions = Dictionary(grouping: payload.coverage, by: \.segmentID)
         return chunk.requiredSegmentIDs.filter { id in
-            !cited.contains(id) && !payload.coverage.contains { $0.segmentID == id && ($0.disposition == .excluded || $0.disposition == .uncertain) }
+            let values = decisions[id] ?? []
+            if values.contains(where: { $0.disposition == .uncertain || ImportValidator.reason($0.contextRequest) != nil }) { return true }
+            return !cited.contains(id) && !values.contains(where: { $0.disposition == .excluded })
         }
     }
 }

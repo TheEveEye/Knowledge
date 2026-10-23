@@ -14,8 +14,6 @@ nonisolated struct LibraryPreparedCommit: Sendable {
     let versions: [String: Data]
     let changesData: Data
     let explanationsData: Data
-    let mappings: [String: UUID]
-    let mappingsData: Data
     let modelPayloads: [String: LibraryModelPayload]
     let expectedDraftData: Data?
     let summary: String
@@ -27,13 +25,11 @@ nonisolated struct LibraryPreparedCommit: Sendable {
         let changes = LibraryChangeSet.diff(from: before, to: plan.result).changes
         let changed = Set(changes.map(\.key))
         var manifest: [String: String] = [:], versions: [String: Data] = [:], payloads: [String: LibraryModelPayload] = [:]
-        var mappings: [String: UUID] = [:]
         for (key, record) in plan.result.records {
             if !changed.contains(key), let hash = oldManifest[key] { manifest[key] = hash; continue }
             let payload = try LibraryCoding.encode(record), hash = LibraryCoding.hash(payload)
             manifest[key] = hash; versions[hash] = payload
             payloads[key] = .init(evidence: try LibraryCoding.encode(record.evidence), protectedFields: record.protectedFields.sorted())
-            if record.isRetired, let target = record.redirectID { mappings[key] = target }
         }
         let decisions = plan.conflicts.compactMap { conflict -> String? in
             guard let choice = conflict.choice else { return nil }
@@ -42,8 +38,7 @@ nonisolated struct LibraryPreparedCommit: Sendable {
         let retained = plan.retainedCount + plan.conflicts.filter { $0.choice == .current }.count
         return .init(expectedRevisionID: plan.expectedRevisionID, operationID: plan.operationID, changes: changes,
             manifestData: try LibraryCoding.encode(manifest), versions: versions, changesData: try LibraryCoding.encode(changes),
-            explanationsData: try LibraryCoding.encode(plan.explanations + decisions), mappings: mappings,
-            mappingsData: try LibraryCoding.encode(mappings), modelPayloads: payloads, expectedDraftData: draftData,
+            explanationsData: try LibraryCoding.encode(plan.explanations + decisions), modelPayloads: payloads, expectedDraftData: draftData,
             summary: plan.undoesRevisionID == nil ? LibraryChangeSummary.text(changes)
                 : "Import undone." + (retained > 0 ? " " + LibraryChangeSummary.retained(retained) : ""))
     }

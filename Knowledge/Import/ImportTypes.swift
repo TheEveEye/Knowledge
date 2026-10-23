@@ -57,6 +57,10 @@ nonisolated struct CoverageDecision: Codable, Sendable, Equatable {
     let segmentID: String
     let disposition: CoverageDisposition
     let reason: String
+    /// Non-nil when resolving this passage requires more source context, rather than exclusion.
+    var contextRequest: String? = nil
+    enum ContentKind: String, Codable, Sendable { case structural, substantive }
+    var contentKind: ContentKind? = nil
 }
 
 nonisolated struct ExtractedConcept: Codable, Sendable {
@@ -112,6 +116,7 @@ nonisolated struct DraftConcept: Codable, Sendable, Identifiable {
     var mergeReason: String? = nil
     var acceptMerge: Bool = false
     var resolutionSuggestion: ConceptResolutionSuggestion? = nil
+    var reviewIssueIDs: [UUID]? = nil
     var isUserEdited: Bool { (reviewBaseline ?? original) != ConceptWording(name: name, aliases: aliases, explanation: explanation) }
 }
 nonisolated struct FactWording: Codable, Sendable, Equatable {
@@ -129,7 +134,9 @@ nonisolated struct DraftFact: Codable, Sendable, Identifiable {
     let original: FactWording
     var reviewReason: String?
     var selected: Bool
-    var isUserEdited: Bool { original != FactWording(statement: statement, kind: kind, qualifications: qualifications) }
+    var reviewIssueIDs: [UUID]? = nil
+    var reviewBaseline: FactWording? = nil
+    var isUserEdited: Bool { (reviewBaseline ?? original) != FactWording(statement: statement, kind: kind, qualifications: qualifications) }
 }
 nonisolated struct ConnectionWording: Codable, Sendable, Equatable {
     let kind: ConnectionKind
@@ -147,7 +154,9 @@ nonisolated struct DraftConnection: Codable, Sendable, Identifiable {
     let isInferred: Bool
     var reviewReason: String?
     var selected: Bool
-    var isUserEdited: Bool { original != ConnectionWording(kind: kind, explanation: explanation) }
+    var reviewIssueIDs: [UUID]? = nil
+    var reviewBaseline: ConnectionWording? = nil
+    var isUserEdited: Bool { (reviewBaseline ?? original) != ConnectionWording(kind: kind, explanation: explanation) }
 }
 
 nonisolated struct ImportDraft: Codable, Sendable {
@@ -165,6 +174,7 @@ nonisolated struct ImportDraft: Codable, Sendable {
     /// User acknowledgements preserve the model's coverage decision and original reason.
     var reviewedPassageIDs: [String] = []
     var libraryProposals: [LibraryContentProposal] = []
+    var reviewTracking: ImportReviewTracking? = nil
 
     var passagesNeedingReview: [CoverageDecision] {
         let reviewed = Set(reviewedPassageIDs)
@@ -181,15 +191,18 @@ nonisolated struct ImportDraft: Codable, Sendable {
         ids.removeAll { $0 == segmentID }
         if reviewed { ids.append(segmentID) }
         reviewedPassageIDs = ids
+        if reviewTracking != nil {
+            updatePassageAcknowledgement(segmentID, reviewed: reviewed)
+        }
     }
 
     func name(for id: UUID, in context: SubjectSnapshot) -> String {
         concepts.first { $0.id == id }?.name ?? context.concepts.first { $0.id == id }?.name ?? "Unavailable concept"
     }
     var unresolvedCount: Int {
-        concepts.filter { $0.reviewReason != nil }.count + facts.filter { $0.reviewReason != nil }.count
+        if let reviewTracking { return reviewTracking.issues.filter(\.isBlocking).count }
+        return concepts.filter { $0.reviewReason != nil }.count + facts.filter { $0.reviewReason != nil }.count
         + connections.filter { $0.reviewReason != nil }.count + passagesNeedingReview.count + existingFactReviews.count
-        + excludedConnections.count
     }
 }
 
@@ -223,7 +236,7 @@ nonisolated struct SubjectSnapshot: Codable, Sendable {
     let name: String
     var concepts: [SavedConceptSummary]
     var facts: [SavedFactSummary]
-    var connections: [SavedConnectionSummary] = []
+    var connections: [SavedConnectionSummary]
 }
 
 nonisolated struct SavedConnectionSummary: Codable, Sendable {
@@ -257,7 +270,28 @@ nonisolated struct ReconciliationPayload: Codable, Sendable {
     let decisions: [MergeDecision]
     let connections: [SuggestedConnection]
     let factReviews: [FactReview]
-    var updates: [LibraryContentProposal]? = nil
+    let updates: [LibraryContentProposal]
+}
+
+/// The wire format requires one keyed decision per concept; the application keeps an ordered array.
+nonisolated struct ReconciliationResponse: Decodable, Sendable {
+    struct Decision: Decodable, Sendable {
+        let mergeWithID: UUID?
+        let reason: String
+        let reviewReason: String?
+    }
+    let decisions: [String: Decision]
+    let connections: [SuggestedConnection]
+    let factReviews: [FactReview]
+    let updates: [LibraryContentProposal]
+
+    func payload() throws -> ReconciliationPayload {
+        let values = try decisions.sorted { $0.key < $1.key }.map { key, value -> MergeDecision in
+            guard let id = UUID(uuidString: key) else { throw ImportValidator.invalid("An invalid reconciliation key was returned.") }
+            return .init(conceptID: id, mergeWithID: value.mergeWithID, reason: value.reason, reviewReason: value.reviewReason)
+        }
+        return .init(decisions: values, connections: connections, factReviews: factReviews, updates: updates)
+    }
 }
 
 nonisolated struct ImportRequestUsage: Codable, Sendable {
@@ -271,6 +305,7 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
     // Source-checked batches can still have optional, isolated patch work. Never library entries.
     var pendingPatches: [PendingImportPatch] = []
     var draft: ImportDraft? = nil
+    var topicOrganization: TopicOrganizationCheckpoint? = nil
     var reconciledPartCount = 0
     var usage: [ImportRequestUsage] = []
 
@@ -280,7 +315,7 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case completedBatches, batchErrors, pendingPatches, draft, reconciledPartCount, usage
+        case completedBatches, batchErrors, pendingPatches, draft, topicOrganization, reconciledPartCount, usage
     }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -288,6 +323,7 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
         batchErrors = try values.decode([ImportBatchError].self, forKey: .batchErrors)
         pendingPatches = try values.decode([PendingImportPatch].self, forKey: .pendingPatches)
         draft = try values.decodeIfPresent(ImportDraft.self, forKey: .draft)
+        topicOrganization = try values.decodeIfPresent(TopicOrganizationCheckpoint.self, forKey: .topicOrganization)
         reconciledPartCount = try values.decode(Int.self, forKey: .reconciledPartCount)
         usage = try values.decode([ImportRequestUsage].self, forKey: .usage)
         try validateIndices()
@@ -299,6 +335,7 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
         try values.encode(batchErrors, forKey: .batchErrors)
         try values.encode(pendingPatches, forKey: .pendingPatches)
         try values.encodeIfPresent(draft, forKey: .draft)
+        try values.encodeIfPresent(topicOrganization, forKey: .topicOrganization)
         try values.encode(reconciledPartCount, forKey: .reconciledPartCount)
         try values.encode(usage, forKey: .usage)
     }
@@ -307,6 +344,7 @@ nonisolated struct ImportCheckpoint: Codable, Sendable {
         guard reconciledPartCount >= 0, Set(completed).count == completed.count,
               Set(patches).count == patches.count, Set(patches).isSubset(of: completed),
               pendingPatches.isEmpty || (draft == nil && reconciledPartCount == 0),
+              topicOrganization == nil || (draft?.isComplete == true && draft?.topicOrganization == nil),
               Set(failed).count == failed.count, Set(completed).isDisjoint(with: failed),
               (completed + failed).allSatisfy({ $0 >= 0 && (batchCount == nil || $0 < batchCount!) }) else {
             throw ImportError.damagedCheckpoint
@@ -320,6 +358,8 @@ nonisolated struct PendingImportPatch: Codable, Sendable {
     let facts: [ExtractedFact]
     var connections: [PendingConnectionPatch]
     var passageIDs: [String]
+    var contextAttempt: Int? = nil
+    var lastContextSegmentIDs: [String]? = nil
 }
 
 nonisolated struct PendingConnectionPatch: Codable, Sendable {
@@ -383,7 +423,7 @@ nonisolated enum ImportError: Error, LocalizedError, Equatable {
         case .invalidExtraction(let reason): "The extraction could not be validated: \(reason) Retry this import or choose another model."
         case .incompleteDraft: "Finish processing all passages before saving this import."
         case .accountChanged: "The ChatGPT account changed. Processing stopped and your draft was kept."
-        case .busy: "Another import is running. Pause it before starting this one."
+        case .busy: "This import is already processing or saving."
         case .invalidSelection(let reason): reason
         case .damagedCheckpoint: "This saved draft could not be read. Keep the original source and start a new import."
         }

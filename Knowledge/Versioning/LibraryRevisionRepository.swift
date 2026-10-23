@@ -79,7 +79,7 @@ extension KnowledgeRepository {
         let manifest = try JSONDecoder().decode([String: String].self, from: revision.manifestData)
         var records: [String: LibraryRecord] = [:]
         for (key, hash) in manifest {
-            guard let version = try container.mainContext.fetch(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.hash == hash })).first else {
+            guard let version = try container.mainContext.fetch(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.contentHash == hash })).first else {
                 throw LibraryMergeError.invalid("An entry in this subject’s history is unavailable.")
             }
             let record = try JSONDecoder().decode(LibraryRecord.self, from: version.payload)
@@ -90,10 +90,10 @@ extension KnowledgeRepository {
     }
 
     func currentRevisionID(subjectID: UUID) throws -> UUID {
-        guard let id = try versionSnapshot(subjectID: subjectID).revisionID else {
-            throw LibraryMergeError.invalid("The saved history for this subject is unavailable.")
+        guard let subject = try container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else {
+            throw LibraryMergeError.invalid("This subject is unavailable.")
         }
-        return id
+        return subject.currentRevisionID
     }
 
     func branch(for job: KnowledgeImportJob) throws -> DraftBranchState {
@@ -104,11 +104,10 @@ extension KnowledgeRepository {
         try revisionSnapshot(branch(for: job).baseRevisionID)
     }
 
-    func saveBranch(_ branch: DraftBranchState, jobID: UUID, encoded: Data? = nil, expectedVersion: Int? = nil) throws {
+    func saveBranch(_ data: Data, jobID: UUID, expectedVersion: Int) throws {
         let job = try job(jobID)
         guard job.status != .saved else { return }
-        if let expectedVersion, job.draftEditVersion != expectedVersion { throw LibraryMergeError.changed }
-        let data = try encoded ?? LibraryCoding.encode(branch)
+        guard job.draftEditVersion == expectedVersion else { throw LibraryMergeError.changed }
         let previous = job.branchData
         do { job.branchData = data; try container.mainContext.save() }
         catch { job.branchData = previous; throw error }
@@ -117,7 +116,6 @@ extension KnowledgeRepository {
     /// All materialized library writes and their history share the same transaction.
     func libraryMutation(subjectID: UUID, title: String, protect: [String: Set<String>] = [:], mutation: () throws -> Void) throws {
         let before = try versionSnapshot(subjectID: subjectID)
-        guard before.revisionID != nil else { throw LibraryMergeError.invalid("The saved history for this subject is unavailable.") }
         let context = container.mainContext, autosave = container.mainContext.autosaveEnabled
         context.autosaveEnabled = false
         defer { context.autosaveEnabled = autosave }
@@ -128,24 +126,24 @@ extension KnowledgeRepository {
             let changes = LibraryChangeSet.diff(from: before, to: after).changes
             if changes.isEmpty { return }
             try materialize(after, changes: changes)
-            _ = try appendRevision(snapshot: after, origin: "manual", title: title, operationID: UUID(), changes: changes, explanations: [], mappings: [:])
+            _ = try appendRevision(snapshot: after, parentID: before.revisionID, origin: "manual", title: title, operationID: UUID(), changes: changes, explanations: [])
             try context.save()
         } catch { context.rollback(); throw error }
     }
 
-    @discardableResult func appendRevision(snapshot: SubjectVersionSnapshot, origin: String, title: String, operationID: UUID,
-        changes: [LibraryChange], explanations: [String], mappings: [String: UUID], jobID: UUID? = nil, undoes: UUID? = nil,
+    @discardableResult func appendRevision(snapshot: SubjectVersionSnapshot, id: UUID = UUID(), parentID: UUID?, origin: String, title: String, operationID: UUID,
+        changes: [LibraryChange], explanations: [String], jobID: UUID? = nil, undoes: UUID? = nil,
         prepared: LibraryPreparedCommit? = nil) throws -> UUID {
         let context = container.mainContext
         var manifest: [String: String] = [:]
         let oldManifest: [String: String]
-        if let parent = snapshot.revisionID, prepared == nil { oldManifest = try JSONDecoder().decode([String: String].self, from: revision(parent).manifestData) }
+        if let parentID, prepared == nil { oldManifest = try JSONDecoder().decode([String: String].self, from: revision(parentID).manifestData) }
         else { oldManifest = [:] }
         let changedKeys = Set(changes.map(\.key))
         if let prepared {
             for (hash, payload) in prepared.versions {
-                if try context.fetchCount(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.hash == hash })) == 0 {
-                    context.insert(LibraryEntityVersion(hash: hash, payload: payload))
+                if try context.fetchCount(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.contentHash == hash })) == 0 {
+                    context.insert(LibraryEntityVersion(contentHash: hash, payload: payload))
                 }
             }
         }
@@ -153,16 +151,15 @@ extension KnowledgeRepository {
             if !changedKeys.contains(key), let existing = oldManifest[key] { manifest[key] = existing; continue }
             let payload = try LibraryCoding.encode(record), hash = LibraryCoding.hash(payload)
             manifest[key] = hash
-            if try context.fetchCount(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.hash == hash })) == 0 {
-                context.insert(LibraryEntityVersion(hash: hash, payload: payload))
+            if try context.fetchCount(FetchDescriptor<LibraryEntityVersion>(predicate: #Predicate { $0.contentHash == hash })) == 0 {
+                context.insert(LibraryEntityVersion(contentHash: hash, payload: payload))
             }
         }
-        let id = UUID()
         let revision = SubjectRevisionRecord(id: id, operationID: operationID, subjectID: snapshot.subjectID,
-            parentID: snapshot.revisionID, origin: origin, title: title, manifestData: try prepared?.manifestData ?? LibraryCoding.encode(manifest),
+            parentID: parentID, origin: origin, title: title, manifestData: try prepared?.manifestData ?? LibraryCoding.encode(manifest),
             changesData: try prepared?.changesData ?? LibraryCoding.encode(changes), explanationsData: try prepared?.explanationsData ?? LibraryCoding.encode(explanations),
-            mappingsData: try prepared?.mappingsData ?? LibraryCoding.encode(mappings), jobID: jobID, undoesRevisionID: undoes)
-        revision.summary = prepared?.summary ?? LibraryChangeSummary.text(changes)
+            summary: prepared?.summary ?? LibraryChangeSummary.text(changes),
+            jobID: jobID, undoesRevisionID: undoes)
         context.insert(revision)
         let subjectID = snapshot.subjectID
         guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else {
@@ -198,51 +195,48 @@ extension KnowledgeRepository {
                 let item: KnowledgeSource
                 if let existing = sources[r.id] { item = existing }
                 else {
-                    guard let newSource, newSource.id == r.id else { throw LibraryMergeError.invalid("The original source is unavailable.") }
-                    item = try KnowledgeSource(subjectID: subjectID, source: newSource, reviewNotes: r.strings("reviewNotes"), encodedPreparedData: newSourceData); context.insert(item); sources[r.id] = item
+                    guard let newSource, newSource.id == r.id, let newSourceData else { throw LibraryMergeError.invalid("The original source is unavailable.") }
+                    item = KnowledgeSource(subjectID: subjectID, source: newSource, reviewNotes: r.strings("reviewNotes"), preparedData: newSourceData); context.insert(item); sources[r.id] = item
                 }
                 item.isArchived = r.isRetired; item.title = r.text("title"); item.reviewNotes = r.strings("reviewNotes")
             case .concept:
+                guard let wordings = r.data("wordings") else { throw LibraryMergeError.invalid("A concept has no source wording.") }
                 let item: KnowledgeConcept
                 if let existing = concepts[r.id] { item = existing }
                 else {
-                    guard let sourceID = r.references("sourceIDs").first else { throw LibraryMergeError.invalid("A concept has no source.") }
-                    let wording = ConceptWording(name: r.text("name"), aliases: r.strings("aliases"), explanation: r.text("explanation"))
-                    item = try KnowledgeConcept(subjectID: subjectID, sourceID: sourceID, draft: .init(id: r.id, name: wording.name, aliases: wording.aliases, explanation: wording.explanation, evidence: r.evidence, original: wording, selected: true), encodedEvidenceData: evidenceData, encodedWordingsData: r.data("wordings"))
+                    guard !r.references("sourceIDs").isEmpty else { throw LibraryMergeError.invalid("A concept has no source.") }
+                    item = KnowledgeConcept(subjectID: subjectID, record: r, wordingsData: wordings, evidenceData: evidenceData)
                     context.insert(item); concepts[r.id] = item
                 }
                 item.name = r.text("name"); item.aliases = r.strings("aliases"); item.explanation = r.text("explanation")
-                guard let wordings = r.data("wordings") else { throw LibraryMergeError.invalid("A concept has no source wording.") }
                 item.sourceIDs = r.references("sourceIDs"); item.sourceWordingsData = wordings
                 item.evidenceData = evidenceData; item.isUserEdited = r.bool("isUserEdited")
                 item.reviewNote = r.fields["reviewNote"].map { _ in r.text("reviewNote") }; item.manualFields = manual
                 item.isRetired = r.isRetired; item.redirectID = r.redirectID
             case .fact:
                 guard let owner = r.reference("conceptID"), let sourceID = r.reference("sourceID"), let kind = FactKind(rawValue: r.text("kind")) else { throw LibraryMergeError.invalid("A fact has invalid references.") }
+                guard let original = r.data("original") else { throw LibraryMergeError.invalid("A fact has no original wording.") }
                 let item: KnowledgeFact
                 if let existing = facts[r.id] { item = existing }
                 else {
-                    let original = FactWording(statement: r.text("statement"), kind: kind, qualifications: r.text("qualifications"))
-                    item = try KnowledgeFact(subjectID: subjectID, sourceID: sourceID, conceptID: owner, draft: .init(id: r.id, conceptID: owner, statement: original.statement, kind: kind, qualifications: original.qualifications, evidence: r.evidence, original: original, selected: true), encodedEvidenceData: evidenceData)
+                    item = KnowledgeFact(subjectID: subjectID, sourceID: sourceID, conceptID: owner, record: r, originalData: original, evidenceData: evidenceData)
                     context.insert(item); facts[r.id] = item
                 }
                 item.conceptID = owner; item.statement = r.text("statement"); item.kindRaw = kind.rawValue; item.qualifications = r.text("qualifications")
-                guard let original = r.data("original") else { throw LibraryMergeError.invalid("A fact has no original wording.") }
                 item.originalData = original; item.evidenceData = evidenceData
                 item.isUserEdited = r.bool("isUserEdited"); item.reviewNote = r.fields["reviewNote"].map { _ in r.text("reviewNote") }
                 item.manualFields = manual; item.isRetired = r.isRetired; item.redirectID = r.redirectID
             case .connection:
                 guard let from = r.reference("fromID"), let to = r.reference("toID"), let sourceID = r.reference("sourceID"), let kind = ConnectionKind(rawValue: r.text("kind")) else { throw LibraryMergeError.invalid("A connection has invalid references.") }
+                guard let original = r.data("original") else { throw LibraryMergeError.invalid("A connection has no original wording.") }
                 let item: KnowledgeConnection
                 if let existing = connections[r.id] { item = existing }
                 else {
-                    let original = ConnectionWording(kind: kind, explanation: r.text("explanation"))
-                    item = try KnowledgeConnection(subjectID: subjectID, sourceID: sourceID, from: from, to: to, draft: .init(id: r.id, fromConceptID: from, toConceptID: to, kind: kind, explanation: original.explanation, supportingFactIDs: r.references("supportingFactIDs"), evidence: r.evidence, original: original, isInferred: r.bool("isInferred"), selected: true), encodedEvidenceData: evidenceData)
+                    item = KnowledgeConnection(subjectID: subjectID, sourceID: sourceID, from: from, to: to, record: r, originalData: original, evidenceData: evidenceData)
                     context.insert(item); connections[r.id] = item
                 }
                 item.fromConceptID = from; item.toConceptID = to; item.kindRaw = kind.rawValue; item.explanation = r.text("explanation")
                 item.supportingFactIDs = r.references("supportingFactIDs"); item.evidenceData = evidenceData
-                guard let original = r.data("original") else { throw LibraryMergeError.invalid("A connection has no original wording.") }
                 item.originalData = original; item.isInferred = r.bool("isInferred"); item.isUserEdited = r.bool("isUserEdited")
                 item.reviewNote = r.fields["reviewNote"].map { _ in r.text("reviewNote") }; item.manualFields = manual
                 item.isRetired = r.isRetired; item.redirectID = r.redirectID

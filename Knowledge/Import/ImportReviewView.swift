@@ -1,4 +1,7 @@
 import SwiftUI
+#if DEBUG
+import UIKit
+#endif
 
 struct ImportReviewView: View {
     let jobID: UUID
@@ -7,7 +10,7 @@ struct ImportReviewView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var draft = ImportDraft(sourceID: UUID(), concepts: [], facts: [], connections: [], coverage: [])
     @State private var source: PreparedSource?
-    @State private var context = SubjectSnapshot(subjectID: UUID(), name: "", concepts: [], facts: [])
+    @State private var context = SubjectSnapshot(subjectID: UUID(), name: "", concepts: [], facts: [], connections: [])
     @State private var loaded = false
     @State private var revision = 0
     @State private var saved = false
@@ -16,6 +19,11 @@ struct ImportReviewView: View {
     @State private var evidence: EvidencePresentation?
     @State private var organizationContext: TopicOrganizationSnapshot?
     @State private var showChanges = false
+    @State private var handedOffForRecheck = false
+    #if DEBUG
+    @State private var copyingDebugReport = false
+    @State private var copiedDebugReport = false
+    #endif
 
     var body: some View {
         Group {
@@ -25,10 +33,9 @@ struct ImportReviewView: View {
             else { ImportActivityLabel(title: "Loading your draft…") }
         }
         .navigationTitle("Review import")
-        .navigationBarBackButtonHidden(true)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                ImportBackButton(onKeep: { if !loaded || persist() { onClose() } }, onDiscard: discard)
+            ToolbarItem(placement: .topBarTrailing) {
+                ImportDraftActionsMenu(onDiscard: discard)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
@@ -50,12 +57,12 @@ struct ImportReviewView: View {
             } catch { self.error = error.localizedDescription }
         }
         .task(id: revision) {
-            guard loaded, revision > 0, !saved, !discarded else { return }
+            guard loaded, revision > 0, !saved, !discarded, !handedOffForRecheck else { return }
             do { try await Task.sleep(for: .milliseconds(400)); try Task.checkCancellation(); _ = persist() }
             catch { /* A newer edit or leaving this view cancels the debounce. */ }
         }
         .onDisappear {
-            if loaded, !saved, !discarded, !persist() { imports.message = error }
+            if loaded, !saved, !discarded, !handedOffForRecheck, !persist() { imports.message = error }
         }
         .sheet(item: $evidence) { EvidenceView(presentation: $0) }
         .sheet(isPresented: $showChanges) { LibraryChangesReviewView(requestID: jobID) }
@@ -83,17 +90,36 @@ struct ImportReviewView: View {
                     .font(.subheadline).foregroundStyle(.secondary)
                 if !issues.isEmpty {
                     ReviewFlag(text: issues.count == 1
-                        ? "1 entry or passage needs review."
-                        : "\(issues.count) entries or passages need review.")
+                        ? "1 issue needs review."
+                        : "\(issues.count) issues need review.")
                 }
                 Text("Check definitions, theories, and qualifications against their supporting passages before saving.")
                     .font(.callout).foregroundStyle(.secondary)
+                Button("Recheck with source", systemImage: "text.magnifyingglass") {
+                    handedOffForRecheck = true
+                    if !imports.recheckSource(draft, jobID: jobID) {
+                        handedOffForRecheck = false
+                        error = imports.message ?? "The source review could not start."
+                    }
+                }
+                .disabled(imports.isRunning(jobID) || imports.merges.isSaving(jobID))
             }
+            #if DEBUG
+            Section("Debug") {
+                Button("Copy review diagnostic report", systemImage: "doc.on.doc") { copyDebugReport() }
+                    .disabled(source == nil || copyingDebugReport)
+                if copyingDebugReport {
+                    Text("Preparing report…").font(.caption).foregroundStyle(.secondary)
+                } else if copiedDebugReport {
+                    Text("Copied. Paste the report into this chat for analysis.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            #endif
             if !issues.isEmpty {
                 Section("Needs review") {
                     ForEach(issues) { issue in
                         NavigationLink {
-                            reviewIssueDetail(issue.target)
+                            reviewIssueDetail(issue.target, trackedID: issue.trackedID)
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
                                 ReviewFlag(text: issue.category)
@@ -104,6 +130,24 @@ struct ImportReviewView: View {
                             .padding(.vertical, 4)
                         }
                         .accessibilityHint("Opens this entry and its review reason")
+                    }
+                }
+            }
+            let optionalConcepts = draft.concepts.filter { concept in
+                concept.resolutionSuggestion?.status == .pending || topicPlacement(for: concept)?.reason != nil
+            }
+            if !optionalConcepts.isEmpty {
+                Section("Optional suggestions") {
+                    ForEach(optionalConcepts) { concept in
+                        NavigationLink {
+                            reviewIssueDetail(.concept(concept.id))
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(concept.name)
+                                Text(concept.resolutionSuggestion?.rationale ?? topicPlacement(for: concept)?.reason ?? "Topic suggestion")
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
+                            }
+                        }
                     }
                 }
             }
@@ -144,15 +188,41 @@ struct ImportReviewView: View {
             }
             if !draft.excludedConnections.isEmpty {
                 let excluded = draft.excludedConnections
-                Section("Connection suggestions needing review") {
-                    Text("These suggestions remain excluded and need review. Inspect each reason and its supporting passages.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    ForEach(excluded) { value in
-                        DisclosureGroup(value.title) {
-                            Text(value.originalExplanation)
-                            ReviewFlag(text: value.reason)
-                            if !value.evidence.isEmpty {
-                                Button("Inspect supporting passages") { evidence = .init(title: value.title, references: value.evidence) }
+                Section("Connection diagnostics") {
+                    DisclosureGroup("\(excluded.count) discarded suggestions") {
+                        Text("These suggestions are excluded from the import. No decision is required.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        ForEach(excluded) { value in
+                            DisclosureGroup(value.title) {
+                                Text(value.originalExplanation)
+                                Text(value.reason).font(.caption).foregroundStyle(.secondary)
+                                if !value.evidence.isEmpty {
+                                    Button("Inspect supporting passages") { evidence = .init(title: value.title, references: value.evidence) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let tracking = draft.reviewTracking {
+                let assessed = tracking.issues.filter { $0.assessment != nil }
+                if !assessed.isEmpty {
+                    Section("Source review") {
+                        DisclosureGroup("\(assessed.count) issue assessments") {
+                            ForEach(assessed) { issue in
+                                DisclosureGroup(issue.status.rawValue.capitalized + ": " + issue.reason) {
+                                    Text(issue.assessment ?? "").font(.callout)
+                                    if let model = issue.model { Text(model).font(.caption).foregroundStyle(.secondary) }
+                                    ForEach(issue.changes.indices, id: \.self) { index in
+                                        let change = issue.changes[index]
+                                        Text(change.field + ": " + change.before.joined(separator: ", ") + " → " + change.after.joined(separator: ", "))
+                                            .font(.caption).textSelection(.enabled)
+                                    }
+                                    if !issue.addedFactIDs.isEmpty { Text("\(issue.addedFactIDs.count) missing facts recovered").font(.caption) }
+                                    if !issue.evidence.isEmpty {
+                                        Button("View assessment evidence") { evidence = .init(title: "Source review", references: issue.evidence) }
+                                    }
+                                }
                             }
                         }
                     }
@@ -204,7 +274,9 @@ struct ImportReviewView: View {
                 if flaggedFacts > 0 {
                     ReviewFlag(text: flaggedFacts == 1 ? "1 fact needs review" : "\(flaggedFacts) facts need review")
                 }
-                if let reason = topicPlacement(for: draft.concepts[index])?.reason { ReviewFlag(text: reason) }
+                if let reason = topicPlacement(for: draft.concepts[index])?.reason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                }
                 if draft.concepts[index].mergeTargetID != nil { Text("Merge proposed").font(.caption).foregroundStyle(.secondary) }
                 if let suggestion = draft.concepts[index].resolutionSuggestion, suggestion.status != .dismissed {
                     Label(suggestion.status == .applied ? "AI suggestion applied" : "AI suggestion available", systemImage: "sparkles")
@@ -229,18 +301,45 @@ struct ImportReviewView: View {
     private func flaggedEntries(in topic: ImportTopicSummary) -> Int {
         let ids = Set(topic.conceptIDs)
         return draft.concepts.filter {
-            ids.contains($0.id) && ($0.reviewReason != nil || topicPlacement(for: $0)?.reason != nil)
+            ids.contains($0.id) && $0.reviewReason != nil
         }.count
             + draft.facts.filter { ids.contains($0.conceptID) && $0.reviewReason != nil }.count
     }
 
     private var reviewIssues: [ImportReviewIssue] {
+        if let tracking = draft.reviewTracking {
+            return tracking.issues.filter(\.isBlocking).compactMap { issue in
+                let target: ImportReviewIssue.Target
+                let category: String
+                let title: String
+                if let entry = issue.entry {
+                    switch entry.kind {
+                    case .concept:
+                        guard let value = draft.concepts.first(where: { $0.id == entry.id }) else { return nil }
+                        target = .concept(entry.id); category = "Concept"; title = value.name
+                    case .fact:
+                        guard let value = draft.facts.first(where: { $0.id == entry.id }) else { return nil }
+                        target = .fact(entry.id); category = "Fact"; title = value.statement
+                    case .connection:
+                        guard let value = draft.connections.first(where: { $0.id == entry.id }) else { return nil }
+                        target = .connection(entry.id); category = "Connection"; title = value.explanation
+                    case .existingFact:
+                        target = .existingFact(entry.id); category = "Existing fact"
+                        title = context.facts.first { $0.id == entry.id }?.statement ?? "Previously saved fact"
+                    }
+                } else if let passage = issue.passageID {
+                    target = .passage(passage)
+                    category = issue.origin == .completeness ? "Claim completeness" : "Source passage"
+                    title = source?.segments.first { $0.id == passage }?.text ?? "Source passage"
+                } else { return nil }
+                return .init(target: target, category: category, title: title,
+                    reason: (issue.assessment ?? issue.reason) + (issue.dependents.isEmpty ? "" : "\n\(issue.dependents.count) affected entries"),
+                    trackedID: issue.id)
+            }
+        }
         var issues: [ImportReviewIssue] = []
         for concept in draft.concepts {
-            var reasons = [concept.reviewReason, topicPlacement(for: concept)?.reason].compactMap { $0 }
-            if let suggestion = concept.resolutionSuggestion, suggestion.status == .pending {
-                reasons.append(suggestion.basis.label + ": " + suggestion.rationale)
-            }
+            let reasons = [concept.reviewReason].compactMap { $0 }
             if !reasons.isEmpty {
                 issues.append(.init(target: .concept(concept.id), category: "Concept", title: concept.name,
                     reason: reasons.joined(separator: "\n")))
@@ -259,10 +358,6 @@ struct ImportReviewView: View {
                         + draft.name(for: connection.toConceptID, in: context), reason: reason))
             }
         }
-        for connection in draft.excludedConnections {
-            issues.append(.init(target: .excludedConnection(connection.id), category: "Excluded connection",
-                title: connection.title, reason: connection.reason))
-        }
         for passage in draft.passagesNeedingReview {
             let location = source?.segments.first { $0.id == passage.segmentID }?.locationLabel
             issues.append(.init(target: .passage(passage.segmentID), category: "Source passage",
@@ -275,13 +370,27 @@ struct ImportReviewView: View {
         return issues
     }
 
-    private func reviewIssueDetail(_ target: ImportReviewIssue.Target) -> some View {
+    private func reviewIssueDetail(_ target: ImportReviewIssue.Target, trackedID: UUID? = nil) -> some View {
         Form {
+            if let trackedID, let issue = draft.reviewTracking?.issues.first(where: { $0.id == trackedID }) {
+                Section("Source review") {
+                    Text(issue.assessment ?? issue.reason)
+                    if issue.isBlocking {
+                        Button("Mark issue as reviewed", systemImage: "checkmark.circle") {
+                            draft.acknowledgeReviewIssue(trackedID); edited()
+                        }
+                    }
+                    Text("\(issue.dependents.count) affected entries").font(.caption).foregroundStyle(.secondary)
+                }
+            }
             switch target {
             case .concept(let id):
                 if let index = draft.concepts.firstIndex(where: { $0.id == id }) {
                     conceptFields(index)
-                    if let reason = topicPlacement(for: draft.concepts[index])?.reason { ReviewFlag(text: reason) }
+                    ForEach(orderedFactIndices(for: draft.concepts[index].id), id: \.self) { factReview($0) }
+                    if let reason = topicPlacement(for: draft.concepts[index])?.reason {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             case .fact(let id):
                 if let index = draft.facts.firstIndex(where: { $0.id == id }) {
@@ -337,7 +446,7 @@ struct ImportReviewView: View {
                 Text(segment.locationLabel).font(.caption).foregroundStyle(.secondary)
             }
             if decision.disposition == .uncertain {
-                Text("Mark this passage as reviewed once you’ve checked its content. Related concepts and facts keep their own review status. Only selected entries are imported.")
+                Text("Mark this passage as reviewed once you’ve checked its content. Related entries keep their current inclusion choices and any separate review issues. Only selected entries are imported.")
                     .font(.caption).foregroundStyle(.secondary)
                 PassageReviewButton(reviewed: reviewed, dismissAfterReview: dismissAfterReview) {
                     draft.setPassageReviewed(decision.segmentID, reviewed: !reviewed)
@@ -377,7 +486,7 @@ struct ImportReviewView: View {
     }
 
     private func orderedConceptIDs(in topic: ImportTopicSummary) -> [UUID] {
-        let flagged = Set(draft.concepts.filter { $0.reviewReason != nil || topicPlacement(for: $0)?.reason != nil }.map(\.id)
+        let flagged = Set(draft.concepts.filter { $0.reviewReason != nil }.map(\.id)
             + draft.facts.filter { $0.reviewReason != nil }.map(\.conceptID))
         return topic.conceptIDs.filter { flagged.contains($0) } + topic.conceptIDs.filter { !flagged.contains($0) }
     }
@@ -415,7 +524,7 @@ struct ImportReviewView: View {
     }
 
     @discardableResult private func persist() -> Bool {
-        guard !saved, !discarded else { return true }
+        guard !saved, !discarded, !handedOffForRecheck else { return true }
         do { try imports.repository.keepDraft(draft, jobID: jobID); return true }
         catch { self.error = error.localizedDescription; return false }
     }
@@ -427,6 +536,51 @@ struct ImportReviewView: View {
             onClose()
         } catch { self.error = error.localizedDescription }
     }
+
+    #if DEBUG
+    private func copyDebugReport() {
+        guard let source, !copyingDebugReport else { return }
+        copyingDebugReport = true
+        copiedDebugReport = false
+        Task { @MainActor in
+            defer { copyingDebugReport = false }
+            do {
+                let job = try imports.repository.job(jobID)
+                var checkpoint: ImportCheckpoint?
+                var checkpointError: String?
+                do { checkpoint = try job.checkpoint() }
+                catch { checkpointError = error.localizedDescription }
+                let issues = reviewIssues.map { issue in
+                    let kind: String
+                    let id: String
+                    switch issue.target {
+                    case .concept(let value): kind = "concept"; id = value.uuidString
+                    case .fact(let value): kind = "fact"; id = value.uuidString
+                    case .connection(let value): kind = "connection"; id = value.uuidString
+                    case .excludedConnection(let value): kind = "excludedConnection"; id = value.uuidString
+                    case .passage(let value): kind = "passage"; id = value
+                    case .existingFact(let value): kind = "existingFact"; id = value.uuidString
+                    }
+                    return ImportReviewDebugReport.Issue(kind: kind, targetID: id, title: issue.title, reason: issue.reason, reviewIssueID: issue.trackedID)
+                }
+                let report = ImportReviewDebugReport(jobID: jobID, model: job.model, jobCreatedAt: job.createdAt,
+                    jobStatus: job.statusRaw,
+                    appVersion: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
+                        + " (" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown") + ")",
+                    issues: issues, issueCounts: Dictionary(grouping: issues, by: \.kind).mapValues(\.count),
+                    exactReasonCounts: Dictionary(grouping: issues, by: \.reason).mapValues(\.count),
+                    draft: draft, source: source, baseContext: context,
+                    baseTopics: organizationContext?.topics ?? [], basePlacements: organizationContext?.placements ?? [],
+                    extractionBatches: (checkpoint?.completedBatches ?? []).sorted { $0.index < $1.index }
+                        .map(ImportReviewDebugReport.ExtractionBatch.init),
+                    pendingPatches: checkpoint?.pendingPatches ?? [], reconciledPartCount: checkpoint?.reconciledPartCount,
+                    requestUsage: checkpoint?.usage ?? [], checkpointError: checkpointError)
+                UIPasteboard.general.string = try await report.text()
+                copiedDebugReport = true
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+    #endif
 }
 
 private struct PassageReviewButton: View {
@@ -452,7 +606,8 @@ private struct ImportReviewIssue: Identifiable {
     let category: String
     let title: String
     let reason: String
-    var id: Target { target }
+    var trackedID: UUID? = nil
+    var id: String { trackedID?.uuidString ?? String(describing: target) }
 }
 
 private struct ConceptReviewFields: View {

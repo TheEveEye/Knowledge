@@ -76,16 +76,17 @@ nonisolated struct LibrarySaveState {
     }
 
     private func persist(_ branch: DraftBranchState, jobID: UUID, generation: UUID, account: String?) async throws {
+        guard let plan = branch.plan else { throw ImportError.damagedCheckpoint }
         let data = try await LibraryCoding.encodeAsync(branch)
         try check(jobID, generation: generation, account: account)
-        try repository.saveBranch(branch, jobID: jobID, encoded: data, expectedVersion: branch.plan?.draftVersion)
+        try repository.saveBranch(data, jobID: jobID, expectedVersion: plan.draftVersion)
     }
 
     private func persistUndo(_ plan: MergePlan, requestID: UUID, generation: UUID, account: String?) async throws {
         let pending = try repository.pendingUndos(subjectID: plan.result.subjectID).filter { $0.operationID != plan.operationID } + [plan]
         let data = try await LibraryCoding.encodeAsync(pending)
         try check(requestID, generation: generation, account: account)
-        try repository.savePendingUndo(plan, encoded: data)
+        try repository.savePendingUndos(data, subjectID: plan.result.subjectID)
     }
 
     private func saveDraft(jobID: UUID, model: String, generation: UUID) async {
@@ -109,11 +110,11 @@ nonisolated struct LibrarySaveState {
                 if let saved = oldPlan, saved.expectedRevisionID == current.revisionID,
                    saved.draftVersion == changes.draftVersion, saved.fingerprint == changes.fingerprint { plan = saved }
                 else { plan = prepared }
-                branch.changeSet = changes; branch.plan = plan
+                branch.plan = plan
                 try await persist(branch, jobID: jobID, generation: generation, account: account)
                 let resolver = LibrarySemanticResolver(client: client)
                 plan = try await resolver.resolve(plan, changes: changes, base: base,
-                    current: current, model: model, cached: branch.semanticResults ?? [],
+                    current: current, model: model, cached: branch.semanticResults,
                     accessToken: { [weak self] in
                         guard let self else { throw CancellationError() }
                         try self.check(jobID, generation: generation, account: account)
@@ -125,7 +126,7 @@ nonisolated struct LibrarySaveState {
                         try self.check(jobID, generation: generation, account: account)
                         var saved = try self.repository.branch(for: self.repository.job(jobID))
                         saved.plan = progress
-                        saved.semanticResults = (saved.semanticResults ?? []).filter { $0.signature != result.signature } + [result]
+                        saved.semanticResults = saved.semanticResults.filter { $0.signature != result.signature } + [result]
                         try await self.persist(saved, jobID: jobID, generation: generation, account: account)
                         if let usage {
                             var checkpoint = try self.repository.job(jobID).checkpoint(); checkpoint.usage.append(usage)
@@ -201,7 +202,7 @@ nonisolated struct LibrarySaveState {
             guard revision.origin == "import" else { throw LibraryMergeError.invalid("Only import entries can be undone.") }
             let id = LibraryCoding.stableID("undo/" + revisionID.uuidString)
             if let applied = try repository.appliedOperation(id) {
-                states[id] = .init(phase: .saved, summary: applied.summary ?? "Import undone.")
+                states[id] = .init(phase: .saved, summary: applied.summary)
                 return
             }
             enqueue(id: id, subjectID: revision.subjectID) { [weak self] generation in
@@ -286,21 +287,19 @@ extension KnowledgeRepository {
               let data = subject.pendingUndoData else { return [] }
         return try JSONDecoder().decode([MergePlan].self, from: data)
     }
-    func pendingUndo(subjectID: UUID, operationID: UUID? = nil) throws -> MergePlan? {
-        try pendingUndos(subjectID: subjectID).first { operationID == nil || $0.operationID == operationID }
+    func pendingUndo(subjectID: UUID, operationID: UUID) throws -> MergePlan? {
+        try pendingUndos(subjectID: subjectID).first { $0.operationID == operationID }
     }
-    func savePendingUndo(_ plan: MergePlan, encoded: Data? = nil) throws {
-        let id = plan.result.subjectID
-        guard let subject = try container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == id })).first else { throw LibraryMergeError.invalid("This subject is unavailable.") }
-        let pending = try pendingUndos(subjectID: id).filter { $0.operationID != plan.operationID } + [plan]
-        let data = try encoded ?? LibraryCoding.encode(pending)
+    func savePendingUndos(_ data: Data, subjectID: UUID) throws {
+        guard let subject = try container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else { throw LibraryMergeError.invalid("This subject is unavailable.") }
         let previous = subject.pendingUndoData
         do { subject.pendingUndoData = data; try container.mainContext.save() }
         catch { subject.pendingUndoData = previous; throw error }
     }
 
-    func laterManualFields(after target: UUID, current: UUID?) throws -> [String: Set<String>] {
-        var cursor = current, seen: Set<UUID> = [], fields: [String: Set<String>] = [:]
+    func laterManualFields(after target: UUID, current: UUID) throws -> [String: Set<String>] {
+        var cursor: UUID? = current
+        var seen: Set<UUID> = [], fields: [String: Set<String>] = [:]
         while let id = cursor, id != target, seen.insert(id).inserted {
             let record = try revision(id)
             if record.origin == "manual" {

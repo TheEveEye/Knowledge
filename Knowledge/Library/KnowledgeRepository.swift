@@ -10,14 +10,15 @@ import SwiftData
         let context = container.mainContext
         let existing = try context.fetch(FetchDescriptor<KnowledgeSubject>())
         if let match = existing.first(where: { $0.name.normalizedName == name.normalizedName }) { return match }
-        let subject = KnowledgeSubject(name: name.trimmed)
+        let subject = KnowledgeSubject(name: name.trimmed, currentRevisionID: UUID())
         let autosave = context.autosaveEnabled
         context.autosaveEnabled = false
         defer { context.autosaveEnabled = autosave }
         context.insert(subject)
         do {
-            _ = try appendRevision(snapshot: versionSnapshot(subjectID: subject.id), origin: "baseline",
-                title: "Created subject", operationID: UUID(), changes: [], explanations: [], mappings: [:])
+            // Reserve the initial head before inserting the subject; both are saved atomically.
+            _ = try appendRevision(snapshot: versionSnapshot(subjectID: subject.id), id: subject.currentRevisionID, parentID: nil, origin: "baseline",
+                title: "Created subject", operationID: UUID(), changes: [], explanations: [])
             try context.save()
             return subject
         } catch { context.rollback(); throw error }
@@ -77,7 +78,7 @@ import SwiftData
         for source in sources { context.delete(source) }
         for revision in revisions where revision.subjectID == id { context.delete(revision) }
         for contribution in contributions { context.delete(contribution) }
-        for version in versions where !retainedHashes.contains(version.hash) { context.delete(version) }
+        for version in versions where !retainedHashes.contains(version.contentHash) { context.delete(version) }
         context.delete(subject)
         do {
             try context.save()
@@ -98,23 +99,6 @@ import SwiftData
         let descriptor = FetchDescriptor<KnowledgeImportJob>(predicate: #Predicate { $0.id == id })
         guard let job = try (context ?? container.mainContext).fetch(descriptor).first else { throw ImportError.damagedCheckpoint }
         return job
-    }
-
-    func snapshot(subjectID: UUID, context: ModelContext? = nil) throws -> SubjectSnapshot {
-        let context = context ?? container.mainContext
-        guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else {
-            throw ImportError.invalidSelection("This subject is unavailable.")
-        }
-        let concepts = try context.fetch(FetchDescriptor<KnowledgeConcept>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
-        let facts = try context.fetch(FetchDescriptor<KnowledgeFact>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
-        return try SubjectSnapshot(subjectID: subjectID, name: subject.name,
-            concepts: concepts.map { .init(id: $0.id, name: $0.name, aliases: $0.aliases, explanation: $0.explanation,
-                namingNote: try $0.namingNote()) },
-            facts: facts.map {
-                guard let kind = FactKind(rawValue: $0.kindRaw) else { throw ImportError.damagedCheckpoint }
-                return .init(id: $0.id, conceptID: $0.conceptID, statement: $0.statement, kind: kind,
-                             qualifications: $0.qualifications, evidence: try $0.evidence())
-            })
     }
 
     func createJob(subjectID: UUID, source: PreparedSource, accountID: String?, model: String) throws -> UUID {
@@ -189,6 +173,7 @@ import SwiftData
 nonisolated enum ReviewSelection {
     static func concept(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.concepts.firstIndex(where: { $0.id == id }) else { return }
+        draft.recordUserSelection(id, selected: selected)
         draft.concepts[index].selected = selected
         if !selected {
             let removedFacts = Set(draft.facts.filter { $0.conceptID == id }.map(\.id))
@@ -199,6 +184,7 @@ nonisolated enum ReviewSelection {
     }
     static func fact(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.facts.firstIndex(where: { $0.id == id }) else { return }
+        draft.recordUserSelection(id, selected: selected)
         draft.facts[index].selected = selected
         if selected { concept(draft.facts[index].conceptID, selected: true, draft: &draft) }
         else {
@@ -209,6 +195,7 @@ nonisolated enum ReviewSelection {
     }
     static func connection(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.connections.firstIndex(where: { $0.id == id }) else { return }
+        draft.recordUserSelection(id, selected: selected)
         draft.connections[index].selected = selected
         if selected {
             let value = draft.connections[index]

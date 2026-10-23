@@ -2,31 +2,9 @@ import Foundation
 import SwiftData
 
 extension KnowledgeRepository {
-    func organizationSnapshot(subjectID: UUID) throws -> TopicOrganizationSnapshot {
-        let context = container.mainContext
-        guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == subjectID })).first else {
-            throw ImportError.invalidSelection("This subject is unavailable.")
-        }
-        let concepts = try context.fetch(FetchDescriptor<KnowledgeConcept>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
-        let sources = try context.fetch(FetchDescriptor<KnowledgeSource>(predicate: #Predicate { $0.subjectID == subjectID }))
-        let prepared = try Dictionary(uniqueKeysWithValues: sources.map { ($0.id, try $0.prepared()) })
-        let summaries = try concepts.map { concept in
-            let headings = try concept.evidence().compactMap { reference in
-                prepared[reference.sourceID]?.segments.first { $0.id == reference.segmentID }?.section
-            }
-            return OrganizableConcept(id: concept.id, name: concept.name, aliases: concept.aliases,
-                explanation: concept.explanation, sourceHeadings: Array(Set(headings)).sorted())
-        }.sorted { $0.id.uuidString < $1.id.uuidString }
-        let topics = try context.fetch(FetchDescriptor<KnowledgeTopic>(predicate: #Predicate { $0.subjectID == subjectID && !$0.isRetired }))
-        let placements = try context.fetch(FetchDescriptor<KnowledgeConceptPlacement>(predicate: #Predicate { $0.subjectID == subjectID }))
-        return .init(subjectID: subjectID, subjectName: subject.name, concepts: summaries,
-            topics: topics.map(\.record).sorted { $0.id.uuidString < $1.id.uuidString },
-            placements: placements.map(\.record).sorted { $0.conceptID.uuidString < $1.conceptID.uuidString })
-    }
-
-    func importOrganizationSnapshot(draft: ImportDraft, source: PreparedSource, subjectID: UUID,
-        base: SubjectVersionSnapshot? = nil) throws -> TopicOrganizationSnapshot {
-        let saved = try base?.organizationContext() ?? organizationSnapshot(subjectID: subjectID)
+    func importOrganizationSnapshot(draft: ImportDraft, source: PreparedSource,
+        base: SubjectVersionSnapshot) throws -> TopicOrganizationSnapshot {
+        let saved = base.organizationContext()
         let headings = Dictionary(uniqueKeysWithValues: source.segments.compactMap { segment -> (String, String)? in
             guard let heading = segment.section else { return nil }
             return (segment.id, heading)
@@ -43,7 +21,7 @@ extension KnowledgeRepository {
         guard Set(concepts.map(\.id)).count == concepts.count else {
             throw TopicOrganizationError.invalid("Imported concept IDs overlap existing library entries.")
         }
-        return .init(subjectID: subjectID, subjectName: saved.subjectName, concepts: concepts,
+        return .init(subjectID: base.subjectID, subjectName: saved.subjectName, concepts: concepts,
             topics: saved.topics, placements: saved.placements)
     }
 

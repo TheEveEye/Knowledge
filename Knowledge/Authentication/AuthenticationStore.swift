@@ -182,6 +182,15 @@ final class AuthenticationStore {
         return token
     }
 
+    /// Save while foregrounded so existing credentials also have background-compatible
+    /// Keychain protection before a long import needs to persist a rotating refresh token.
+    func prepareForBackgroundProcessing() throws {
+        guard !signingOut, let account = activeAccount, account.credentials?.planEnabled == true else {
+            throw AuthenticationError.sessionExpired
+        }
+        try storage.saveAccount(account)
+    }
+
     private func resumedAccount(_ account: StoredChatGPTAccount) async throws -> StoredChatGPTAccount {
         if account.pendingRefresh == nil,
            account.credentials?.accessToken == nil || (account.credentials?.expiresAt ?? .distantPast) > now().addingTimeInterval(60) {

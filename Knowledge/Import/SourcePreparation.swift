@@ -5,6 +5,8 @@ import CryptoKit
 nonisolated enum SourcePreparation {
     static let maximumCharacters = 300_000
     static let maximumBytes = 25 * 1024 * 1024
+    static let extractionContextCharacters = 4_000
+    static let recoveryContextCharacters = [12_000, 36_000]
 
     static func directory() throws -> URL {
         let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -105,6 +107,48 @@ nonisolated enum SourcePreparation {
         }
         emit()
         return chunks
+    }
+
+    /// Keep coverage ownership stable while expanding reading context in both directions.
+    /// The window follows source order and makes no assumptions about document formatting.
+    static func contextWindow(for chunk: SourceChunk, source: PreparedSource, charactersPerSide: Int,
+                              maximumEncodedBytes: Int) throws -> SourceChunk {
+        let anchors = Set(chunk.segments.map(\.id) + chunk.requiredSegmentIDs)
+        guard let first = source.segments.firstIndex(where: { anchors.contains($0.id) }),
+              let last = source.segments.lastIndex(where: { anchors.contains($0.id) }) else {
+            throw ImportValidator.invalid("The extraction passages are missing from the source.")
+        }
+        let encoder = JSONEncoder()
+        var lower = first, upper = last + 1
+        var bytes = try encoder.encode(Array(source.segments[lower..<upper])).count
+        guard bytes <= maximumEncodedBytes else {
+            throw ImportValidator.invalid("The source passages exceed the extraction request budget.")
+        }
+        var before = 0, after = 0
+        var canReadBefore = true, canReadAfter = true
+        while canReadBefore || canReadAfter {
+            // Alternate directions so the encoded-byte budget does not favor earlier text.
+            if canReadBefore {
+                if lower > 0 && before < charactersPerSide {
+                    let segment = source.segments[lower - 1]
+                    let cost = try encoder.encode(segment).count + 1
+                    if bytes + cost <= maximumEncodedBytes {
+                        lower -= 1; before += segment.text.count; bytes += cost
+                    } else { canReadBefore = false }
+                } else { canReadBefore = false }
+            }
+            if canReadAfter {
+                if upper < source.segments.count && after < charactersPerSide {
+                    let segment = source.segments[upper]
+                    let cost = try encoder.encode(segment).count + 1
+                    if bytes + cost <= maximumEncodedBytes {
+                        upper += 1; after += segment.text.count; bytes += cost
+                    } else { canReadAfter = false }
+                } else { canReadAfter = false }
+            }
+        }
+        return .init(index: chunk.index, segments: Array(source.segments[lower..<upper]),
+                     requiredSegmentIDs: chunk.requiredSegmentIDs)
     }
 
     private static func isHeading(_ line: String) -> Bool {

@@ -72,9 +72,10 @@ nonisolated enum LibraryMergeEngine {
                 "kind": .text(fact.kind.rawValue), "qualifications": .text(fact.qualifications), "evidence": .evidence(fact.evidence),
                 "original": .bytes(try LibraryCoding.encode(fact.original)), "isUserEdited": .bool(fact.isUserEdited)], uniquingKeysWith: { _, new in new })
             var protected: Set<String> = []
-            if fact.statement != fact.original.statement { protected.insert("statement") }
-            if fact.kind != fact.original.kind { protected.insert("kind") }
-            if fact.qualifications != fact.original.qualifications { protected.insert("qualifications") }
+            let baseline = fact.reviewBaseline ?? fact.original
+            if fact.statement != baseline.statement { protected.insert("statement") }
+            if fact.kind != baseline.kind { protected.insert("kind") }
+            if fact.qualifications != baseline.qualifications { protected.insert("qualifications") }
             let record = LibraryRecord(id: fact.id, kind: .fact, fields: fields, protectedFields: protected)
             result.records[record.key] = record
             let sourceRecord = try contribution(record, owner: record.id); result.records[sourceRecord.key] = sourceRecord
@@ -93,8 +94,9 @@ nonisolated enum LibraryMergeEngine {
                 "original": .bytes(try LibraryCoding.encode(connection.original)), "isInferred": .bool(connection.isInferred),
                 "isUserEdited": .bool(connection.isUserEdited)], uniquingKeysWith: { _, new in new })
             var protected: Set<String> = []
-            if connection.kind != connection.original.kind { protected.insert("kind") }
-            if connection.explanation != connection.original.explanation { protected.insert("explanation") }
+            let baseline = connection.reviewBaseline ?? connection.original
+            if connection.kind != baseline.kind { protected.insert("kind") }
+            if connection.explanation != baseline.explanation { protected.insert("explanation") }
             let record = LibraryRecord(id: connection.id, kind: .connection, fields: fields, protectedFields: protected)
             result.records[record.key] = record
             let sourceRecord = try contribution(record, owner: record.id); result.records[sourceRecord.key] = sourceRecord
@@ -146,7 +148,7 @@ nonisolated enum LibraryMergeEngine {
             explanations.append("Kept earlier entries and source material that these notes depend on.")
         }
         let allowedFacts = Set(draft.facts.filter(\.selected).map(\.id)).union(base.active(.fact).map(\.id))
-        for proposal in draft.libraryProposals + (topics.updates ?? []) {
+        for proposal in draft.libraryProposals + topics.updates {
             guard proposal.supportingFactIDs.allSatisfy(allowedFacts.contains), result.records.values.contains(where: { $0.id == proposal.entityID && !$0.isRetired }) else { continue }
             do {
                 var updated = result
@@ -164,8 +166,7 @@ nonisolated enum LibraryMergeEngine {
     }
 
     static func merge(_ changeSet: LibraryChangeSet, onto current: SubjectVersionSnapshot, operationID: UUID) throws -> MergePlan {
-        guard let revisionID = current.revisionID else { throw LibraryMergeError.changed }
-        var plan = MergePlan(operationID: operationID, expectedRevisionID: revisionID, draftVersion: changeSet.draftVersion,
+        var plan = MergePlan(operationID: operationID, expectedRevisionID: current.revisionID, draftVersion: changeSet.draftVersion,
             fingerprint: changeSet.fingerprint, result: current, explanations: changeSet.explanations)
         for change in changeSet.changes {
             guard var incoming = change.after else { continue }
@@ -174,7 +175,6 @@ nonisolated enum LibraryMergeEngine {
                 let canonical = try current.canonical(existing.kind, existing.id)
                 key = LibraryRecord.key(existing.kind, canonical)
                 incoming = .init(id: canonical, kind: incoming.kind, fields: incoming.fields, protectedFields: incoming.protectedFields)
-                plan.identityMappings[change.key] = canonical
             }
             guard let existing = plan.result.records[key] else { plan.result.records[key] = incoming; continue }
             var merged = existing
@@ -238,16 +238,16 @@ nonisolated enum LibraryMergeEngine {
         return restored.count
     }
 
-    static func conflict(record: LibraryRecord, field: String, incoming: LibraryValue?, reason: String, snapshot: SubjectVersionSnapshot? = nil) throws -> LibraryMergeConflict {
+    static func conflict(record: LibraryRecord, field: String, incoming: LibraryValue?, reason: String, snapshot: SubjectVersionSnapshot) throws -> LibraryMergeConflict {
         let signature = LibraryCoding.hash(try LibraryCoding.encode([record.fields[field], incoming]))
         func describe(_ value: LibraryValue?) -> String {
             if case .reference(let id) = value {
                 let kind: LibraryEntityKind = ["topicID", "parentID"].contains(field) ? .topic : .concept
-                return snapshot?.record(kind, id)?.title ?? "Another entry"
+                return snapshot.record(kind, id)?.title ?? "Another entry"
             }
             return display(value)
         }
-        let title = record.kind == .placement ? record.reference("conceptID").flatMap { snapshot?.record(.concept, $0)?.title } ?? record.title : record.title
+        let title = record.kind == .placement ? record.reference("conceptID").flatMap { snapshot.record(.concept, $0)?.title } ?? record.title : record.title
         return .init(id: record.key + "/" + field + "/" + signature, key: record.key, field: field, title: title,
             reason: reason, current: describe(record.fields[field]), incoming: describe(incoming), proposedValue: incoming, originalValue: record.fields[field])
     }
@@ -317,8 +317,8 @@ nonisolated enum LibraryMergeEngine {
         }
     }
 
-    static func coalesce(_ incomingKey: String, into existingKey: String, plan: inout MergePlan, checkProtection: Bool = true) throws {
-        let before = plan.result
+    private static func coalesce(_ incomingKey: String, into existingKey: String, plan: inout MergePlan) throws {
+        let preserving = Set(plan.result.records.keys)
         guard let incoming = plan.result.records[incomingKey], let existing = plan.result.records[existingKey],
               !incoming.isRetired, !existing.isRetired, !incoming.bool("keepSeparate"), incoming.kind == existing.kind,
               [.concept, .topic, .fact, .connection].contains(incoming.kind) else { throw LibraryMergeError.invalid("The proposed combination is unavailable.") }
@@ -335,18 +335,9 @@ nonisolated enum LibraryMergeEngine {
         let combined = try combine(incoming, into: existing)
         plan.result.records[existingKey] = combined
         var retired = incoming; retired.isRetired = true; retired.redirectID = existing.id
-        plan.result.records[incomingKey] = retired; plan.identityMappings[incomingKey] = existing.id
-        try normalize(&plan.result, preserving: Set(before.records.keys))
-        let changes = LibraryChangeSet.diff(from: before, to: plan.result).changes
-        let changesUserWork = changes.contains { changesProtectedFields($0, in: plan.result) }
-        if changesUserWork && checkProtection {
-            let signature = LibraryCoding.hash(try LibraryCoding.encode(changes))
-            plan.conflicts.append(.init(id: incomingKey + "/combine/" + signature, key: incomingKey, field: "combination",
-                title: incoming.title + " and " + existing.title,
-                reason: "Combining these entries would change wording or organization you edited.",
-                current: "Keep both entries and their current organization", incoming: "Combine them as “\(existing.title)”", proposedValue: nil, combination: changes))
-            plan.result = before
-        }
+        plan.result.records[incomingKey] = retired
+        // Protection is checked once for the complete identity group in coalesceGroups.
+        try normalize(&plan.result, preserving: preserving)
     }
 
     private static func changesProtectedFields(_ change: LibraryChange, in snapshot: SubjectVersionSnapshot) -> Bool {
@@ -386,7 +377,7 @@ nonisolated enum LibraryMergeEngine {
             let previous = plan
             let before = plan.result
             do {
-                for key in ordered.dropFirst() { try coalesce(key, into: target, plan: &plan, checkProtection: false) }
+                for key in ordered.dropFirst() { try coalesce(key, into: target, plan: &plan) }
                 try LibraryMergeValidation.structure(plan.result)
             } catch {
                 plan = previous

@@ -104,7 +104,10 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
         let query = baseQuery(account: account)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            // Imports may refresh and persist rotating credentials while the screen is locked.
+            // Non-credential installation metadata still requires an unlocked device.
+            kSecAttrAccessible as String: account.hasPrefix(accountPrefix)
+                ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
         var status = keychain.update(query, attributes: attributes)
         if status == errSecItemNotFound {

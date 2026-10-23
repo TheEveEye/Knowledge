@@ -6,6 +6,7 @@ struct ImportProgressView: View {
     var title = "Notes"
     var isRunning = true
     var error: String? = nil
+    var backgroundNotice: String? = nil
     var onChooseModel: (() -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showDetails = false
@@ -14,6 +15,10 @@ struct ImportProgressView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if typeSize.isAccessibilitySize { summaryContent }
+                if isRunning, let backgroundNotice {
+                    Label(backgroundNotice, systemImage: "info.circle")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 if let error {
                     Text(error).font(.callout).foregroundStyle(.secondary)
                 } else if progress.batches.contains(where: { $0.state == .failed }) {
@@ -82,7 +87,7 @@ struct ImportProgressView: View {
     }
 
     private var isConnectingIdeas: Bool {
-        progress.stage == .connecting && progress.organizationLabel == nil && !progress.isResolving
+        progress.stage == .connecting && progress.organizationLabel == nil && !progress.isResolving && !progress.isReviewingSource
             && !progress.isPatching && !progress.isRepairing
     }
 
@@ -172,6 +177,7 @@ struct ImportProgressView: View {
     private var stageTitle: String {
         if error != nil { return "Import needs attention" }
         if !isRunning { return "Import paused" }
+        if progress.isReviewingSource { return "Checking source support…" }
         if progress.isResolving { return "Considering names and classifications…" }
         if progress.organizationLabel != nil { return "Organizing topics…" }
         if progress.isPatching || progress.isRepairing { return "Checking your notes…" }
@@ -180,6 +186,7 @@ struct ImportProgressView: View {
     }
 
     private var hasMeasuredProgress: Bool {
+        if progress.isReviewingSource { return progress.sourceReviewTotal > 0 }
         if progress.isResolving { return progress.resolutionTotal > 0 }
         if progress.organizationLabel != nil { return progress.organizationTotal > 0 }
         guard !progress.isPatching, !progress.isRepairing else { return false }
@@ -188,7 +195,14 @@ struct ImportProgressView: View {
     }
 
     @ViewBuilder private var stageProgress: some View {
-        if progress.isResolving {
+        if progress.isReviewingSource {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: Double(progress.sourceReviewCompleted), total: Double(max(1, progress.sourceReviewTotal)))
+                    .accessibilityLabel("Progress checking source issues")
+                Text("\(progress.sourceReviewCompleted) of \(progress.sourceReviewTotal) issues checked")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else if progress.isResolving {
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: Double(progress.resolutionCompleted), total: Double(progress.resolutionTotal))
                     .accessibilityLabel("Progress considering names and classifications")
@@ -307,6 +321,9 @@ private struct ImportProgressDetailsView: View {
                     }
                     if progress.isResolving {
                         LabeledContent("Concepts considered", value: "\(progress.resolutionCompleted) of \(progress.resolutionTotal)")
+                    }
+                    if progress.isReviewingSource {
+                        LabeledContent("Source issues checked", value: "\(progress.sourceReviewCompleted) of \(progress.sourceReviewTotal)")
                     }
                 }
                 if !progress.batches.isEmpty {

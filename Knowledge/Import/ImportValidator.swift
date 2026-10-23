@@ -18,7 +18,7 @@ nonisolated enum ImportValidator {
         }
         let conceptMap = Dictionary(uniqueKeysWithValues: conceptIDs.map { ($0, UUID()) })
         let factMap = Dictionary(uniqueKeysWithValues: factIDs.map { ($0, UUID()) })
-        var concepts = try payload.concepts.map { value -> DraftConcept in
+        let concepts = try payload.concepts.map { value -> DraftConcept in
             try text(value.name, label: "concept name"); try text(value.explanation, label: "concept explanation")
             for alias in value.aliases { try text(alias, label: "alias") }
             return .init(id: conceptMap[value.id]!, name: value.name, aliases: value.aliases,
@@ -26,7 +26,7 @@ nonisolated enum ImportValidator {
                 original: .init(name: value.name, aliases: value.aliases, explanation: value.explanation),
                 reviewReason: reason(value.reviewReason), selected: reason(value.reviewReason) == nil)
         }
-        var facts = try payload.facts.map { value -> DraftFact in
+        let facts = try payload.facts.map { value -> DraftFact in
             guard let conceptID = conceptMap[value.conceptID] else { throw invalid("A fact references an unknown concept.") }
             try text(value.statement, label: "fact")
             return .init(id: factMap[value.id]!, conceptID: conceptID, statement: value.statement, kind: value.kind,
@@ -44,7 +44,7 @@ nonisolated enum ImportValidator {
             let supportingIDs = value.supportingFactIDs.map { factMap[$0]! }
             let supportingFacts = supportingIDs.map { validatedFacts[$0]! }
             let evidence = Reconciliation.uniqueEvidence(supportingFacts.flatMap(\.evidence))
-            let review = reason(value.reviewReason) ?? supportingFacts.compactMap(\.reviewReason).first
+            let review = reason(value.reviewReason)
             return .init(id: UUID(), fromConceptID: from, toConceptID: to, kind: value.kind,
                 explanation: value.explanation, supportingFactIDs: supportingIDs,
                 evidence: evidence, original: .init(kind: value.kind, explanation: value.explanation),
@@ -55,6 +55,10 @@ nonisolated enum ImportValidator {
         var coverage = payload.coverage
         for index in coverage.indices {
             let decision = coverage[index]
+            if let request = decision.contextRequest {
+                try text(request, label: "context request")
+                guard decision.disposition == .uncertain else { throw invalid("A passage requesting context must remain uncertain.") }
+            }
             if decision.disposition == .extracted {
                 if !cited.contains(decision.segmentID) {
                     coverage[index] = .init(segmentID: decision.segmentID, disposition: .uncertain,
@@ -62,16 +66,9 @@ nonisolated enum ImportValidator {
                 }
             } else { try text(decision.reason, label: "passage disposition reason") }
         }
-        let uncertain = Set(coverage.filter { $0.disposition == .uncertain }.map(\.segmentID))
-        for index in concepts.indices where concepts[index].evidence.contains(where: { uncertain.contains($0.segmentID) }) {
-            concepts[index].reviewReason = concepts[index].reviewReason ?? "The supporting passage needs review."
-            concepts[index].selected = false
-        }
-        for index in facts.indices where facts[index].evidence.contains(where: { uncertain.contains($0.segmentID) }) {
-            facts[index].reviewReason = facts[index].reviewReason ?? "The supporting passage needs review."
-            facts[index].selected = false
-        }
-        return ImportDraft(sourceID: sourceID, concepts: concepts, facts: facts, connections: connections, coverage: coverage)
+        var draft = ImportDraft(sourceID: sourceID, concepts: concepts, facts: facts, connections: connections, coverage: coverage)
+        draft.synchronizeReviewIssues()
+        return draft
     }
 
     static func validateDraft(_ draft: ImportDraft, source: PreparedSource, context: SubjectSnapshot, requireComplete: Bool = true) throws {
@@ -110,6 +107,17 @@ nonisolated enum ImportValidator {
         if requireComplete {
             let covered = try unique(draft.coverage.map(\.segmentID), label: "coverage")
             guard covered == Set(source.segments.map(\.id)) else { throw invalid("The document has a passage coverage gap.") }
+            let cited = Set((draft.concepts.flatMap(\.evidence) + draft.facts.flatMap(\.evidence))
+                .filter { $0.sourceID == source.id }.map(\.segmentID))
+            for decision in draft.coverage {
+                if decision.disposition == .extracted {
+                    guard cited.contains(decision.segmentID) else { throw invalid("An extracted passage has no supporting entry.") }
+                } else { try text(decision.reason, label: "passage disposition reason") }
+                if let request = decision.contextRequest {
+                    try text(request, label: "context request")
+                    guard decision.disposition == .uncertain else { throw invalid("An unresolved context request was excluded from review.") }
+                }
+            }
         }
     }
 

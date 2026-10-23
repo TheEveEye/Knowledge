@@ -50,6 +50,7 @@ struct NewImportView: View {
     @State private var text = ""
     @State private var createdJobID: UUID?
     @State private var error: String?
+    @State private var isPreparing = false
     @State private var inputFrames: [InputField: CGRect] = [:]
     @State private var pasteButtonFrame: CGRect = .zero
     @FocusState private var focusedField: InputField?
@@ -92,7 +93,7 @@ struct NewImportView: View {
                 }
                 ImportModelPicker()
                 if let error { Section { Text(error).foregroundStyle(.red) } }
-                if imports.isPreparing {
+                if isPreparing {
                     Section { ImportActivityLabel(title: "Preparing your source…") }
                 }
             }
@@ -123,13 +124,13 @@ struct NewImportView: View {
             .navigationTitle("Import notes")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(imports.isPreparing)
+                    Button("Cancel") { dismiss() }.disabled(isPreparing)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Extract concepts", systemImage: "sparkles") { prepare() }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.borderedProminent)
-                        .disabled(imports.isPreparing || imports.activeJobID != nil || imports.selectedModel.isEmpty
+                        .disabled(isPreparing || imports.selectedModel.isEmpty
                                   || (useFile ? selectedFile == nil : text.trimmed.isEmpty))
                 }
             }
@@ -138,8 +139,13 @@ struct NewImportView: View {
                 catch { if (error as? CocoaError)?.code != .userCancelled { self.error = error.localizedDescription } }
             }
             .navigationDestination(item: $createdJobID) { id in ImportJobView(jobID: id, onClose: { dismiss() }) }
+            .onChange(of: createdJobID) { previous, current in
+                // A native back-button tap or completed swipe keeps the created draft
+                // and closes the creation flow instead of returning to the input form.
+                if previous != nil, current == nil { dismiss() }
+            }
         }
-        .interactiveDismissDisabled(imports.isPreparing)
+        .interactiveDismissDisabled(isPreparing)
         .gesture(ImportKeyboardDismissGesture(isEnabled: focusedField != nil) { location in
             guard !pasteButtonFrame.contains(location),
                   !inputFrames.values.contains(where: { $0.contains(location) }) else { return }
@@ -147,9 +153,12 @@ struct NewImportView: View {
         })
     }
     private func prepare() {
+        guard !isPreparing else { return }
+        isPreparing = true
         focusedField = nil
         error = nil
         Task {
+            defer { isPreparing = false }
             do {
                 let id: UUID
                 if useFile, let selectedFile { id = try await imports.prepare(subjectID: subject.id, file: selectedFile) }
@@ -240,11 +249,10 @@ struct ImportJobLabel: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(isActive ? "Import in progress" : "")
     }
-    private var isActive: Bool { imports.activeJobID == job.id || imports.merges.isSaving(job.id) }
+    private var isActive: Bool { imports.isRunning(job.id) || imports.merges.isSaving(job.id) }
     private var activityDescription: String {
         if imports.merges.isSaving(job.id) { return "Updating your subject…" }
-        guard imports.progressJobID == job.id else { return "Processing…" }
-        return imports.progress?.description ?? "Processing…"
+        return imports.progress(for: job.id)?.description ?? "Processing…"
     }
     private var status: String {
         if imports.merges.states[job.id]?.phase == .review { return "Review changes" }
@@ -258,21 +266,20 @@ struct ImportJobLabel: View {
     }
 }
 
-struct ImportBackButton: View {
-    let onKeep: () -> Void
+struct ImportDraftActionsMenu: View {
     let onDiscard: () -> Void
-    @State private var showingDraftActions = false
+    @State private var confirmingDiscard = false
 
     var body: some View {
-        Button { showingDraftActions = true } label: {
-            Image(systemName: "chevron.backward").fontWeight(.semibold)
+        Menu("Draft actions", systemImage: "ellipsis") {
+            Button("Discard Draft", systemImage: "trash", role: .destructive) { confirmingDiscard = true }
         }
-        .confirmationDialog("Keep this draft?", isPresented: $showingDraftActions, titleVisibility: .hidden) {
+        .labelStyle(.iconOnly)
+        .confirmationDialog("Discard this draft?", isPresented: $confirmingDiscard, titleVisibility: .visible) {
             Button("Discard Draft", role: .destructive, action: onDiscard)
-            Button("Keep Draft", action: onKeep)
+        } message: {
+            Text("This deletes the draft and its import progress. This can’t be undone.")
         }
-        .accessibilityLabel("Back")
-        .accessibilityHint("Choose whether to keep or discard this draft")
     }
 }
 
@@ -301,11 +308,12 @@ struct ImportJobView: View {
                     }
                 } else {
                     if let snapshot = try? imports.progressSnapshot(for: job) {
-                        let model = imports.activeJobID == jobID || imports.selectedModel.isEmpty ? job.model : imports.selectedModel
+                        let model = imports.isRunning(jobID) || imports.selectedModel.isEmpty ? job.model : imports.selectedModel
                         ImportProgressView(progress: snapshot,
                             model: imports.models.first { $0.slug == model }?.displayName ?? model,
-                            title: job.title, isRunning: imports.activeJobID == jobID,
-                            error: imports.activeJobID == jobID ? nil : job.lastError,
+                            title: job.title, isRunning: imports.isRunning(jobID),
+                            error: imports.isRunning(jobID) ? nil : job.lastError,
+                            backgroundNotice: imports.isRunning(jobID) ? imports.backgroundNotice(for: jobID) : nil,
                             onChooseModel: { showModelPicker = true })
                     } else {
                         ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark",
@@ -316,19 +324,18 @@ struct ImportJobView: View {
         }
         .navigationTitle("Import")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(jobs.first.map { $0.status != .saved } ?? false)
         .toolbar {
             if let job = jobs.first, job.status != .saved, job.status != .review {
-                ToolbarItem(placement: .topBarLeading) {
-                    ImportBackButton(onKeep: keepAndClose, onDiscard: discardAndClose)
+                ToolbarItem(placement: .topBarTrailing) {
+                    ImportDraftActionsMenu(onDiscard: discardAndClose)
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    if imports.activeJobID == jobID {
-                        Button("Pause", systemImage: "pause") { imports.pause() }
+                    if imports.isRunning(jobID) {
+                        Button("Pause", systemImage: "pause") { imports.pause(jobID: jobID) }
                             .accessibilityHint("Keeps checked batches so you can resume later")
                     } else {
                         Button("Resume", systemImage: "play") { imports.start(jobID: jobID) }
-                            .disabled(imports.selectedModel.isEmpty || imports.activeJobID != nil)
+                            .disabled(imports.selectedModel.isEmpty)
                             .accessibilityHint("Processes only unfinished batches using the selected model")
                     }
                 }
@@ -348,9 +355,6 @@ struct ImportJobView: View {
         .alert("Import", isPresented: Binding(get: { exitError != nil }, set: { if !$0 { exitError = nil } })) {
             Button("OK", role: .cancel) { exitError = nil }
         } message: { Text(exitError ?? "") }
-    }
-    private func keepAndClose() {
-        close()
     }
     private func discardAndClose() {
         do { try imports.deleteDraft(jobID: jobID); close() }

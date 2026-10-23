@@ -10,7 +10,34 @@ nonisolated enum ExtractionRecovery {
         let patch: PendingImportPatch?
     }
 
-    static func prepare(_ raw: ExtractionPayload, chunk: SourceChunk, sourceID: UUID) throws -> Result {
+    /// Intermediate rereads commit resolved passages only. Unresolved passages are reread again,
+    /// so retaining their partial entries on every attempt would duplicate the same claims.
+    private static func retainingEntries(_ payload: ExtractionPayload, for passageIDs: Set<String>)
+        -> (payload: ExtractionPayload, conceptOrdinals: [Int], factOrdinals: [Int]) {
+        let facts = payload.facts.enumerated().filter { $0.element.evidence.contains { passageIDs.contains($0.segmentID) } }
+        let factIDs = Set(facts.map { $0.element.id })
+        let relevantConcepts = Set(facts.map { $0.element.conceptID } + payload.concepts.filter {
+            $0.evidence.contains { passageIDs.contains($0.segmentID) }
+        }.map(\.id))
+        let connections = payload.connections.filter {
+            // Keep malformed references attached to relevant suggestions so connection repair can
+            // still inspect them; only suggestions wholly outside this extraction scope are omitted.
+            $0.supportingFactIDs.contains { factIDs.contains($0) }
+                || relevantConcepts.contains($0.fromConceptID) || relevantConcepts.contains($0.toConceptID)
+        }
+        let neededConcepts = Set(facts.map { $0.element.conceptID } + connections.flatMap { [$0.fromConceptID, $0.toConceptID] })
+        let concepts = payload.concepts.enumerated().filter {
+            neededConcepts.contains($0.element.id) || $0.element.evidence.contains { passageIDs.contains($0.segmentID) }
+        }
+        return (.init(concepts: concepts.map { $0.element }, facts: facts.map { $0.element },
+                      connections: connections, coverage: payload.coverage),
+                concepts.map { $0.offset }, facts.map { $0.offset })
+    }
+
+    static func prepare(_ original: ExtractionPayload, chunk: SourceChunk, sourceID: UUID,
+                        admittingPassageIDs: Set<String>? = nil) throws -> Result {
+        let retained = retainingEntries(original, for: admittingPassageIDs ?? Set(chunk.requiredSegmentIDs))
+        let raw = retained.payload
         let contextChunk = SourceChunk(index: chunk.index, segments: chunk.segments, requiredSegmentIDs: [])
         let conceptCounts = Dictionary(grouping: raw.concepts, by: \.id).mapValues(\.count)
         let factCounts = Dictionary(grouping: raw.facts, by: \.id).mapValues(\.count)
@@ -29,7 +56,7 @@ nonisolated enum ExtractionRecovery {
                 guard conceptCounts[concept.id] == 1 else { throw ImportValidator.invalid("Repeated concept IDs are ambiguous.") }
                 _ = try ImportValidator.extract(.init(concepts: [concept], facts: [], connections: [], coverage: []),
                     chunk: contextChunk, sourceID: sourceID)
-                concepts.append(concept); conceptOrdinals.append(index)
+                concepts.append(concept); conceptOrdinals.append(retained.conceptOrdinals[index])
             } catch { reject(concept.name, evidence: concept.evidence, error: error) }
         }
         for (index, fact) in raw.facts.enumerated() {
@@ -37,7 +64,7 @@ nonisolated enum ExtractionRecovery {
                 guard factCounts[fact.id] == 1 else { throw ImportValidator.invalid("Repeated fact IDs are ambiguous.") }
                 _ = try ImportValidator.extract(.init(concepts: concepts, facts: [fact], connections: [], coverage: []),
                     chunk: contextChunk, sourceID: sourceID)
-                facts.append(fact); factOrdinals.append(index)
+                facts.append(fact); factOrdinals.append(retained.factOrdinals[index])
             } catch { reject(fact.statement, evidence: fact.evidence, error: error) }
         }
         let filtered = ExtractionPayload(concepts: concepts, facts: facts, connections: [], coverage: raw.coverage)
@@ -69,10 +96,12 @@ nonisolated enum ExtractionRecovery {
                     draft: draft, reason: "This suggestion failed reference checks and is awaiting a patch.")]
             }
         }
-        affected.formUnion(CoveragePreparation.uncitedPassageIDs(filtered, chunk: chunk))
+        affected.formUnion(CoveragePreparation.passageIDsNeedingRecovery(payload, chunk: chunk))
         let passageIDs = chunk.requiredSegmentIDs.filter { affected.contains($0) }
         let patch: PendingImportPatch? = connections.isEmpty && passageIDs.isEmpty ? nil
             : .init(index: chunk.index, concepts: concepts, facts: facts, connections: connections, passageIDs: passageIDs)
+        draft.captureUntrackedReviewFlags()
+        draft.synchronizeReviewIssues()
         return .init(payload: payload, draft: draft, conceptOrdinals: conceptOrdinals, factOrdinals: factOrdinals, patch: patch)
     }
 
@@ -87,7 +116,7 @@ nonisolated enum ExtractionRecovery {
         try ImportValidator.text(value.explanation, label: "connection explanation")
         let support = value.supportingFactIDs.compactMap { factMap[$0] }
         let review = repaired ? "ChatGPT corrected this suggestion's references. Check its meaning and supporting facts."
-            : ImportValidator.reason(value.reviewReason) ?? support.compactMap(\.reviewReason).first
+            : ImportValidator.reason(value.reviewReason)
         return .init(id: UUID(), fromConceptID: from, toConceptID: to, kind: value.kind, explanation: value.explanation,
             supportingFactIDs: support.map(\.id), evidence: Reconciliation.uniqueEvidence(support.flatMap(\.evidence)),
             original: .init(kind: value.kind, explanation: value.explanation), isInferred: false,
@@ -121,6 +150,7 @@ nonisolated enum ExtractionRecovery {
                         let connection = try checkedConnection(corrected, concepts: patch.concepts, facts: patch.facts,
                             draft: original, repaired: true)
                         draft.connections.append(connection)
+                        draft.captureUntrackedReviewFlags(origin: .connectionRepair)
                         draft.excludedConnections.removeAll { $0.id == task.exclusionID }
                         continue
                     } catch { reason = "The correction still has invalid references or content. This suggestion remains excluded for review." }

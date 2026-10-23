@@ -52,6 +52,9 @@ nonisolated struct ExtractionProgress: Sendable {
     var organizationCompleted = 0
     var organizationTotal = 0
     var isResolving = false
+    var isReviewingSource = false
+    var sourceReviewCompleted = 0
+    var sourceReviewTotal = 0
     var resolutionCompleted = 0
     var resolutionTotal = 0
     var topicOverview: [ImportTopicSummary] = []
@@ -60,6 +63,7 @@ nonisolated struct ExtractionProgress: Sendable {
     var activeWorkerCount: Int { batches.filter { $0.state == .active }.count }
 
     var description: String {
+        if isReviewingSource { return "Checking remaining issues against your notes" }
         if isResolving { return "Considering names and classifications" }
         if organizationLabel != nil { return "Organizing concepts into topics" }
         if !batches.isEmpty {
@@ -71,6 +75,7 @@ nonisolated struct ExtractionProgress: Sendable {
         return stage == .extracting ? "Extracting batch \(batch) of \(total)" : "Connecting batch \(batch) of \(total)"
     }
     var activityLabel: String {
+        if isReviewingSource { return "Checking source support and missing facts…" }
         if isResolving { return "Considering names and classifications…" }
         if let organizationLabel { return organizationLabel }
         if isRepairing, [.authorizing, .waiting, .processing, .receiving].contains(activity) {
@@ -228,7 +233,7 @@ nonisolated struct ImportStreamPreview {
     @discardableResult func prepareForRepair(label: String = "Checking connection suggestions with ChatGPT…", retainingConnections: Bool = false) -> ImportPreviewScope {
         retainedEntries = value.previewEntries
         stream = .init()
-        scope = .init(batchIndex: scope.batchIndex, attempt: scope.attempt, pass: retainingConnections ? .supplement : .connectionRepair)
+        scope = .init(batchIndex: scope.batchIndex, attempt: UUID(), pass: retainingConnections ? .supplement : .connectionRepair)
         value.isRepairing = true
         value.repairLabel = label
         value.receivedCharacters = 0

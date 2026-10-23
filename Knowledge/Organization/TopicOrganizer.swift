@@ -7,7 +7,7 @@ nonisolated struct TopicProposal: Codable, Sendable {
 }
 nonisolated struct TopicOutlineResponse: Codable, Sendable {
     let topics: [TopicProposal]
-    var updates: [LibraryContentProposal]? = nil
+    let updates: [LibraryContentProposal]
 }
 nonisolated struct TopicAssignmentResponse: Codable, Sendable {
     let placements: [TopicAssignment]
@@ -30,20 +30,98 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
 }
 
 @MainActor protocol TopicOrganizing {
-    func organize(_ snapshot: TopicOrganizationSnapshot, model: String,
+    func organize(_ snapshot: TopicOrganizationSnapshot, model: String, checkpoint: TopicOrganizationCheckpoint?,
         accessToken: @escaping @MainActor () async throws -> String,
+        onCheckpoint: @escaping @MainActor (TopicOrganizationCheckpoint) throws -> Void,
         onProgress: @escaping @MainActor (TopicOrganizationProgress) -> Void) async throws -> TopicOrganizationPlan
 }
 
 @MainActor struct ChatGPTTopicOrganizer: TopicOrganizing {
     let client: any ChatGPTPlanRequesting
+    private static let assignmentBatchSize = 25
 
-    func organize(_ snapshot: TopicOrganizationSnapshot, model: String,
+    func organize(_ snapshot: TopicOrganizationSnapshot, model: String, checkpoint: TopicOrganizationCheckpoint?,
         accessToken: @escaping @MainActor () async throws -> String,
+        onCheckpoint: @escaping @MainActor (TopicOrganizationCheckpoint) throws -> Void,
         onProgress: @escaping @MainActor (TopicOrganizationProgress) -> Void) async throws -> TopicOrganizationPlan {
         let candidates = snapshot.candidates
-        guard !candidates.isEmpty else { return .init(addedTopics: [], placements: []) }
-        onProgress(.init(label: "Organizing import topics…"))
+        try Task.checkCancellation()
+        var saved: TopicOrganizationCheckpoint
+        if let checkpoint {
+            try checkpoint.validate(for: snapshot)
+            saved = checkpoint
+        } else {
+            guard !candidates.isEmpty else { return .init(addedTopics: [], placements: []) }
+            onProgress(.init(label: "Organizing import topics…"))
+            let plan = try await outline(snapshot, model: model, accessToken: accessToken)
+            try Task.checkCancellation()
+            saved = .init(subjectID: snapshot.subjectID, candidateIDs: candidates.map(\.id), plan: plan)
+            try saved.validate(for: snapshot)
+            // Persist the resolved UUIDs and outline proposals before starting any assignments.
+            try onCheckpoint(saved)
+        }
+        let topics = snapshot.topics + saved.plan.addedTopics
+        var placementsByConcept = Dictionary(uniqueKeysWithValues: saved.plan.placements.map { ($0.conceptID, $0) })
+        let completed = Set(placementsByConcept.keys)
+        let pending = candidates.filter { !completed.contains($0.id) }
+        onProgress(.init(label: completed.isEmpty ? "Placing concepts into topics…"
+            : "Organized \(completed.count) of \(candidates.count) concepts", topics: topics, placements: saved.plan.placements))
+        let batches = stride(from: 0, to: pending.count, by: Self.assignmentBatchSize).map { offset in
+            Array(pending[offset..<min(offset + Self.assignmentBatchSize, pending.count)])
+        }
+        try await withThrowingTaskGroup(of: [ConceptPlacementRecord].self) { group in
+            // Match initial reading: submit every pending batch without an app-imposed worker cap.
+            for batch in batches {
+                try Task.checkCancellation()
+                group.addTask { @MainActor in
+                    try await assign(batch, subject: snapshot.subjectName, topics: topics, model: model, accessToken: accessToken)
+                }
+            }
+            for try await additions in group {
+                try Task.checkCancellation()
+                // Only the group owner combines results and writes checkpoints. Workers can finish
+                // in any order; the saved plan always follows the original candidate order.
+                for placement in additions { placementsByConcept[placement.conceptID] = placement }
+                let placements = candidates.compactMap { placementsByConcept[$0.id] }
+                saved.plan = .init(addedTopics: saved.plan.addedTopics, placements: placements, updates: saved.plan.updates)
+                // A storage failure stops the group; displayed progress always reflects durable results.
+                try onCheckpoint(saved)
+                onProgress(.init(label: "Organized \(placements.count) of \(candidates.count) concepts",
+                    topics: topics, placements: placements))
+            }
+        }
+        try Task.checkCancellation()
+        onProgress(.init(label: "Topics ready to review", topics: topics, placements: saved.plan.placements, isComplete: true))
+        return saved.plan
+    }
+
+    private func assign(_ batch: [OrganizableConcept], subject: String, topics: [TopicRecord], model: String,
+        accessToken: @MainActor () async throws -> String) async throws -> [ConceptPlacementRecord] {
+        try Task.checkCancellation()
+        guard !topics.isEmpty else {
+            return batch.map { .init(conceptID: $0.id, topicID: nil, reason: "No suitable topic was found.") }
+        }
+        let result: TopicAssignmentResponse = try await request(
+            TopicAssignmentInput(subject: subject, topics: topics, concepts: batch.map(compact)),
+            model: model, name: "knowledge_topic_placements_v1", instructions: Self.assignmentInstructions,
+            schema: .record(["placements": .list(.record([
+                "conceptID": .choices(batch.map { $0.id.uuidString }),
+                "topicID": .nullableChoices(topics.map { $0.id.uuidString }), "reviewReason": .nullableText
+            ]))]), accessToken: accessToken)
+        let expected = Set(batch.map(\.id)), allowed = Set(topics.map(\.id))
+        guard Set(result.placements.map(\.conceptID)) == expected, result.placements.count == expected.count,
+              result.placements.allSatisfy({ $0.topicID == nil || allowed.contains($0.topicID!) }) else {
+            throw TopicOrganizationError.invalid("A placement references missing or repeated material.")
+        }
+        return result.placements.map { value in
+            let reason = value.reviewReason.flatMap { $0.trimmed.isEmpty ? nil : String($0.prefix(500)) }
+            return .init(conceptID: value.conceptID, topicID: reason == nil ? value.topicID : nil,
+                reason: reason ?? (value.topicID == nil ? "No suitable topic was found." : nil))
+        }
+    }
+
+    private func outline(_ snapshot: TopicOrganizationSnapshot, model: String,
+        accessToken: @MainActor () async throws -> String) async throws -> TopicOrganizationPlan {
         // Sample across the entire subject rather than filling the prompt from its first chapter.
         let sorted = snapshot.concepts.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let count = min(120, sorted.count)
@@ -64,46 +142,12 @@ nonisolated struct TopicAssignmentInput: Encodable, Sendable {
                 "id": .text, "parentTopicID": .nullableText, "name": .text
             ])), "updates": .list(ImportSchemas.libraryProposalSchema)]), accessToken: accessToken)
         let added = try Self.resolve(outline.topics, existing: snapshot.topics)
-        let topics = snapshot.topics + added
-        var placements: [ConceptPlacementRecord] = []
-        onProgress(.init(label: "Placing concepts into topics…", topics: topics))
-        for offset in stride(from: 0, to: candidates.count, by: 25) {
-            try Task.checkCancellation()
-            let batch = Array(candidates[offset..<min(offset + 25, candidates.count)])
-            if topics.isEmpty {
-                placements += batch.map { .init(conceptID: $0.id, topicID: nil, reason: "No suitable topic was found.") }
-                onProgress(.init(label: "Organized \(placements.count) of \(candidates.count) concepts",
-                    topics: topics, placements: placements))
-                continue
-            }
-            let result: TopicAssignmentResponse = try await request(
-                TopicAssignmentInput(subject: snapshot.subjectName, topics: topics, concepts: batch.map(compact)),
-                model: model, name: "knowledge_topic_placements_v1", instructions: Self.assignmentInstructions,
-                schema: .record(["placements": .list(.record([
-                    "conceptID": .choices(batch.map { $0.id.uuidString }),
-                    "topicID": .nullableChoices(topics.map { $0.id.uuidString }), "reviewReason": .nullableText
-                ]))]), accessToken: accessToken)
-            let expected = Set(batch.map(\.id)), allowed = Set(topics.map(\.id))
-            guard Set(result.placements.map(\.conceptID)) == expected, result.placements.count == expected.count,
-                  result.placements.allSatisfy({ $0.topicID == nil || allowed.contains($0.topicID!) }) else {
-                throw TopicOrganizationError.invalid("A placement references missing or repeated material.")
-            }
-            placements += result.placements.map { value in
-                let reason = value.reviewReason.flatMap { $0.trimmed.isEmpty ? nil : String($0.prefix(500)) }
-                return .init(conceptID: value.conceptID, topicID: reason == nil ? value.topicID : nil,
-                    reason: reason ?? (value.topicID == nil ? "No suitable topic was found." : nil))
-            }
-            onProgress(.init(label: "Organized \(placements.count) of \(candidates.count) concepts",
-                topics: topics, placements: placements))
-        }
-        try Task.checkCancellation()
-        onProgress(.init(label: "Topics ready to review", topics: topics, placements: placements, isComplete: true))
         let known = Set(snapshot.topics.map(\.id))
         let assigned = Set(outlineInput.existingPlacements.map(\.conceptID))
-        let updates = (outline.updates ?? []).filter {
+        let updates = outline.updates.filter {
             ((known.contains($0.entityID) && ["name", "parentID"].contains($0.field)) || (assigned.contains($0.entityID) && $0.field == "topicID")) && !$0.reason.trimmed.isEmpty
         }
-        return .init(addedTopics: added, placements: placements, updates: updates)
+        return .init(addedTopics: added, placements: [], updates: updates)
     }
 
     static func resolve(_ proposals: [TopicProposal], existing: [TopicRecord]) throws -> [TopicRecord] {

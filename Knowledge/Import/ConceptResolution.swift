@@ -203,7 +203,8 @@ private nonisolated struct ResolutionResponse: Decodable, Sendable {
         guard !value.rationale.trimmed.isEmpty, value.rationale.count <= 2000, value.evidence.count <= 6 else {
             throw ImportValidator.invalid("Invalid resolution explanation.")
         }
-        if name?.normalizedName == input.name.normalizedName, classification == nil { return nil }
+        let changesName = name.map { $0.normalizedName != input.name.normalizedName } ?? false
+        if !changesName && (classification == nil || classification?.normalizedName == input.name.normalizedName) { return nil }
         var evidence: [EvidenceReference] = []
         if value.basis == .sourceContext {
             guard !value.evidence.isEmpty else { throw ImportValidator.invalid("Source-context suggestions require quotations.") }

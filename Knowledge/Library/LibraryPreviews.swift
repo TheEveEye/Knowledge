@@ -60,7 +60,7 @@ import SwiftData
             title: ImportProgressSample.source.title)
             .navigationTitle("Import").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { ImportBackButton(onKeep: {}, onDiscard: {}) }
+                ToolbarItem(placement: .topBarTrailing) { ImportDraftActionsMenu(onDiscard: {}) }
                 ToolbarItem(placement: .primaryAction) { Button("Pause", systemImage: "pause") { } }
             }
     }

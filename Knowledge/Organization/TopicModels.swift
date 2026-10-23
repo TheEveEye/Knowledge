@@ -9,14 +9,15 @@ import SwiftData
     var name: String
     var sortOrder: Int
     var isUserEdited: Bool
-    var manualFields: [String] = []
-    var isRetired = false
+    var manualFields: [String]
+    var isRetired: Bool
     var redirectID: UUID? = nil
 
     init(subjectID: UUID, record: TopicRecord) {
         id = record.id; self.subjectID = subjectID; parentTopicID = record.parentTopicID
         name = record.name; sortOrder = record.sortOrder; isUserEdited = record.isUserEdited
         manualFields = record.isUserEdited ? ["name", "parentID"] : []
+        isRetired = false
     }
     var record: TopicRecord {
         .init(id: id, parentTopicID: parentTopicID, name: name, sortOrder: sortOrder, isUserEdited: isUserEdited)
@@ -82,7 +83,30 @@ nonisolated struct TopicOrganizationSnapshot: Sendable, Equatable {
 nonisolated struct TopicOrganizationPlan: Codable, Sendable {
     let addedTopics: [TopicRecord]
     let placements: [ConceptPlacementRecord]
-    var updates: [LibraryContentProposal]? = nil
+    var updates: [LibraryContentProposal] = []
+}
+
+/// A resolved outline and validated assignments that are durable before progress is displayed.
+/// A placement with no suitable topic is still a completed assignment.
+nonisolated struct TopicOrganizationCheckpoint: Codable, Sendable {
+    let subjectID: UUID
+    let candidateIDs: [UUID]
+    var plan: TopicOrganizationPlan
+
+    func validate(for snapshot: TopicOrganizationSnapshot) throws {
+        let candidates = Set(snapshot.candidates.map(\.id))
+        let placed = plan.placements.map(\.conceptID)
+        let topics = snapshot.topics + plan.addedTopics
+        let allowed = Set(topics.map(\.id))
+        guard subjectID == snapshot.subjectID,
+              candidateIDs.count == candidates.count, Set(candidateIDs) == candidates,
+              plan.addedTopics.count <= 60,
+              Set(placed).count == placed.count, Set(placed).isSubset(of: candidates),
+              plan.placements.allSatisfy({ !$0.isLocked && ($0.topicID == nil || allowed.contains($0.topicID!)) }) else {
+            throw TopicOrganizationError.invalid("The saved organization does not match this import.")
+        }
+        try TopicTree.validate(topics)
+    }
 }
 
 nonisolated struct TopicOrganizationProgress: Sendable {
