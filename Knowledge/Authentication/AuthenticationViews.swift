@@ -111,7 +111,8 @@ private struct ChatGPTSignInView: View {
                         if authentication.isBusy {
                             ProgressView("Connecting to ChatGPT…")
                                 .font(.callout)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity, alignment: .center)
                         }
 
                         AuthenticationMessage()
@@ -240,12 +241,6 @@ struct ChatGPTPlanWelcomeView: View {
                     Text("Eligible AI requests in Knowledge will use your ChatGPT plan and count toward its limits. You can review your usage and manage connected apps in ChatGPT.")
                         .foregroundStyle(.secondary)
                     Link("Manage ChatGPT usage", destination: ChatGPTAccountLinks.usage)
-                    Button("Got it") {
-                        authentication.dismissPlanWelcome()
-                        dismiss()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .frame(minHeight: 44)
                 }
                 .padding(24)
                 .frame(maxWidth: 520, alignment: .leading)
