@@ -1,18 +1,32 @@
 import SwiftUI
-#if DEBUG
-import UIKit
-#endif
 
 struct ImportReviewView: View {
     let jobID: UUID
     let onClose: () -> Void
+    var isChatExpanded = false
+    @Environment(ImportCoordinator.self) private var imports
+
+    var body: some View {
+        ImportReviewContent(jobID: jobID, onClose: onClose, isChatExpanded: isChatExpanded,
+                            editor: imports.draftEditor(for: jobID))
+    }
+}
+
+private struct ImportReviewContent: View {
+    let jobID: UUID
+    let onClose: () -> Void
+    let isChatExpanded: Bool
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dynamicTypeSize) private var typeSize
-    @State private var draft = ImportDraft(sourceID: UUID(), concepts: [], facts: [], connections: [], coverage: [])
+    @Bindable var editor: ImportDraftEditingSession
+    private var draft: ImportDraft {
+        get { editor.draft }
+        nonmutating set { editor.draft = newValue }
+    }
     @State private var source: PreparedSource?
     @State private var context = SubjectSnapshot(subjectID: UUID(), name: "", concepts: [], facts: [], connections: [])
     @State private var loaded = false
-    @State private var revision = 0
+    private var revision: Int { editor.revision }
     @State private var saved = false
     @State private var discarded = false
     @State private var error: String?
@@ -20,10 +34,6 @@ struct ImportReviewView: View {
     @State private var organizationContext: TopicOrganizationSnapshot?
     @State private var showChanges = false
     @State private var handedOffForRecheck = false
-    #if DEBUG
-    @State private var copyingDebugReport = false
-    @State private var copiedDebugReport = false
-    #endif
 
     var body: some View {
         Group {
@@ -32,27 +42,34 @@ struct ImportReviewView: View {
             } else if loaded { review }
             else { ImportActivityLabel(title: "Loading your draft…") }
         }
-        .navigationTitle("Review import")
+        .navigationTitle(isChatExpanded ? "Import chat" : "Review import")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 ImportDraftActionsMenu(onDiscard: discard)
+                    .opacity(isChatExpanded ? 0 : 1)
+                    .disabled(isChatExpanded)
+                    .accessibilityHidden(isChatExpanded)
             }
+            .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save", systemImage: "checkmark") {
                     imports.save(draft, jobID: jobID)
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderedProminent)
-                .disabled(!loaded || saved || imports.merges.isSaving(jobID))
+                .opacity(isChatExpanded ? 0 : 1)
+                .accessibilityHidden(isChatExpanded)
+                .disabled(isChatExpanded || !loaded || saved || imports.merges.isSaving(jobID))
             }
+            .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
         }
         .task {
             guard !loaded else { return }
             do {
                 let job = try imports.repository.job(jobID)
-                guard let value = try job.draft() else { throw ImportError.damagedCheckpoint }
+                try editor.load()
                 let base = try imports.repository.baseSnapshot(for: job)
-                draft = value; source = try job.prepared(); context = base.extractionContext()
+                source = try job.prepared(); context = base.extractionContext()
                 organizationContext = base.organizationContext()
                 imports.merges.restore(jobID: jobID)
                 showChanges = imports.merges.states[jobID]?.phase == .review
@@ -107,17 +124,6 @@ struct ImportReviewView: View {
                 }
                 .disabled(imports.isRunning(jobID) || imports.merges.isSaving(jobID))
             }
-            #if DEBUG
-            Section("Debug") {
-                Button("Copy review diagnostic report", systemImage: "doc.on.doc") { copyDebugReport() }
-                    .disabled(source == nil || copyingDebugReport)
-                if copyingDebugReport {
-                    Text("Preparing report…").font(.caption).foregroundStyle(.secondary)
-                } else if copiedDebugReport {
-                    Text("Copied. Paste the report into this chat for analysis.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            #endif
             if !issues.isEmpty {
                 Section("Needs review") {
                     ForEach(issues) { issue in
@@ -504,7 +510,7 @@ struct ImportReviewView: View {
             + draft.connections.indices.filter { draft.connections[$0].reviewReason == nil }
     }
 
-    private func edited() { revision += 1; imports.merges.invalidateReview(jobID) }
+    private func edited() { editor.edited() }
     private func conceptBinding(_ index: Int) -> Binding<DraftConcept> {
         .init(get: { draft.concepts[index] }, set: { draft.concepts[index] = $0; edited() })
     }
@@ -528,7 +534,7 @@ struct ImportReviewView: View {
 
     @discardableResult private func persist() -> Bool {
         guard !saved, !discarded, !handedOffForRecheck else { return true }
-        do { try imports.repository.keepDraft(draft, jobID: jobID); return true }
+        do { try editor.persist(); return true }
         catch { self.error = error.localizedDescription; return false }
     }
 
@@ -540,50 +546,6 @@ struct ImportReviewView: View {
         } catch { self.error = error.localizedDescription }
     }
 
-    #if DEBUG
-    private func copyDebugReport() {
-        guard let source, !copyingDebugReport else { return }
-        copyingDebugReport = true
-        copiedDebugReport = false
-        Task { @MainActor in
-            defer { copyingDebugReport = false }
-            do {
-                let job = try imports.repository.job(jobID)
-                var checkpoint: ImportCheckpoint?
-                var checkpointError: String?
-                do { checkpoint = try job.checkpoint() }
-                catch { checkpointError = error.localizedDescription }
-                let issues = reviewIssues.map { issue in
-                    let kind: String
-                    let id: String
-                    switch issue.target {
-                    case .concept(let value): kind = "concept"; id = value.uuidString
-                    case .fact(let value): kind = "fact"; id = value.uuidString
-                    case .connection(let value): kind = "connection"; id = value.uuidString
-                    case .excludedConnection(let value): kind = "excludedConnection"; id = value.uuidString
-                    case .passage(let value): kind = "passage"; id = value
-                    case .existingFact(let value): kind = "existingFact"; id = value.uuidString
-                    }
-                    return ImportReviewDebugReport.Issue(kind: kind, targetID: id, title: issue.title, reason: issue.reason, reviewIssueID: issue.trackedID)
-                }
-                let report = ImportReviewDebugReport(jobID: jobID, model: job.model, jobCreatedAt: job.createdAt,
-                    jobStatus: job.statusRaw,
-                    appVersion: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
-                        + " (" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown") + ")",
-                    issues: issues, issueCounts: Dictionary(grouping: issues, by: \.kind).mapValues(\.count),
-                    exactReasonCounts: Dictionary(grouping: issues, by: \.reason).mapValues(\.count),
-                    draft: draft, source: source, baseContext: context,
-                    baseTopics: organizationContext?.topics ?? [], basePlacements: organizationContext?.placements ?? [],
-                    extractionBatches: (checkpoint?.completedBatches ?? []).sorted { $0.index < $1.index }
-                        .map(ImportReviewDebugReport.ExtractionBatch.init),
-                    pendingPatches: checkpoint?.pendingPatches ?? [], reconciledPartCount: checkpoint?.reconciledPartCount,
-                    requestUsage: checkpoint?.usage ?? [], checkpointError: checkpointError)
-                UIPasteboard.general.string = try await report.text()
-                copiedDebugReport = true
-            } catch { self.error = error.localizedDescription }
-        }
-    }
-    #endif
 }
 
 private struct PassageReviewButton: View {

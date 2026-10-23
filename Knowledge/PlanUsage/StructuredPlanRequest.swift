@@ -33,9 +33,63 @@ nonisolated indirect enum SchemaValue: Encodable, Sendable {
     }
 }
 
+/// Keeps complete Responses output items, including encrypted reasoning, for stateless tool turns.
+nonisolated indirect enum PlanJSONValue: Codable, Sendable, Equatable {
+    case object([String: PlanJSONValue]), array([PlanJSONValue]), string(String), number(Double), bool(Bool), null
+
+    init(from decoder: any Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
+        else if let text = try? value.decode(String.self) { self = .string(text) }
+        else if let number = try? value.decode(Double.self) { self = .number(number) }
+        else if let list = try? value.decode([PlanJSONValue].self) { self = .array(list) }
+        else { self = .object(try value.decode([String: PlanJSONValue].self)) }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case .object(let object): try value.encode(object)
+        case .array(let array): try value.encode(array)
+        case .string(let string): try value.encode(string)
+        case .number(let number): try value.encode(number)
+        case .bool(let bool): try value.encode(bool)
+        case .null: try value.encodeNil()
+        }
+    }
+
+    subscript(_ key: String) -> PlanJSONValue? {
+        guard case .object(let value) = self else { return nil }
+        return value[key]
+    }
+    var string: String? { if case .string(let value) = self { value } else { nil } }
+}
+
 nonisolated struct PlanInputMessage: Encodable, Sendable {
-    let role: String
-    let content: String
+    let item: PlanJSONValue
+    init(role: String, content: String) {
+        item = .object(["role": .string(role), "content": .string(content)])
+    }
+    init(item: PlanJSONValue) { self.item = item }
+    static func toolOutput(callID: String, output: String) -> Self {
+        .init(item: .object(["type": .string("function_call_output"), "call_id": .string(callID), "output": .string(output)]))
+    }
+    func encode(to encoder: any Encoder) throws { try item.encode(to: encoder) }
+}
+
+nonisolated struct PlanFunctionTool: Encodable, Sendable {
+    let type = "function"
+    let name: String
+    let description: String
+    let parameters: SchemaValue
+    let strict = true
+}
+
+nonisolated struct PlanFunctionCall: Sendable {
+    let callID: String
+    let name: String
+    let arguments: String
 }
 
 nonisolated struct PlanJSONFormat: Encodable, Sendable {
@@ -54,6 +108,9 @@ nonisolated struct PlanResponseRequest: Encodable, Sendable {
     let input: [PlanInputMessage]
     let instructions: String
     var text: PlanTextConfiguration? = nil
+    var tools: [PlanFunctionTool]? = nil
+    var parallel_tool_calls: Bool? = nil
+    var include: [String]? = nil
     let store = false
     let stream = true
 }

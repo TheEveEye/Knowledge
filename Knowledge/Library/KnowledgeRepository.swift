@@ -125,15 +125,24 @@ import SwiftData
         try container.mainContext.save()
     }
 
-    func keepDraft(_ draft: ImportDraft, jobID: UUID) throws {
+    func keepDraft(_ draft: ImportDraft, jobID: UUID, expectedVersion: Int? = nil) throws {
         let job = try job(jobID)
         guard job.status != .saved else { return }
+        if let expectedVersion, job.draftEditVersion != expectedVersion { throw LibraryMergeError.changed }
         guard draft.isComplete, draft.topicOrganization != nil else { throw ImportError.incompleteDraft }
         let data = try LibraryCoding.encode(draft)
+        let previous = (job.draftData, job.draftEditVersion, job.statusRaw, job.lastError, job.updatedAt)
+        let context = container.mainContext, autosave = context.autosaveEnabled
+        context.autosaveEnabled = false
+        defer { context.autosaveEnabled = autosave }
         if job.draftData != data { job.draftEditVersion += 1 }
         job.draftData = data
         job.status = .review; job.lastError = nil; job.updatedAt = Date()
-        try container.mainContext.save()
+        do { try context.save() }
+        catch {
+            (job.draftData, job.draftEditVersion, job.statusRaw, job.lastError, job.updatedAt) = previous
+            throw error
+        }
     }
 
     /// A source-copy cleanup failure is nonfatal once the draft deletion has been saved.

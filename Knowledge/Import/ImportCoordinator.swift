@@ -6,6 +6,8 @@ import UIKit
 @MainActor @Observable final class ImportCoordinator {
     private(set) var models: [ChatGPTPlanModel] = []
     private(set) var selectedModel = ""
+    private(set) var defaultImportModel = ""
+    private(set) var defaultChatModel = ""
     private(set) var isLoadingModels = false
     private var runners: [UUID: ImportJobRunner] = [:]
     var modelError: String?
@@ -17,6 +19,9 @@ import UIKit
     @ObservationIgnored private let extractor: any ConceptExtractor
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private var catalogRunID = UUID()
+    @ObservationIgnored private var draftEditors: [UUID: ImportDraftEditingSession] = [:]
+    @ObservationIgnored private var chats: [UUID: ImportChatSession] = [:]
+    private(set) var isForeground = true
 
     init(authentication: AuthenticationStore, container: ModelContainer,
          client: (any ChatGPTPlanRequesting)? = nil, extractor: (any ConceptExtractor)? = nil,
@@ -30,9 +35,11 @@ import UIKit
     }
 
     func loadModels() async {
+        guard !isLoadingModels else { return }
         let accountID = authentication.activeAccount?.id
         guard let accountID, authentication.activeAccount?.credentials?.planEnabled == true else {
-            models = []; selectedModel = ""; modelError = "Connect your ChatGPT plan in account settings to process notes."
+            models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""
+            modelError = "Connect your ChatGPT plan in account settings to process notes."
             return
         }
         let run = UUID(); catalogRunID = run
@@ -44,21 +51,62 @@ import UIKit
             try Task.checkCancellation()
             guard catalogRunID == run, authentication.activeAccount?.id == accountID else { throw ImportError.accountChanged }
             self.models = models
-            let saved = preferences.dictionary(forKey: "knowledge.modelSelections")?[accountID] as? String
-            selectedModel = models.first(where: { $0.slug == saved })?.slug ?? models.first?.slug ?? ""
-            if !selectedModel.isEmpty { selectModel(selectedModel) }
+            let savedImport = preferences.dictionary(forKey: "knowledge.modelSelections")?[accountID] as? String
+            let savedChat = preferences.dictionary(forKey: "knowledge.chatModelSelections")?[accountID] as? String
+            defaultImportModel = models.first(where: { $0.slug == savedImport })?.slug ?? models.first?.slug ?? ""
+            defaultChatModel = models.first(where: { $0.slug == savedChat })?.slug ?? models.first?.slug ?? ""
+            if !models.contains(where: { $0.slug == selectedModel }) { selectedModel = defaultImportModel }
             if models.isEmpty { modelError = PlanUsageError(kind: .noModels).localizedDescription }
         } catch {
             if catalogRunID == run, authentication.activeAccount?.id == accountID {
-                models = []; selectedModel = ""; modelError = error.localizedDescription
+                models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""
+                modelError = error.localizedDescription
             }
         }
     }
     func selectModel(_ slug: String) {
-        guard models.contains(where: { $0.slug == slug }), let accountID = authentication.activeAccount?.id else { return }
+        guard models.contains(where: { $0.slug == slug }) else { return }
         selectedModel = slug
-        var values = preferences.dictionary(forKey: "knowledge.modelSelections") ?? [:]
-        values[accountID] = slug; preferences.set(values, forKey: "knowledge.modelSelections")
+    }
+
+    func useDefaultImportModel() { selectedModel = defaultImportModel }
+
+    func setDefaultImportModel(_ slug: String) {
+        guard models.contains(where: { $0.slug == slug }) else { return }
+        let followsDefault = selectedModel.isEmpty || selectedModel == defaultImportModel
+        defaultImportModel = slug
+        if followsDefault { selectedModel = slug }
+        storeDefaultModel(slug, key: "knowledge.modelSelections")
+    }
+
+    func setDefaultChatModel(_ slug: String) {
+        guard models.contains(where: { $0.slug == slug }) else { return }
+        defaultChatModel = slug
+        storeDefaultModel(slug, key: "knowledge.chatModelSelections")
+    }
+
+    private func storeDefaultModel(_ slug: String, key: String) {
+        guard let accountID = authentication.activeAccount?.id else { return }
+        var values = preferences.dictionary(forKey: key) ?? [:]
+        values[accountID] = slug; preferences.set(values, forKey: key)
+    }
+
+    func draftEditor(for jobID: UUID) -> ImportDraftEditingSession {
+        if let editor = draftEditors[jobID] { return editor }
+        let editor = ImportDraftEditingSession(jobID: jobID, repository: repository, merges: merges)
+        draftEditors[jobID] = editor
+        return editor
+    }
+
+    func chat(for jobID: UUID) -> ImportChatSession {
+        if let chat = chats[jobID] { return chat }
+        let chat = ImportChatSession(jobID: jobID, imports: self, authentication: authentication, client: client)
+        chats[jobID] = chat
+        return chat
+    }
+
+    func interruptChats(message: String) {
+        for chat in chats.values { chat.interrupt(message: message) }
     }
 
     func prepare(subjectID: UUID, title: String, text: String) async throws -> UUID {
@@ -100,6 +148,7 @@ import UIKit
             try repository.checkpoint(checkpoint, jobID: jobID)
             try repository.update(jobID: jobID, status: .interrupted)
             merges.invalidateReview(jobID)
+            draftEditors[jobID] = nil
             runners[jobID] = nil
             start(jobID: jobID)
             return true
@@ -125,6 +174,7 @@ import UIKit
                     onStopped: { [weak self] succeeded in
                         guard let self else { return }
                         if succeeded { self.runners[jobID] = nil }
+                        self.chats[jobID]?.resumeQueued()
                         self.updateIdleTimer()
                     }, onError: { [weak self] message in self?.message = message })
                 runners[jobID] = runner
@@ -149,6 +199,8 @@ import UIKit
         merges.cancel(jobID: jobID)
         pause(jobID: jobID)
         let cleanupMessage = try repository.deleteDraft(jobID: jobID)
+        chats[jobID]?.interrupt(message: "This draft was deleted.")
+        chats[jobID] = nil; draftEditors[jobID] = nil
         runners[jobID] = nil
         if let cleanupMessage { message = cleanupMessage }
     }
@@ -160,23 +212,41 @@ import UIKit
         let jobIDs = jobs.map(\.id)
         for id in jobIDs { pause(jobID: id) }
         let cleanupMessage = try repository.deleteSubject(subjectID)
-        for id in jobIDs { runners[id] = nil }
+        for id in jobIDs {
+            chats[id]?.interrupt(message: "This subject was deleted.")
+            chats[id] = nil; draftEditors[id] = nil; runners[id] = nil
+        }
         if let cleanupMessage { message = cleanupMessage }
     }
 
     func accountChanged() {
+        interruptChats(message: "Your ChatGPT connection changed. Send your request again with the selected account.")
         merges.interrupt()
         pauseAll(message: ImportError.accountChanged.localizedDescription)
         catalogRunID = UUID(); isLoadingModels = false
-        models = []; selectedModel = ""; modelError = nil
+        models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; modelError = nil
     }
 
     func sceneDidEnterBackground() {
+        isForeground = false
+        for chat in chats.values { chat.suspend() }
         merges.interrupt()
         for runner in Array(runners.values) { runner.sceneDidEnterBackground() }
     }
 
-    func save(_ draft: ImportDraft, jobID: UUID) { merges.save(draft, jobID: jobID, model: selectedModel) }
+    func sceneDidBecomeActive() {
+        isForeground = true
+        for chat in chats.values { chat.resumeQueued() }
+    }
+
+    func save(_ draft: ImportDraft, jobID: UUID) {
+        do {
+            if let editor = draftEditors[jobID], editor.loaded {
+                try editor.persist()
+                merges.save(editor.draft, jobID: jobID, model: selectedModel)
+            } else { merges.save(draft, jobID: jobID, model: selectedModel) }
+        } catch { message = error.localizedDescription }
+    }
 
     func progressSnapshot(for job: KnowledgeImportJob) throws -> ExtractionProgress {
         if let runner = runners[job.id] { return try runner.progressSnapshot(for: job) }

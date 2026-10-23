@@ -146,6 +146,7 @@ struct NewImportView: View {
             }
         }
         .interactiveDismissDisabled(isPreparing)
+        .onAppear { imports.useDefaultImportModel() }
         .gesture(ImportKeyboardDismissGesture(isEnabled: focusedField != nil) { location in
             guard !pasteButtonFrame.contains(location),
                   !inputFrames.values.contains(where: { $0.contains(location) }) else { return }
@@ -288,18 +289,24 @@ struct ImportJobView: View {
     var onClose: (() -> Void)? = nil
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Query private var jobs: [KnowledgeImportJob]
     @State private var showModelPicker = false
     @State private var exitError: String?
+    @State private var isChatExpanded = false
     init(jobID: UUID, onClose: (() -> Void)? = nil) {
         self.jobID = jobID; self.onClose = onClose
         _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.id == jobID })
+    }
+    private var chatIsAvailable: Bool {
+        jobs.first.map { $0.status != .saved } ?? false
     }
     var body: some View {
         Group {
             if let job = jobs.first {
                 if job.status == .review {
-                    ImportReviewView(jobID: jobID, onClose: close)
+                    ImportReviewView(jobID: jobID, onClose: close, isChatExpanded: isChatExpanded)
                 } else if job.status == .saved {
                     VStack(spacing: 20) {
                         ContentUnavailableView("Added to your knowledge", systemImage: "checkmark.circle",
@@ -322,23 +329,53 @@ struct ImportJobView: View {
                 }
             } else { ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark") }
         }
-        .navigationTitle("Import")
+        // Defocus only the underlying review; chat bubbles and controls stay sharp.
+        .blur(radius: isChatExpanded && chatIsAvailable && !reduceTransparency ? 4 : 0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChatExpanded)
+        .accessibilityHidden(isChatExpanded && chatIsAvailable)
+        .navigationTitle(isChatExpanded && chatIsAvailable ? "Import chat" : "Import")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(isChatExpanded && chatIsAvailable)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if chatIsAvailable {
+                // Keep the import's bottom content clear of the floating composer.
+                Color.clear.frame(height: 68)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if chatIsAvailable {
+                ImportChatComposer(jobID: jobID, isExpanded: $isChatExpanded)
+                    .id(jobID)
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onChange(of: jobs.first?.status) { _, _ in imports.chat(for: jobID).resumeQueued() }
+        .onChange(of: imports.merges.states[jobID]?.phase) { _, _ in imports.chat(for: jobID).resumeQueued() }
         .toolbar {
             if let job = jobs.first, job.status != .saved, job.status != .review {
                 ToolbarItem(placement: .topBarTrailing) {
                     ImportDraftActionsMenu(onDiscard: discardAndClose)
+                        .opacity(isChatExpanded ? 0 : 1)
+                        .disabled(isChatExpanded)
+                        .accessibilityHidden(isChatExpanded)
                 }
+                .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
                 ToolbarItem(placement: .primaryAction) {
-                    if imports.isRunning(jobID) {
-                        Button("Pause", systemImage: "pause") { imports.pause(jobID: jobID) }
-                            .accessibilityHint("Keeps checked batches so you can resume later")
-                    } else {
-                        Button("Resume", systemImage: "play") { imports.start(jobID: jobID) }
-                            .disabled(imports.selectedModel.isEmpty)
-                            .accessibilityHint("Processes only unfinished batches using the selected model")
+                    Group {
+                        if imports.isRunning(jobID) {
+                            Button("Pause", systemImage: "pause") { imports.pause(jobID: jobID) }
+                                .accessibilityHint("Keeps checked batches so you can resume later")
+                        } else {
+                            Button("Resume", systemImage: "play") { imports.start(jobID: jobID) }
+                                .disabled(imports.selectedModel.isEmpty)
+                                .accessibilityHint("Processes only unfinished batches using the selected model")
+                        }
                     }
+                    .opacity(isChatExpanded ? 0 : 1)
+                    .disabled(isChatExpanded)
+                    .accessibilityHidden(isChatExpanded)
                 }
+                .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
             }
         }
         .task {

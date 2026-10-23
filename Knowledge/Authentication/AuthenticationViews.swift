@@ -42,6 +42,7 @@ struct AuthenticationRootView: View {
             await authentication.restore()
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase == .active { imports.sceneDidBecomeActive() }
             if phase == .background {
                 imports.sceneDidEnterBackground()
                 authentication.sceneDidEnterBackground()
@@ -162,6 +163,9 @@ struct ChatGPTAccountView: View {
                         Text("ChatGPT plan")
                     } footer: {
                         Text("Usage in connected apps counts toward your ChatGPT plan limits.")
+                    }
+                    if account.credentials?.planEnabled == true {
+                        ChatGPTDefaultModelsSection()
                     }
                 }
 
@@ -321,7 +325,54 @@ private struct AuthenticationMessage: View {
     }
 }
 
-private enum ChatGPTAccountLinks {
+private struct ChatGPTDefaultModelsSection: View {
+    @Environment(AuthenticationStore.self) private var authentication
+    @Environment(ImportCoordinator.self) private var imports
+
+    private var sessionID: String {
+        (authentication.activeAccount?.id ?? "") + ":" + String(authentication.activeAccount?.credentials?.planEnabled == true)
+    }
+
+    var body: some View {
+        Section {
+            if imports.isLoadingModels {
+                ImportActivityLabel(title: "Loading your models…")
+            }
+            if !imports.models.isEmpty {
+                Picker("Importing", selection: Binding(
+                    get: { imports.defaultImportModel }, set: { imports.setDefaultImportModel($0) }
+                )) {
+                    ForEach(imports.models) { model in
+                        Text(model.displayName).tag(model.slug)
+                    }
+                }
+                Picker("Chat", selection: Binding(
+                    get: { imports.defaultChatModel }, set: { imports.setDefaultChatModel($0) }
+                )) {
+                    ForEach(imports.models) { model in
+                        Text(model.displayName).tag(model.slug)
+                    }
+                }
+            }
+            if let error = imports.modelError {
+                Text(error).font(.callout).foregroundStyle(.secondary)
+            }
+            if !imports.isLoadingModels {
+                Button("Reload models") { Task { await imports.loadModels() } }
+            }
+        } header: {
+            Text("Default models")
+        } footer: {
+            Text("Saved separately for each account. These defaults apply to new imports and chat requests. You can choose a different model for an individual import.")
+        }
+        .disabled(authentication.isBusy)
+        .task(id: sessionID) {
+            if imports.models.isEmpty, !imports.isLoadingModels { await imports.loadModels() }
+        }
+    }
+}
+
+enum ChatGPTAccountLinks {
     static let usage = URL(string: "https://chatgpt.com/settings/usage")!
 }
 

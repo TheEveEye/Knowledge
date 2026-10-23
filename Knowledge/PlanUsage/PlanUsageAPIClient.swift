@@ -24,6 +24,19 @@ nonisolated struct PlanResponseReceipt: Sendable, Equatable {
     let inputTokens: Int?
     let outputTokens: Int?
     var contentType: String? = nil
+    var output: [PlanJSONValue] = []
+
+    func functionCalls() throws -> [PlanFunctionCall] {
+        try output.filter { $0["type"]?.string == "function_call" }.map { item in
+            guard let id = item["call_id"]?.string, !id.isEmpty,
+                  let name = item["name"]?.string, !name.isEmpty,
+                  let arguments = item["arguments"]?.string, arguments.utf8.count <= 65_536 else {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID,
+                    bodyShape: "Malformed function call: missing call ID, name, or bounded JSON arguments")
+            }
+            return .init(callID: id, name: name, arguments: arguments)
+        }
+    }
 }
 
 /// Transport milestones only. Model reasoning is never surfaced as progress.
@@ -36,6 +49,7 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     var code: String? = nil
     var requestID: String? = nil
     var bodyShape: String? = nil
+    var isUsageLimit: Bool { code == "subscription_sharing_usage_limit_exceeded" || status == 429 }
 
     var errorDescription: String? {
         if code == "subscription_sharing_usage_limit_exceeded" {
@@ -169,7 +183,30 @@ extension ChatGPTPlanRequesting {
             }
             throw serverError(data: body, response: stream.response)
         }
+        // Some admission/routing responses arrive as a JSON document even when streaming was requested.
+        if stream.response.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("application/json") == true {
+            var data = Data()
+            for try await chunk in stream.chunks {
+                try Task.checkCancellation()
+                guard data.count + chunk.count <= 2_097_152 else {
+                    throw PlanUsageError(kind: .invalidResponse, requestID: requestID(stream.response), bodyShape: "JSON response exceeded the size limit")
+                }
+                data.append(chunk)
+            }
+            try Task.checkCancellation()
+            guard let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID(stream.response), bodyShape: "JSON response was not an object")
+            }
+            if hasError(body) { throw serverError(payload: body, response: stream.response) }
+            if body["status"] as? String == "failed" { throw serverError(payload: body, response: stream.response) }
+            if body["status"] as? String == "incomplete" { throw PlanUsageError(kind: .incomplete, requestID: requestID(stream.response)) }
+            guard body["object"] as? String == "response", body["status"] as? String == "completed" else {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID(stream.response), bodyShape: "JSON document did not confirm a completed response")
+            }
+            return try completedReceipt(body, response: stream.response, completedOutput: .init())
+        }
         var parser = PlanSSEParser()
+        var completedOutput = PlanCompletedOutput()
         var streamedText = ""
         let receiveText: @MainActor (String) -> Void = { delta in streamedText += delta; onDelta(delta) }
         var prefix = Data()
@@ -178,7 +215,7 @@ extension ChatGPTPlanRequesting {
             if prefix.count < 8192 { prefix.append(chunk.prefix(8192 - prefix.count)) }
             for event in try parser.append(chunk) {
                 guard streamedText.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse) }
-                if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty,
+                if var receipt = try process(event, response: stream.response, completedOutput: &completedOutput, hasText: !streamedText.isEmpty,
                                              onDelta: receiveText, onActivity: onActivity) {
                     if receipt.text == nil && !streamedText.isEmpty { receipt.text = streamedText }
                     return receipt
@@ -187,14 +224,14 @@ extension ChatGPTPlanRequesting {
         }
         try Task.checkCancellation()
         for event in try parser.finish() {
-            if var receipt = try process(event, response: stream.response, hasText: !streamedText.isEmpty,
+            if var receipt = try process(event, response: stream.response, completedOutput: &completedOutput, hasText: !streamedText.isEmpty,
                                          onDelta: receiveText, onActivity: onActivity) {
                 if receipt.text == nil && !streamedText.isEmpty { receipt.text = streamedText }
                 return receipt
             }
         }
         if let body = (try? JSONSerialization.jsonObject(with: prefix)) as? [String: Any] {
-            if body["error"] != nil || body["detail"] != nil { throw serverError(data: prefix, response: stream.response) }
+            if hasError(body) { throw serverError(payload: body, response: stream.response) }
             let known = ["id", "object", "status", "type", "data", "response", "output", "choices", "usage"].filter { body[$0] != nil }
             let status = body["status"] as? String
             let recognized = status.flatMap { ["completed", "failed", "incomplete", "in_progress", "queued"].contains($0) ? $0 : nil } ?? "unknown"
@@ -204,7 +241,7 @@ extension ChatGPTPlanRequesting {
         throw PlanUsageError(kind: .interrupted, requestID: requestID(stream.response))
     }
 
-    private func process(_ event: PlanSSEEvent, response: HTTPURLResponse,
+    private func process(_ event: PlanSSEEvent, response: HTTPURLResponse, completedOutput: inout PlanCompletedOutput,
                          hasText: Bool, onDelta: @MainActor (String) -> Void,
                          onActivity: @MainActor (PlanResponseActivity) -> Void) throws -> PlanResponseReceipt? {
         if event.data == "[DONE]" { return nil }
@@ -217,6 +254,8 @@ extension ChatGPTPlanRequesting {
         let type = payload["type"] as? String ?? event.name
         if let type, type.count <= 100, type.range(of: "^[a-z_.]+$", options: .regularExpression) != nil { observeEvent(type) }
         let body = payload["response"] as? [String: Any]
+        if hasError(payload) { throw serverError(payload: payload, response: response) }
+        if let body, hasError(body) { throw serverError(payload: body, response: response) }
         switch type {
         case "response.created", "response.in_progress":
             onActivity(.processing)
@@ -229,34 +268,50 @@ extension ChatGPTPlanRequesting {
             onDelta(delta)
         case "response.output_text.done":
             if !hasText, let text = payload["text"] as? String { onDelta(text) }
+        case "response.output_item.done":
+            guard let index = payload["output_index"] as? Int, let item = payload["item"] as? [String: Any] else {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Malformed finalized output item")
+            }
+            try completedOutput.append(index: index, data: JSONSerialization.data(withJSONObject: item))
         case "response.completed":
             guard let body, body["status"] == nil || body["status"] as? String == "completed" else {
                 throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Invalid completion event")
             }
-            let output = body["output"] as? [[String: Any]] ?? []
-            guard !output.contains(where: { item in
-                (item["content"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "refusal" }
-            }) else { throw PlanUsageError(kind: .refused, requestID: requestID(response)) }
-            let text = output.filter { $0["type"] as? String == "message" }
-                .flatMap { $0["content"] as? [[String: Any]] ?? [] }
-                .filter { $0["type"] as? String == "output_text" }
-                .compactMap { $0["text"] as? String }.joined(separator: "\n")
-            guard text.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse) }
-            let usage = body["usage"] as? [String: Any]
-            return PlanResponseReceipt(responseID: body["id"] as? String, requestID: requestID(response),
-                                       text: text.isEmpty ? nil : text,
-                                       inputTokens: usage?["input_tokens"] as? Int, outputTokens: usage?["output_tokens"] as? Int,
-                                       contentType: response.value(forHTTPHeaderField: "Content-Type"))
+            return try completedReceipt(body, response: response, completedOutput: completedOutput)
         case "response.failed", "error":
-            let nestedError = body?["error"] as? [String: Any] ?? payload["error"] as? [String: Any]
-            throw PlanUsageError(kind: .server, status: response.statusCode,
-                                 code: safeCode(nestedError?["code"] as? String ?? payload["code"] as? String),
-                                 requestID: requestID(response), bodyShape: type)
+            throw serverError(payload: body ?? payload, response: response)
         case "response.incomplete":
             throw PlanUsageError(kind: .incomplete, requestID: requestID(response))
         default: break
         }
         return nil
+    }
+
+    private func completedReceipt(_ body: [String: Any], response: HTTPURLResponse,
+                                  completedOutput: PlanCompletedOutput) throws -> PlanResponseReceipt {
+        let output: [PlanJSONValue]
+        if let raw = body["output"], !(raw is NSNull) {
+            guard let values = raw as? [[String: Any]] else {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Completion output was not an item array")
+            }
+            let data = try JSONSerialization.data(withJSONObject: values)
+            guard data.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse, bodyShape: "Completion output exceeded the size limit") }
+            output = try completedOutput.merging(JSONDecoder().decode([PlanJSONValue].self, from: data))
+        } else { output = try completedOutput.merging([]) }
+        var textParts: [String] = []
+        for item in output {
+            if item["type"]?.string == "function_call", let status = item["status"]?.string, status != "completed" {
+                throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Completed response contained an unfinished function call")
+            }
+            guard item["type"]?.string == "message", case .array(let content)? = item["content"] else { continue }
+            if content.contains(where: { $0["type"]?.string == "refusal" }) { throw PlanUsageError(kind: .refused, requestID: requestID(response)) }
+            textParts += content.filter { $0["type"]?.string == "output_text" }.compactMap { $0["text"]?.string }
+        }
+        let text = textParts.joined(separator: "\n"), usage = body["usage"] as? [String: Any]
+        guard text.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse, bodyShape: "Completion text exceeded the size limit") }
+        return PlanResponseReceipt(responseID: body["id"] as? String, requestID: requestID(response),
+            text: text.isEmpty ? nil : text, inputTokens: usage?["input_tokens"] as? Int,
+            outputTokens: usage?["output_tokens"] as? Int, contentType: response.value(forHTTPHeaderField: "Content-Type"), output: output)
     }
 
     private func request(path: String, accessToken: String) throws -> URLRequest {
@@ -277,11 +332,28 @@ extension ChatGPTPlanRequesting {
 
     private func serverError(data: Data, response: HTTPURLResponse) -> PlanUsageError {
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        let error = body?["error"]
-        let code = (error as? [String: Any])?["code"] as? String ?? error as? String
-        let shape = body?["detail"] != nil ? "detail" : (error is [String: Any] ? "error_object" : (error is String ? "error_string" : "other"))
-        return PlanUsageError(kind: .server, status: response.statusCode, code: safeCode(code),
-                              requestID: requestID(response), bodyShape: shape)
+        return serverError(payload: body ?? [:], response: response)
+    }
+
+    private func hasError(_ payload: [String: Any]) -> Bool {
+        ["error", "detail"].contains { key in
+            guard let value = payload[key] else { return false }
+            return !(value is NSNull)
+        }
+    }
+
+    private func serverError(payload: [String: Any], response: HTTPURLResponse) -> PlanUsageError {
+        func code(in value: [String: Any], depth: Int) -> String? {
+            guard depth < 4 else { return nil }
+            if let code = safeCode(value["code"] as? String) { return code }
+            for key in ["error", "detail", "response"] {
+                if let nested = value[key] as? [String: Any], let found = code(in: nested, depth: depth + 1) { return found }
+                if let found = safeCode(value[key] as? String) { return found }
+            }
+            return nil
+        }
+        return PlanUsageError(kind: .server, status: response.statusCode, code: code(in: payload, depth: 0),
+            requestID: requestID(response), bodyShape: "Server error envelope")
     }
 
     private func requestID(_ response: HTTPURLResponse) -> String? {
@@ -343,6 +415,50 @@ nonisolated private final class PlanRedirectDelegate: NSObject, URLSessionTaskDe
 }
 
 nonisolated struct PlanSSEEvent: Equatable, Sendable { let name: String?; let data: String }
+
+/// Finalized stream items are retained, but are usable only after response.completed is received.
+nonisolated private struct PlanCompletedOutput {
+    private var items: [Int: (value: PlanJSONValue, bytes: Int)] = [:]
+    private var bytes = 0
+
+    mutating func append(index: Int, data: Data) throws {
+        guard (0..<128).contains(index) else {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "Finalized output index was outside the supported range")
+        }
+        let nextBytes = bytes - (items[index]?.bytes ?? 0) + data.count
+        guard nextBytes <= 2_097_152 else {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "Finalized stream output exceeded the size limit")
+        }
+        let value = try JSONDecoder().decode(PlanJSONValue.self, from: data)
+        guard value["type"]?.string != nil else {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "Finalized output item had no type")
+        }
+        if let previous = items[index], previous.value != value {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "A finalized output index was repeated with different content")
+        }
+        items[index] = (value, data.count); bytes = nextBytes
+    }
+
+    func merging(_ finalOutput: [PlanJSONValue]) throws -> [PlanJSONValue] {
+        guard finalOutput.count <= 128 else { throw PlanUsageError(kind: .invalidResponse, bodyShape: "Completion had too many output items") }
+        var merged = Dictionary(uniqueKeysWithValues: finalOutput.enumerated().map { ($0.offset, $0.element) })
+        for (index, item) in items {
+            if let final = merged[index], final["id"] != item.value["id"] || final["type"] != item.value["type"] {
+                throw PlanUsageError(kind: .invalidResponse, bodyShape: "Finalized stream items disagreed with completion item IDs or types")
+            }
+            merged[index] = item.value
+        }
+        let indices = merged.keys.sorted()
+        guard indices == Array(0..<merged.count) else {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "Completion was missing finalized output items")
+        }
+        let output = indices.compactMap { merged[$0] }
+        guard try JSONEncoder().encode(output).count <= 2_097_152 else {
+            throw PlanUsageError(kind: .invalidResponse, bodyShape: "Combined response output exceeded the size limit")
+        }
+        return output
+    }
+}
 
 /// Preserves blank lines and split UTF-8 characters; CR, LF and CRLF all delimit SSE lines.
 nonisolated struct PlanSSEParser {

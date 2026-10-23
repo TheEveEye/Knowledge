@@ -115,7 +115,8 @@ nonisolated enum LibraryMergeEngine {
                 } else {
                     var fields: [String: LibraryValue] = ["name": .text(topic.name), "sortOrder": .number(topic.sortOrder)]
                     if let parent { fields["parentID"] = .reference(parent) }
-                    let record = LibraryRecord(id: topic.id, kind: .topic, fields: fields)
+                    let record = LibraryRecord(id: topic.id, kind: .topic, fields: fields,
+                        protectedFields: topic.isUserEdited ? ["name"] : [])
                     result.records[record.key] = record; topicMap[topic.id] = topic.id
                 }
             }
@@ -126,13 +127,14 @@ nonisolated enum LibraryMergeEngine {
             guard let owner = conceptMap[placement.conceptID] ?? base.record(.concept, placement.conceptID)?.id else { continue }
             let key = LibraryRecord.key(.placement, owner)
             if let existing = base.records[key], existing.bool("isLocked") || existing.reference("topicID") != nil { continue }
-            var fields: [String: LibraryValue] = ["conceptID": .reference(owner), "isLocked": .bool(false)]
+            var fields: [String: LibraryValue] = ["conceptID": .reference(owner), "isLocked": .bool(placement.isLocked)]
             if let topicID = placement.topicID {
                 guard let resolved = topicMap[topicID] else { throw TopicOrganizationError.invalid("A topic assignment is unavailable.") }
                 fields["topicID"] = .reference(resolved)
             }
             if let reason = placement.reason { fields["reason"] = .text(reason) }
-            result.records[key] = .init(id: owner, kind: .placement, fields: fields)
+            result.records[key] = .init(id: owner, kind: .placement, fields: fields,
+                protectedFields: placement.isLocked ? ["topicID", "isLocked"] : [])
         }
         let sourceRecord = LibraryRecord(id: source.id, kind: .source, fields: ["title": .text(source.title),
             "reviewNotes": .strings(draft.existingFactReviews.map(\.reason) + draft.processingNotes)])
