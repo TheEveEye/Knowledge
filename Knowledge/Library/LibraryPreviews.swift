@@ -51,6 +51,7 @@ import SwiftData
 #Preview("Import review") {
     let data = try! LibraryPreviewData()
     NavigationStack { ImportJobView(jobID: data.jobID) }
+        .modifier(ImportChatHost())
         .environment(data.authentication).environment(data.imports).modelContainer(data.container)
 }
 

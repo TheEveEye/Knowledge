@@ -8,6 +8,7 @@ struct ChatOverlay: View {
     @Binding var isExpanded: Bool
     var showsCollapsedButton = true
     var searchText: Binding<String>? = nil
+    var showsHeader = false
     @State private var message = ""
     @FocusState private var isFocused: Bool
     @Namespace private var glassNamespace
@@ -56,6 +57,11 @@ struct ChatOverlay: View {
                     }
                 }
                 .padding(.vertical, 6)
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if isExpanded && showsHeader {
+                ChatToolbar(isExpanded: $isExpanded).transition(.opacity)
             }
         }
         .accessibilityAction(.escape) { closeChat() }
@@ -367,5 +373,36 @@ private struct ChatTypingIndicator: View {
                     .opacity(activeIndex == nil || activeIndex == index ? 1 : 0.3)
             }
         }
+    }
+}
+
+/// Compact chat chrome shared by subject and import conversations.
+private struct ChatToolbar: View {
+    @Binding var isExpanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack {
+            Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
+            Text("New chat")
+                .font(.headline)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .accessibilityAddTraits(.isHeader)
+            Button {
+                withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0)) {
+                    isExpanded = false
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: Circle())
+            .accessibilityLabel("Close chat")
+        }
+        .padding(.horizontal, 16)
     }
 }

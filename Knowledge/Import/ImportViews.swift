@@ -145,6 +145,7 @@ struct NewImportView: View {
                 if previous != nil, current == nil { dismiss() }
             }
         }
+        .modifier(ImportChatHost())
         .interactiveDismissDisabled(isPreparing)
         .onAppear { imports.useDefaultImportModel() }
         .gesture(ImportKeyboardDismissGesture(isEnabled: focusedField != nil) { location in
@@ -289,12 +290,10 @@ struct ImportJobView: View {
     var onClose: (() -> Void)? = nil
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Query private var jobs: [KnowledgeImportJob]
     @State private var showModelPicker = false
     @State private var exitError: String?
-    @State private var isChatExpanded = false
+    @State private var showsChat = true
     init(jobID: UUID, onClose: (() -> Void)? = nil) {
         self.jobID = jobID; self.onClose = onClose
         _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.id == jobID })
@@ -306,7 +305,7 @@ struct ImportJobView: View {
         Group {
             if let job = jobs.first {
                 if job.status == .review {
-                    ImportReviewView(jobID: jobID, onClose: close, isChatExpanded: isChatExpanded)
+                    ImportReviewView(jobID: jobID, onClose: close)
                 } else if job.status == .saved {
                     VStack(spacing: 20) {
                         ContentUnavailableView("Added to your knowledge", systemImage: "checkmark.circle",
@@ -329,25 +328,15 @@ struct ImportJobView: View {
                 }
             } else { ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark") }
         }
-        // Defocus only the underlying review; chat bubbles and controls stay sharp.
-        .blur(radius: isChatExpanded && chatIsAvailable && !reduceTransparency ? 4 : 0)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChatExpanded)
-        .accessibilityHidden(isChatExpanded && chatIsAvailable)
-        .navigationTitle(isChatExpanded && chatIsAvailable ? "Import chat" : "Import")
+        .navigationTitle("Import")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(isChatExpanded && chatIsAvailable)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if chatIsAvailable {
-                // Keep the import's bottom content clear of the floating composer.
-                Color.clear.frame(height: 68)
-            }
+        .safeAreaPadding(.bottom, chatIsAvailable ? 68 : 0)
+        .anchorPreference(key: ImportChatPlacementKey.self, value: .bounds) { bounds in
+            chatIsAvailable && showsChat ? ImportChatPlacement(jobID: jobID, bounds: bounds) : nil
         }
-        .overlay(alignment: .bottom) {
-            if chatIsAvailable {
-                ImportChatComposer(jobID: jobID, isExpanded: $isChatExpanded)
-                    .id(jobID)
-            }
-        }
+        .preference(key: ImportChatJobKey.self, value: chatIsAvailable && showsChat ? jobID : nil)
+        .onAppear { showsChat = true }
+        .onDisappear { showsChat = false }
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: jobs.first?.status) { _, _ in imports.chat(for: jobID).resumeQueued() }
         .onChange(of: imports.merges.states[jobID]?.phase) { _, _ in imports.chat(for: jobID).resumeQueued() }
@@ -355,11 +344,7 @@ struct ImportJobView: View {
             if let job = jobs.first, job.status != .saved, job.status != .review {
                 ToolbarItem(placement: .topBarTrailing) {
                     ImportDraftActionsMenu(onDiscard: discardAndClose)
-                        .opacity(isChatExpanded ? 0 : 1)
-                        .disabled(isChatExpanded)
-                        .accessibilityHidden(isChatExpanded)
                 }
-                .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
                 ToolbarItem(placement: .primaryAction) {
                     Group {
                         if imports.isRunning(jobID) {
@@ -371,11 +356,7 @@ struct ImportJobView: View {
                                 .accessibilityHint("Processes only unfinished batches using the selected model")
                         }
                     }
-                    .opacity(isChatExpanded ? 0 : 1)
-                    .disabled(isChatExpanded)
-                    .accessibilityHidden(isChatExpanded)
                 }
-                .sharedBackgroundVisibility(isChatExpanded ? .hidden : .automatic)
             }
         }
         .task {

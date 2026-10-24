@@ -96,6 +96,7 @@ struct ContentView: View {
                 }
             }
         }
+        .modifier(ImportChatHost())
         .onChange(of: selection) {
             isSubjectChatExpanded = false
             subjectSearch = ""

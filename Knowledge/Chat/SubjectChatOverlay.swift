@@ -5,17 +5,11 @@ struct SubjectChatOverlay: View {
     @Binding var isExpanded: Bool
     @Binding var search: String
     @Environment(ImportCoordinator.self) private var imports
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var evidence: EvidencePresentation?
     @State private var citationError: String?
 
     var body: some View {
-        ChatOverlay(session: imports.subjectChat(for: subjectID), isExpanded: $isExpanded, searchText: $search)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if isExpanded {
-                    chatToolbar.transition(.opacity)
-                }
-            }
+        ChatOverlay(session: imports.subjectChat(for: subjectID), isExpanded: $isExpanded, searchText: $search, showsHeader: true)
             .environment(\.openURL, OpenURLAction { url in
                 if url == ChatGPTAccountLinks.usage { return .systemAction }
                 do {
@@ -30,30 +24,4 @@ struct SubjectChatOverlay: View {
                 Button("OK", role: .cancel) { citationError = nil }
             } message: { Text(citationError ?? "") }
     }
-
-    private var chatToolbar: some View {
-        HStack {
-            Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
-            Text("New chat")
-                .font(.headline)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-                .accessibilityAddTraits(.isHeader)
-            Button {
-                withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0)) {
-                    isExpanded = false
-                }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.semibold))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: Circle())
-            .accessibilityLabel("Close chat")
-        }
-        .padding(.horizontal, 16)
-    }
-
 }
