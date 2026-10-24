@@ -10,7 +10,7 @@ import Foundation
     var stepLimitMessage: String { get }
     var maximumRounds: Int { get }
     func validate() throws
-    func isReady() throws -> Bool
+    func isReady(waitingForReview: Bool) throws -> Bool
     func makeTools() throws -> any ChatTools
     func canUndo(_ id: UUID) -> Bool
     func undo(_ id: UUID) throws
@@ -22,7 +22,7 @@ extension ChatContext {
     var stoppedMessage: String { "Response stopped. Retry to continue." }
     var stepLimitMessage: String { "This question reached its reading limit. Ask a more specific question to continue." }
     var maximumRounds: Int { 48 }
-    func isReady() throws -> Bool { try validate(); return true }
+    func isReady(waitingForReview: Bool) throws -> Bool { try validate(); return true }
     func canUndo(_ id: UUID) -> Bool { false }
     func undo(_ id: UUID) throws { throw ImportError.invalidSelection("This conversation has no changes to undo.") }
 }

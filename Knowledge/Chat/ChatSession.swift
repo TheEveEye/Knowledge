@@ -36,6 +36,7 @@ nonisolated struct ChatMessage: Identifiable {
         let text: String
         let accountID: String
         let model: String
+        var waitingForReview = false
     }
 
     init(context: any ChatContext, imports: ImportCoordinator, authentication: AuthenticationStore, client: any ChatGPTPlanRequesting) {
@@ -56,7 +57,7 @@ nonisolated struct ChatMessage: Identifiable {
         let turn = Turn(id: UUID(), text: text, accountID: account, model: imports.defaultChatModel)
         messages.append(.init(id: UUID(), role: .user, text: text))
         messages.append(.init(id: turn.id, role: .assistant,
-            text: usageBlocked ? Self.usageWaitMessage : (isResponding ? "Queued after the current request." : context.queuedMessage),
+            text: usageBlocked ? Self.usageWaitMessage : "Queued after the current request.",
             requestText: text, accountID: account))
         queue.append(turn)
         resumeQueued()
@@ -75,13 +76,19 @@ nonisolated struct ChatMessage: Identifiable {
         guard task == nil, !queue.isEmpty, imports.isForeground, !usageBlocked else { return }
         do {
             try context.validate()
-            guard try context.isReady() else {
-                for turn in queue { update(turn.id, text: context.queuedMessage) }
-                return
+            // Deferred draft edits must not block new questions while an import runs.
+            var readyIndex: Int?
+            for index in queue.indices {
+                if try context.isReady(waitingForReview: queue[index].waitingForReview) {
+                    readyIndex = index
+                    break
+                }
+                update(queue[index].id, text: context.queuedMessage)
             }
-            let turn = queue[0]
+            guard let readyIndex else { return }
+            let turn = queue[readyIndex]
             try checkAccount(turn)
-            queue.removeFirst()
+            queue.remove(at: readyIndex)
             let run = UUID(); generation = run; active = turn; isResponding = true; activity = "Thinking…"
             update(turn.id, text: "")
             task = Task { [weak self] in
@@ -215,7 +222,9 @@ nonisolated struct ChatMessage: Identifiable {
                     }
                     input.append(.toolOutput(callID: call.callID, output: result.output))
                     if result.waitingForReview {
-                        queue.insert(turn, at: 0)
+                        var deferred = turn
+                        deferred.waitingForReview = true
+                        queue.insert(deferred, at: 0)
                         update(turn.id, text: context.queuedMessage)
                         return
                     }
