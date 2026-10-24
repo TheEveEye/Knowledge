@@ -7,7 +7,6 @@ struct ImportModelPicker: View {
     @Environment(ImportCoordinator.self) private var imports
     @Environment(AuthenticationStore.self) private var authentication
     @State private var showAccount = false
-    private var sessionID: String { (authentication.activeAccount?.id ?? "") + ":" + String(authentication.activeAccount?.credentials?.planEnabled == true) }
     var body: some View {
         Section {
             if imports.isLoadingModels {
@@ -30,7 +29,6 @@ struct ImportModelPicker: View {
             }
         } header: { Text("ChatGPT model") }
         footer: { Text("Processing uses your connected ChatGPT plan and counts toward its limits.") }
-        .task(id: sessionID) { if imports.models.isEmpty { await imports.loadModels() } }
         .sheet(isPresented: $showAccount) { ChatGPTAccountView() }
     }
 }
@@ -358,9 +356,6 @@ struct ImportJobView: View {
                     }
                 }
             }
-        }
-        .task {
-            if imports.models.isEmpty { await imports.loadModels() }
         }
         .sheet(isPresented: $showModelPicker) {
             NavigationStack {

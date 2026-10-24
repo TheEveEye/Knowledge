@@ -37,7 +37,6 @@ struct KnowledgeApp: App {
             AuthenticationRootView()
                 .environment(authentication)
                 .environment(imports)
-                .onChange(of: authentication.activeAccount?.id) { _, _ in imports.accountChanged() }
                 .onChange(of: authentication.isBusy) { _, busy in
                     if busy {
                         imports.interruptChats(message: "Your ChatGPT connection is changing. Send your request again when it finishes.")

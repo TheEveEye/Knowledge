@@ -6,6 +6,11 @@ struct AuthenticationRootView: View {
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.scenePhase) private var scenePhase
 
+    private var modelCatalogSessionID: String? {
+        guard !authentication.isBusy, let account = authentication.activeAccount else { return nil }
+        return account.id + ":" + String(account.credentials?.planEnabled == true)
+    }
+
     var body: some View {
         Group {
             switch authentication.state {
@@ -40,6 +45,13 @@ struct AuthenticationRootView: View {
         }
         .task {
             await authentication.restore()
+        }
+        .task(id: modelCatalogSessionID) {
+            guard !authentication.isBusy else { return }
+            // Invalidate the previous session before starting its replacement fetch.
+            imports.accountChanged()
+            guard authentication.activeAccount != nil else { return }
+            await imports.loadModels()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { imports.sceneDidBecomeActive() }
@@ -324,10 +336,6 @@ private struct ChatGPTDefaultModelsSection: View {
     @Environment(AuthenticationStore.self) private var authentication
     @Environment(ImportCoordinator.self) private var imports
 
-    private var sessionID: String {
-        (authentication.activeAccount?.id ?? "") + ":" + String(authentication.activeAccount?.credentials?.planEnabled == true)
-    }
-
     var body: some View {
         Section {
             if imports.isLoadingModels {
@@ -361,9 +369,6 @@ private struct ChatGPTDefaultModelsSection: View {
             Text("Saved separately for each account. These defaults apply to new imports and chat requests. You can choose a different model for an individual import.")
         }
         .disabled(authentication.isBusy)
-        .task(id: sessionID) {
-            if imports.models.isEmpty, !imports.isLoadingModels { await imports.loadModels() }
-        }
     }
 }
 
