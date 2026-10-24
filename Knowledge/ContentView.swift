@@ -8,6 +8,10 @@ struct ContentView: View {
     @Query(sort: \KnowledgeImportJob.updatedAt, order: .reverse) private var jobs: [KnowledgeImportJob]
     @State private var sheet: RootSheet?
     @State private var selection: LibrarySelection?
+    @State private var subjectSearch = ""
+    @State private var isSubjectChatExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private enum LibrarySelection: Hashable {
         case subject(UUID)
@@ -53,21 +57,48 @@ struct ContentView: View {
                 ToolbarItem(placement: .primaryAction) { Button("New subject", systemImage: "plus") { sheet = .subject } }
             }
         } detail: {
-            NavigationStack {
+            Group {
                 switch selection {
                 case .subject(let id):
                     if let subject = subjects.first(where: { $0.id == id }) {
-                        SubjectLibraryView(subject: subject)
+                        SubjectDetailView(subject: subject, search: $subjectSearch)
                     }
                 case .importJob(let id):
-                    ImportJobView(jobID: id)
+                    NavigationStack { ImportJobView(jobID: id) }
                 case nil:
-                    ContentUnavailableView("Choose a subject", systemImage: "books.vertical",
-                        description: Text("Your concepts, facts, and connections stay organized by subject."))
+                    NavigationStack {
+                        ContentUnavailableView("Choose a subject", systemImage: "books.vertical",
+                            description: Text("Your concepts, facts, and connections stay organized by subject."))
+                    }
                 }
             }
             // A different sidebar selection starts a new detail history.
             .id(selection)
+        }
+        // Chat must sit above the split view itself: on iPhone the split view
+        // owns the outer navigation bar, even when detail contains its own stack.
+        .blur(radius: isSubjectChatExpanded && !reduceTransparency ? 4 : 0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isSubjectChatExpanded)
+        .allowsHitTesting(!isSubjectChatExpanded)
+        .accessibilityHidden(isSubjectChatExpanded)
+        .overlayPreferenceValue(SubjectChatBoundsKey.self) { anchor in
+            if let anchor, case .subject(let id) = selection,
+               let subject = subjects.first(where: { $0.id == id }) {
+                GeometryReader { geometry in
+                    let column = geometry[anchor]
+                    SubjectChatOverlay(subjectID: subject.id,
+                                       isExpanded: $isSubjectChatExpanded, search: $subjectSearch)
+                        .id(subject.id)
+                        // Keep the detail column's width, but start at the app's
+                        // top safe area rather than below the large navigation title.
+                        .frame(width: column.width, height: geometry.size.height)
+                        .position(x: column.midX, y: geometry.size.height / 2)
+                }
+            }
+        }
+        .onChange(of: selection) {
+            isSubjectChatExpanded = false
+            subjectSearch = ""
         }
         .sheet(item: $sheet) { sheet in
             switch sheet {

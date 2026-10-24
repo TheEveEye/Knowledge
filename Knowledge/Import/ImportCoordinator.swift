@@ -20,7 +20,8 @@ import UIKit
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private var catalogRunID = UUID()
     @ObservationIgnored private var draftEditors: [UUID: ImportDraftEditingSession] = [:]
-    @ObservationIgnored private var chats: [UUID: ImportChatSession] = [:]
+    @ObservationIgnored private var chats: [UUID: ChatSession] = [:]
+    @ObservationIgnored private var subjectChats: [UUID: ChatSession] = [:]
     private(set) var isForeground = true
 
     init(authentication: AuthenticationStore, container: ModelContainer,
@@ -98,15 +99,23 @@ import UIKit
         return editor
     }
 
-    func chat(for jobID: UUID) -> ImportChatSession {
+    func chat(for jobID: UUID) -> ChatSession {
         if let chat = chats[jobID] { return chat }
-        let chat = ImportChatSession(jobID: jobID, imports: self, authentication: authentication, client: client)
+        let chat = ChatSession(context: ImportChatContext(jobID: jobID, imports: self), imports: self, authentication: authentication, client: client)
         chats[jobID] = chat
         return chat
     }
 
+    func subjectChat(for subjectID: UUID) -> ChatSession {
+        if let chat = subjectChats[subjectID] { return chat }
+        let chat = ChatSession(context: SubjectChatContext(subjectID: subjectID, repository: repository),
+            imports: self, authentication: authentication, client: client)
+        subjectChats[subjectID] = chat
+        return chat
+    }
+
     func interruptChats(message: String) {
-        for chat in chats.values { chat.interrupt(message: message) }
+        for chat in Array(chats.values) + Array(subjectChats.values) { chat.interrupt(message: message) }
     }
 
     func prepare(subjectID: UUID, title: String, text: String) async throws -> UUID {
@@ -212,6 +221,8 @@ import UIKit
         let jobIDs = jobs.map(\.id)
         for id in jobIDs { pause(jobID: id) }
         let cleanupMessage = try repository.deleteSubject(subjectID)
+        subjectChats[subjectID]?.interrupt(message: "This subject was deleted.")
+        subjectChats[subjectID] = nil
         for id in jobIDs {
             chats[id]?.interrupt(message: "This subject was deleted.")
             chats[id] = nil; draftEditors[id] = nil; runners[id] = nil
@@ -229,14 +240,14 @@ import UIKit
 
     func sceneDidEnterBackground() {
         isForeground = false
-        for chat in chats.values { chat.suspend() }
+        for chat in Array(chats.values) + Array(subjectChats.values) { chat.suspend() }
         merges.interrupt()
         for runner in Array(runners.values) { runner.sceneDidEnterBackground() }
     }
 
     func sceneDidBecomeActive() {
         isForeground = true
-        for chat in chats.values { chat.resumeQueued() }
+        for chat in Array(chats.values) + Array(subjectChats.values) { chat.resumeQueued() }
     }
 
     func save(_ draft: ImportDraft, jobID: UUID) {

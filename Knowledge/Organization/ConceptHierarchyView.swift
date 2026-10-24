@@ -92,11 +92,13 @@ struct ConceptHierarchySection: View {
 
 struct SubjectOptionsMenu: View {
     let subjectID: UUID
+    let onShowSettings: () -> Void
     @Query private var topics: [KnowledgeTopic]
     @AppStorage private var expandedTopicIDs: String
     @State private var showHistory = false
-    init(subjectID: UUID) {
+    init(subjectID: UUID, onShowSettings: @escaping () -> Void) {
         self.subjectID = subjectID
+        self.onShowSettings = onShowSettings
         _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == subjectID && !$0.isRetired })
         _expandedTopicIDs = AppStorage(wrappedValue: "", "knowledge.expandedTopics." + subjectID.uuidString)
     }
@@ -108,6 +110,7 @@ struct SubjectOptionsMenu: View {
             Button("Collapse all", systemImage: "rectangle.compress.vertical") { expandedTopicIDs = "" }.disabled(topics.isEmpty)
             Divider()
             Button("History", systemImage: "clock.arrow.circlepath") { showHistory = true }
+            Button("Subject settings", systemImage: "gearshape", action: onShowSettings)
         }
         .sheet(isPresented: $showHistory) { NavigationStack { LibraryHistoryView(subjectID: subjectID) } }
     }

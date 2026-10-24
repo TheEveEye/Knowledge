@@ -342,16 +342,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/colinc86/MathJaxSwift";
-			requirement = { kind = upToNextMajorVersion; minimumVersion = 3.5.0; };
-		};
-		A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/swhitty/SwiftDraw";
-			requirement = { kind = upToNextMajorVersion; minimumVersion = 0.29.0; };
-		};
 		A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/vapor/jwt-kit.git";
@@ -360,9 +350,30 @@
 				minimumVersion = 5.0.0;
 			};
 		};
+		A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/colinc86/MathJaxSwift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.5.0;
+			};
+		};
+		A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swhitty/SwiftDraw";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.29.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A11000000000000000000002 /* JWTKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */;
+			productName = JWTKit;
+		};
 		A12000000000000000000004 /* MathJaxSwift */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */;
@@ -372,11 +383,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */;
 			productName = SwiftDraw;
-		};
-		A11000000000000000000002 /* JWTKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */;
-			productName = JWTKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

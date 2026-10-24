@@ -8,6 +8,32 @@ nonisolated enum LibraryDestination: Hashable {
     case importJob(UUID)
 }
 
+/// Reports the detail column to the app-level overlay, above split-view chrome.
+struct SubjectChatBoundsKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+struct SubjectDetailView: View {
+    let subject: KnowledgeSubject
+    @Binding var search: String
+    @State private var showsSubjectRoot = true
+
+    var body: some View {
+        NavigationStack {
+            SubjectLibraryView(subject: subject, search: $search)
+                .onAppear { showsSubjectRoot = true }
+                .onDisappear { showsSubjectRoot = false }
+        }
+        .anchorPreference(key: SubjectChatBoundsKey.self, value: .bounds) {
+            showsSubjectRoot ? $0 : nil
+        }
+    }
+}
+
 struct SubjectLibraryView: View {
     let subject: KnowledgeSubject
     @Environment(ImportCoordinator.self) private var imports
@@ -16,16 +42,17 @@ struct SubjectLibraryView: View {
     @Query private var jobs: [KnowledgeImportJob]
     @State private var showImport = false
     @State private var showSettings = false
-    @State private var search = ""
+    @Binding private var search: String
     @State private var topicActions = TopicLibraryActions()
-    init(subject: KnowledgeSubject) {
+    init(subject: KnowledgeSubject, search: Binding<String>) {
         self.subject = subject
+        _search = search
         let id = subject.id
         _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == id && !$0.isRetired }, sort: \KnowledgeConcept.name)
         _sources = Query(filter: #Predicate<KnowledgeSource> { $0.subjectID == id && !$0.isArchived }, sort: \KnowledgeSource.importedAt, order: .reverse)
         _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.subjectID == id }, sort: \KnowledgeImportJob.updatedAt, order: .reverse)
     }
-    var body: some View {
+    private var libraryContent: some View {
         List {
             let drafts = jobs.filter { $0.status != .saved }
             if !drafts.isEmpty {
@@ -52,19 +79,21 @@ struct SubjectLibraryView: View {
                 }
             }
         }
+        .contentMargins(.bottom, 68, for: .scrollContent)
+        .scrollDismissesKeyboard(.interactively)
+        // Keep notes behind the keyboard while the sibling composer follows it.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+
+    var body: some View {
+        libraryContent
         .navigationTitle(subject.name)
-        .searchable(text: $search, prompt: "Find a concept or alias")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                SubjectOptionsMenu(subjectID: subject.id)
+                SubjectOptionsMenu(subjectID: subject.id, onShowSettings: { showSettings = true })
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Subject settings", systemImage: "gearshape") { showSettings = true }
-                    .labelStyle(.iconOnly)
-            }
-            DefaultToolbarItem(kind: .search, placement: .bottomBar)
-            ToolbarSpacer(.fixed, placement: .bottomBar)
-            ToolbarItem(placement: .bottomBar) {
                 Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
                     .labelStyle(.iconOnly)
             }

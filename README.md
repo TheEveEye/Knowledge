@@ -4,6 +4,14 @@ An iOS 27 SwiftUI app that turns study notes into source-grounded concepts, indi
 
 This app is unreleased and supports only its current data schema and import checkpoint format. There are no upgrade paths for previous development builds; recreate local development data when the format changes.
 
+## Subject chat
+
+The subject screen keeps search at the bottom left and **Ask about this subject** at the bottom right. **Import notes** is in the top toolbar; **Subject settings** is in the subject menu alongside History and the outline controls. The empty subject still offers a prominent Import notes action.
+
+Subject chat uses the account's default chat model. Its read-only tools browse and search all saved active concepts, facts, connections, topics, contributions, original wordings, review notes, and full original source passages within that subject. Material is retrieved in pages as needed, rather than sending the entire library with every message. Each turn starts from a fresh subject snapshot; unsaved drafts and archived sources are outside this scope. Replies distinguish source evidence from explanation and can cite passages with internal links that open supporting text. Citation links are resolved against the current subject and active source before display. Subject chat cannot edit the library or save learning artifacts yet.
+
+Import review and subject chat share the `ChatOverlay` composer/conversation UI, Markdown and math rendering, and `ChatSession` streaming, queue, retry, stop, and usage-limit handling. `ChatContext` and `ChatTools` supply each screen's instructions, presentation, lifecycle checks, and capabilities; only the import context exposes reversible draft edits. Conversations stay available when the overlay is closed or the subject screen is reopened during the current app session. They are not restored after app termination. Backgrounding pauses active requests for explicit retry, foregrounding resumes queued work, and account changes or subject deletion interrupt affected requests.
+
 ## Importing knowledge
 
 Import chat uses the account’s default chat model and a small set of app-executed function tools to inspect import state, search draft entries, read original passages, and apply reversible draft changes. Chat can include or exclude entries, rename draft concepts and new topics, and move new unmerged concepts between existing topics or Unsorted. Inclusion uses the same dependency rules as the review controls; entries with new flagged dependencies require manual review. Chat cannot rewrite facts or evidence, clear review flags, save the import, delete data, or edit the saved library.

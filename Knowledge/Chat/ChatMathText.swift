@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 /// Keeps Markdown in native selectable text, including literal math inside code.
-struct ImportChatMathText: View {
+struct ChatMathText: View {
     let source: String
     @Environment(\.displayScale) private var displayScale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -14,11 +14,12 @@ struct ImportChatMathText: View {
 
     var body: some View {
         let document = MathDocument(source)
+        let citations = citationNumbers(in: document)
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .text(let markdown):
-                    inlineText(markdown, equations: document.equations)
+                    inlineText(markdown, equations: document.equations, citations: citations)
                 case .display(let equation):
                     displayEquation(equation)
                 }
@@ -69,30 +70,71 @@ struct ImportChatMathText: View {
         }
     }
 
-    private func inlineText(_ markdown: String, equations: [String: String]) -> Text {
-        var attributed = (try? AttributedString(
+    private func markdownText(_ markdown: String) -> AttributedString {
+        (try? AttributedString(
             markdown: markdown,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(markdown)
-        var result = Text("")
-        // Each marker appears once, and Markdown is parsed before substitution
-        // so emphasis and links can span an inline equation.
-        while let next = equations.compactMap({ marker, equation in
-            attributed.range(of: marker).map { (range: $0, equation: equation) }
-        }).min(by: { $0.range.lowerBound < $1.range.lowerBound }) {
-            let prefix = Text(AttributedString(attributed[attributed.startIndex..<next.range.lowerBound]))
-            result = Text("\(result)\(prefix)")
-            if let rendered = images[next.equation] {
-                let formula = Text(Image(uiImage: rendered.image).renderingMode(.template))
-                    .baselineOffset(rendered.baseline)
-                    .accessibilityLabel(next.equation)
-                result = Text("\(result)\(formula)")
-            } else {
-                result = Text("\(result)\(next.equation)")
+    }
+
+    private func citationNumbers(in document: MathDocument) -> [URL: Int] {
+        var numbers: [URL: Int] = [:]
+        for block in document.blocks {
+            guard case .text(let markdown) = block else { continue }
+            for run in markdownText(markdown).runs[\.link] {
+                guard let url = run.0, isSourceCitation(url), numbers[url] == nil else { continue }
+                numbers[url] = numbers.count + 1
             }
-            attributed = AttributedString(attributed[next.range.upperBound...])
         }
-        return Text("\(result)\(Text(attributed))")
+        return numbers
+    }
+
+    private func isSourceCitation(_ url: URL) -> Bool {
+        url.scheme == "knowledge" && url.host == "source"
+    }
+
+    private func inlineText(_ markdown: String, equations: [String: String], citations: [URL: Int]) -> Text {
+        var attributed = markdownText(markdown)
+        var result = Text("")
+        // Parse Markdown before substitution so emphasis and links can span
+        // equations. Source citations keep their exact URL and native link behavior.
+        while !attributed.characters.isEmpty {
+            let equation = equations.compactMap { marker, equation in
+                attributed.range(of: marker).map { (range: $0, equation: equation) }
+            }.min(by: { $0.range.lowerBound < $1.range.lowerBound })
+            let citation = attributed.runs[\.link].first { run in
+                run.0.map { citations[$0] != nil } ?? false
+            }
+
+            if let citation, let url = citation.0, let number = citations[url],
+               equation.map({ citation.1.lowerBound <= $0.range.lowerBound }) ?? true {
+                let prefix = Text(AttributedString(attributed[attributed.startIndex..<citation.1.lowerBound]))
+                var label = AttributedString("[\(number)]")
+                label.link = url
+                let reference = Text(label)
+                    .font(.caption.weight(.semibold))
+                    .baselineOffset(4)
+                    .accessibilityLabel("Source \(number)")
+                result = Text("\(result)\(prefix)\(reference)")
+                attributed = AttributedString(attributed[citation.1.upperBound...])
+            } else if let equation {
+                let prefix = Text(AttributedString(attributed[attributed.startIndex..<equation.range.lowerBound]))
+                result = Text("\(result)\(prefix)")
+                if let rendered = images[equation.equation] {
+                    let formula = Text(Image(uiImage: rendered.image).renderingMode(.template))
+                        .baselineOffset(rendered.baseline)
+                        .accessibilityLabel(equation.equation)
+                    result = Text("\(result)\(formula)")
+                } else {
+                    result = Text("\(result)\(equation.equation)")
+                }
+                attributed = AttributedString(attributed[equation.range.upperBound...])
+            } else {
+                result = Text("\(result)\(Text(attributed))")
+                break
+            }
+        }
+        return result
     }
 
     private struct RenderKey: Hashable {
