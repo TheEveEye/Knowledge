@@ -8,11 +8,149 @@ nonisolated enum LibraryDestination: Hashable {
     case importJob(UUID)
 }
 
-/// Reports the detail column to the app-level overlay, above split-view chrome.
-struct SubjectChatBoundsKey: PreferenceKey {
-    static var defaultValue: Anchor<CGRect>? { nil }
+nonisolated enum LearningMethod: String, CaseIterable, Hashable {
+    case recall = "Recall"
+    case method2 = "Learning method 2"
+    case method3 = "Learning method 3"
+    case method4 = "Learning method 4"
 
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+    var symbol: String {
+        switch self {
+        case .recall: "brain.head.profile"
+        case .method2: "book.fill"
+        case .method3: "point.3.connected.trianglepath.dotted"
+        case .method4: "lightbulb.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .recall: .orange
+        case .method2: .blue
+        case .method3: .purple
+        case .method4: .teal
+        }
+    }
+}
+
+private enum TopicPracticeLayout {
+    static let cornerRadius: CGFloat = 48
+    static let inset: CGFloat = 16
+}
+
+private struct LearningMethodGrid: View {
+    var sheetCornerRadius: CGFloat? = nil
+    let onSelect: (LearningMethod) -> Void
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    private func cardShape(for method: LearningMethod) -> ConcentricRectangle {
+        let regularCorner: Edge.Corner.Style = .concentric(minimum: .fixed(24))
+        guard let sheetCornerRadius else {
+            return ConcentricRectangle(corners: regularCorner)
+        }
+        let outerCorner: Edge.Corner.Style = .fixed(max(0, sheetCornerRadius - TopicPracticeLayout.inset))
+        return ConcentricRectangle(
+            topLeadingCorner: regularCorner,
+            topTrailingCorner: regularCorner,
+            bottomLeadingCorner: method == .method3 ? outerCorner : regularCorner,
+            bottomTrailingCorner: method == .method4 ? outerCorner : regularCorner)
+    }
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(LearningMethod.allCases, id: \.self) { method in
+                let cardShape = cardShape(for: method)
+                Button {
+                    onSelect(method)
+                } label: {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Image(systemName: method.symbol)
+                            .font(.system(size: 30, weight: .semibold))
+                            .foregroundStyle(method.color)
+                            .frame(height: 36)
+                            .accessibilityHidden(true)
+                        Text(method.rawValue)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+                    .padding(16)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground),
+                                in: cardShape)
+                    .contentShape(cardShape)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+    }
+}
+
+private struct TopicPracticePicker: View {
+    let topic: TopicRecord
+    let onSelect: (LearningMethod) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @ScaledMetric(relativeTo: .headline) private var compactHeight: CGFloat = 336
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LearningMethodGrid(sheetCornerRadius: TopicPracticeLayout.cornerRadius, onSelect: onSelect)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            }
+            .contentMargins(.vertical, 16, for: .scrollContent)
+            .contentMargins(.horizontal, TopicPracticeLayout.inset, for: .scrollContent)
+            .navigationTitle("Practice \(topic.name)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.height(compactHeight), .large])
+        .presentationCornerRadius(TopicPracticeLayout.cornerRadius)
+        .presentationDragIndicator(.visible)
+        .presentationSizing(.form)
+    }
+}
+
+nonisolated struct PracticeDestination: Hashable {
+    let method: LearningMethod
+    let subjectID: UUID
+    /// A topic scope includes its descendants; nil selects the whole subject.
+    let topicID: UUID?
+}
+
+private struct LearningMethodView: View {
+    let destination: PracticeDestination
+
+    var body: some View {
+        Color(uiColor: .systemGroupedBackground)
+            .ignoresSafeArea()
+            .navigationTitle(destination.method.rawValue)
+            .navigationBarTitleDisplayMode(.large)
+    }
+}
+
+/// Reports the detail column to the app-level overlay, above split-view chrome.
+struct SubjectChatPlacement {
+    let bounds: Anchor<CGRect>
+    let isSubjectRoot: Bool
+}
+
+struct SubjectChatBoundsKey: PreferenceKey {
+    static var defaultValue: SubjectChatPlacement? { nil }
+
+    static func reduce(value: inout SubjectChatPlacement?, nextValue: () -> SubjectChatPlacement?) {
         value = nextValue() ?? value
     }
 }
@@ -20,22 +158,22 @@ struct SubjectChatBoundsKey: PreferenceKey {
 struct SubjectDetailView: View {
     let subject: KnowledgeSubject
     @Binding var search: String
-    @State private var showsSubjectRoot = true
+    @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack {
-            SubjectLibraryView(subject: subject, search: $search)
-                .onAppear { showsSubjectRoot = true }
-                .onDisappear { showsSubjectRoot = false }
+        NavigationStack(path: $path) {
+            SubjectLibraryView(subject: subject, search: $search, onStartPractice: { path.append($0) })
         }
         .anchorPreference(key: SubjectChatBoundsKey.self, value: .bounds) {
-            showsSubjectRoot ? $0 : nil
+            // Keep the stack's stationary frame available while the controls fade during navigation.
+            SubjectChatPlacement(bounds: $0, isSubjectRoot: path.isEmpty)
         }
     }
 }
 
 struct SubjectLibraryView: View {
     let subject: KnowledgeSubject
+    let onStartPractice: (PracticeDestination) -> Void
     @Environment(ImportCoordinator.self) private var imports
     @Query private var concepts: [KnowledgeConcept]
     @Query private var sources: [KnowledgeSource]
@@ -44,8 +182,10 @@ struct SubjectLibraryView: View {
     @State private var showSettings = false
     @Binding private var search: String
     @State private var topicActions = TopicLibraryActions()
-    init(subject: KnowledgeSubject, search: Binding<String>) {
+    @State private var pendingPractice: PracticeDestination?
+    init(subject: KnowledgeSubject, search: Binding<String>, onStartPractice: @escaping (PracticeDestination) -> Void) {
         self.subject = subject
+        self.onStartPractice = onStartPractice
         _search = search
         let id = subject.id
         _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == id && !$0.isRetired }, sort: \KnowledgeConcept.name)
@@ -54,6 +194,11 @@ struct SubjectLibraryView: View {
     }
     private var libraryContent: some View {
         List {
+            Section("Practice") {
+                LearningMethodGrid { method in
+                    onStartPractice(PracticeDestination(method: method, subjectID: subject.id, topicID: nil))
+                }
+            }
             let drafts = jobs.filter { $0.status != .saved }
             if !drafts.isEmpty {
                 Section("Draft imports") {
@@ -99,6 +244,17 @@ struct SubjectLibraryView: View {
             }
         }
         .sheet(item: $topicActions.movingConcept) { MoveConceptTopicView(concept: $0) }
+        .sheet(item: $topicActions.practicingTopic, onDismiss: {
+            if let pendingPractice {
+                onStartPractice(pendingPractice)
+                self.pendingPractice = nil
+            }
+        }) { topic in
+            TopicPracticePicker(topic: topic) { method in
+                pendingPractice = PracticeDestination(method: method, subjectID: subject.id, topicID: topic.id)
+                topicActions.practicingTopic = nil
+            }
+        }
         .alert("Rename topic", isPresented: Binding(get: { topicActions.renamingTopic != nil },
             set: { if !$0 { topicActions.renamingTopic = nil } })) {
             TextField("Topic name", text: $topicActions.topicName)
@@ -132,6 +288,9 @@ struct SubjectLibraryView: View {
             case .importJob(let id):
                 ImportJobView(jobID: id)
             }
+        }
+        .navigationDestination(for: PracticeDestination.self) { destination in
+            LearningMethodView(destination: destination)
         }
     }
 }

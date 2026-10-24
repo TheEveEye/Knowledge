@@ -5,6 +5,7 @@ import Observation
 @MainActor @Observable final class TopicLibraryActions {
     var movingConcept: KnowledgeConcept?
     var renamingTopic: TopicRecord?
+    var practicingTopic: TopicRecord?
     var topicName = ""
     var error: String?
 
@@ -51,7 +52,8 @@ struct ConceptHierarchySection: View {
                         ForEach(index.roots) { node in
                             TopicBranchView(node: node, concepts: concepts, placements: index.placements,
                                 expandedIDs: expandedBinding, onMove: { actions.movingConcept = $0 },
-                                onLock: setLocked, onRename: actions.beginRename)
+                                onLock: setLocked, onRename: actions.beginRename,
+                                onPractice: { actions.practicingTopic = $0 })
                         }
                     }
                 }
@@ -124,6 +126,7 @@ private struct TopicBranchView: View {
     let onMove: (KnowledgeConcept) -> Void
     let onLock: (UUID, Bool) -> Void
     let onRename: (TopicRecord) -> Void
+    let onPractice: (TopicRecord) -> Void
 
     var body: some View {
         DisclosureGroup(isExpanded: Binding(get: { expandedIDs.contains(node.id) }, set: {
@@ -131,7 +134,8 @@ private struct TopicBranchView: View {
         })) {
             ForEach(node.children) { child in
                 TopicBranchView(node: child, concepts: concepts, placements: placements,
-                    expandedIDs: $expandedIDs, onMove: onMove, onLock: onLock, onRename: onRename)
+                    expandedIDs: $expandedIDs, onMove: onMove, onLock: onLock, onRename: onRename,
+                    onPractice: onPractice)
             }
             ForEach(concepts.filter { node.conceptIDs.contains($0.id) }) { concept in
                 HierarchyConceptRow(concept: concept, placement: placements[concept.id],
@@ -144,9 +148,16 @@ private struct TopicBranchView: View {
                 Spacer()
                 Text(node.conceptCount.formatted()).foregroundStyle(.secondary).monospacedDigit()
             }
-            .contextMenu { Button("Rename topic", systemImage: "pencil") { onRename(node.topic) } }
+            .contextMenu {
+                Button("Practice", systemImage: "brain.head.profile") { onPractice(node.topic) }
+                Button("Rename topic", systemImage: "pencil") { onRename(node.topic) }
+            }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(node.topic.name), \(node.conceptCount) concepts")
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("Practice", systemImage: "brain.head.profile") { onPractice(node.topic) }
+                .tint(.orange)
         }
     }
 }

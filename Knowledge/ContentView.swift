@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var isSubjectChatExpanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.layoutDirection) private var layoutDirection
 
     private enum LibrarySelection: Hashable {
         case subject(UUID)
@@ -81,19 +83,42 @@ struct ContentView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isSubjectChatExpanded)
         .allowsHitTesting(!isSubjectChatExpanded)
         .accessibilityHidden(isSubjectChatExpanded)
-        .overlayPreferenceValue(SubjectChatBoundsKey.self) { anchor in
-            if let anchor, case .subject(let id) = selection,
+        .overlayPreferenceValue(SubjectChatBoundsKey.self) { placement in
+            if let placement, case .subject(let id) = selection,
                let subject = subjects.first(where: { $0.id == id }) {
                 GeometryReader { geometry in
-                    let column = geometry[anchor]
+                    let column = geometry[placement.bounds]
+                    // Navigation translates the detail anchor during a push. Use only its
+                    // width; keep the controls attached to the stationary host's edge.
+                    let overlayWidth = horizontalSizeClass == .compact ? geometry.size.width : column.width
+                    let overlayMidX = layoutDirection == .rightToLeft
+                        ? overlayWidth / 2
+                        : geometry.size.width - overlayWidth / 2
+                    // The split view keeps its selection until an outer pop finishes.
+                    // Follow that interactive transition using the existing anchor,
+                    // without moving the overlay or waiting for a lifecycle callback.
+                    let departure = layoutDirection == .rightToLeft
+                        ? geometry.size.width - column.maxX
+                        : column.minX
+                    let departureProgress = horizontalSizeClass == .compact
+                        ? min(1, max(0, departure) / max(1, column.width * 0.25))
+                        : 0
+                    let visibility = placement.isSubjectRoot ? 1 - departureProgress : 0
                     SubjectChatOverlay(subjectID: subject.id,
                                        isExpanded: $isSubjectChatExpanded, search: $subjectSearch)
                         .id(subject.id)
+                        .opacity(visibility)
+                        .blur(radius: reduceMotion ? 0 : 6 * (1 - visibility))
+                        .scaleEffect(reduceMotion ? 1 : 0.96 + 0.04 * visibility, anchor: .bottom)
+                        .allowsHitTesting(placement.isSubjectRoot && departureProgress == 0)
+                        .accessibilityHidden(!placement.isSubjectRoot || departureProgress > 0)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: placement.isSubjectRoot)
                         // Keep the detail column's width, but start at the app's
                         // top safe area rather than below the large navigation title.
-                        .frame(width: column.width, height: geometry.size.height)
-                        .position(x: column.midX, y: geometry.size.height / 2)
+                        .frame(width: overlayWidth, height: geometry.size.height)
+                        .position(x: overlayMidX, y: geometry.size.height / 2)
                 }
+                .transition(.identity)
             }
         }
         .modifier(ImportChatHost())
