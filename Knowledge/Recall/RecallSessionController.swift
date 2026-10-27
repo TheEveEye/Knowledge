@@ -101,7 +101,11 @@ import FSRS
     }
 
     func dontKnow() {
-        guard state.episode?.phase == "answer", state.episode?.turns.isEmpty == true else { return }
+        guard !isRequesting, let episode = state.episode, episode.phase == "answer" else { return }
+        if !episode.turns.isEmpty {
+            finishFollowUps()
+            return
+        }
         if change({ $0.episode?.draft = "I don't know." }) { submit(knownUnknown: true) }
     }
 
@@ -208,6 +212,38 @@ import FSRS
         generation = UUID(); task?.cancel(); task = nil; isRequesting = false; error = message
     }
 
+    var canEditPendingAnswer: Bool {
+        guard let episode = state.episode else { return false }
+        return episode.phase == "awaiting" && episode.pendingOperation == "assess"
+            && episode.turns.last.map { $0.assessment == nil } == true
+    }
+
+    @discardableResult func stopGradingAndEditAnswer() -> Bool {
+        guard canEditPendingAnswer, let episode = state.episode, let turn = episode.turns.last else { return false }
+        // Cancellation is cooperative. Invalidate the run before restoring the editor,
+        // so even a completed network response cannot apply to the changed answer.
+        generation = UUID(); task?.cancel(); task = nil; isRequesting = false
+        let restored = change { updated in
+            guard var current = updated.episode, current.turns.last?.id == turn.id else {
+                throw RecallError.invalid("This answer is no longer waiting for grading.")
+            }
+            current.turns.removeLast()
+            current.draft = turn.answer
+            current.response = turn.response
+            current.phase = "answer"
+            updated.episode = current
+            // Preserve the original submission in the event log, but exclude it
+            // from the active conversation used for the next assessment.
+            _ = try repository.append(sessionID: sessionID, episode: current,
+                kind: "answerWithdrawn", data: RecallCoding.encode(turn.id))
+        }
+        if restored {
+            error = nil; usageLimited = false
+            recordDiagnostic("answer_returned_for_editing", ["turn_id": turn.id.uuidString])
+        }
+        return restored
+    }
+
     func learningProgressDidReset() {
         generation = UUID(); task?.cancel(); task = nil
         isRequesting = false; usageLimited = false; error = nil
@@ -231,6 +267,19 @@ import FSRS
     func explainMore() {
         guard !isRequesting, state.episode?.phase == "feedback" else { return }
         if change({ $0.episode?.pendingOperation = "explain"; $0.episode?.phase = "awaitingExplanation" }) { retry(userInitiated: false) }
+    }
+
+    func stopExplanation() {
+        guard let episode = state.episode, episode.phase == "awaitingExplanation",
+              episode.pendingOperation == "explain" else { return }
+        // Invalidate the request before restoring feedback so a late response is ignored.
+        generation = UUID(); task?.cancel(); task = nil; isRequesting = false
+        if change({
+            $0.episode?.phase = "feedback"
+            $0.episode?.pendingOperation = "assess"
+        }) {
+            error = nil; usageLimited = false
+        }
     }
 
     func finishFollowUps() {
@@ -261,6 +310,45 @@ import FSRS
         _ = advance(finishing: false)
     }
 
+    func summaryNeedsPractice() throws -> Int {
+        max(0, state.needsPractice - (try supportedPracticeOverlap()))
+    }
+
+    private func supportedPracticeOverlap() throws -> Int {
+        if let saved = state.supportedPracticeOverlap { return saved }
+        // Older sessions lack the counter. Use their original assessment events,
+        // since review payloads may project an integrated answer onto one target.
+        let id = sessionID
+        let events = try repository.context.fetch(FetchDescriptor<LearningEvent>(
+            predicate: #Predicate { $0.sessionID == id }, sortBy: [SortDescriptor(\.createdAt)]))
+        let undone = Set(events.filter { $0.kind == "undo" }.compactMap(\.relatedEventID))
+        var count = 0
+        for event in events where event.kind == "review" && event.relatedEventID == nil && !undone.contains(event.id) {
+            let review = try RecallCoding.decode(RecallReviewPayload.self, event.payloadData)
+            let episode = review.episode
+            guard review.rating != nil, !episode.isRelearning, !episode.initialSourceRevealed,
+                  !episode.question.answerInput.isRecognition else { continue }
+            let earlier = events.filter {
+                $0.targetID == event.targetID && $0.createdAt >= episode.startedAt && $0.createdAt <= event.createdAt
+            }
+            let assessments = try earlier.filter { $0.kind == "assessment" }.map {
+                try RecallCoding.decode(RecallAssessment.self, $0.payloadData)
+            }
+            var initial = assessments.first ?? episode.initialAssessment
+            var final = assessments.last ?? episode.lastAssessment
+            if let correction = earlier.last(where: { $0.kind == "initialCreditCorrection" }) {
+                initial = try RecallCoding.decode(RecallAssessment.self, correction.payloadData)
+            }
+            if let reassessment = earlier.last(where: { $0.kind == "reassessment" }) {
+                let assessment = try RecallCoding.decode(RecallAssessment.self, reassessment.payloadData)
+                if episode.reconsiderationScope == .conversation { final = assessment }
+                else { initial = assessment }
+            }
+            if initial?.outcome != .correct, final?.outcome == .correct { count += 1 }
+        }
+        return count
+    }
+
     private func advance(finishing: Bool) -> Bool {
         guard !isRequesting, let episode = state.episode, episode.phase == "feedback" else { return false }
         do {
@@ -275,6 +363,7 @@ import FSRS
                 afterMemory: next?.data, reviewedAt: reviewedAt, schedulerVersion: RecallScheduler.version,
                 assessmentPolicyVersion: RecallScheduler.policyVersion, rubricVersion: episode.question.rubricVersion)
             var updated = state, before = state
+            updated.supportedPracticeOverlap = try supportedPracticeOverlap()
             before.lastReviewEventID = nil; before.lastSessionSnapshot = nil
             let beforeData = try RecallCoding.encode(before)
             let eventData = try RecallCoding.encode(payload)
@@ -370,7 +459,10 @@ import FSRS
                 else if episode.initialAssessment?.outcome == .correct, rating != nil { updated.independent += 1 }
                 else if rating != nil {
                     updated.needsPractice += 1
-                    if episode.lastAssessment?.outcome == .correct { updated.supported += 1 }
+                    if episode.lastAssessment?.outcome == .correct {
+                        updated.supported += 1
+                        updated.supportedPracticeOverlap = (updated.supportedPracticeOverlap ?? 0) + 1
+                    }
                 } else { updated.skipped += 1 }
                 // Relearning is exposure, never another independent success. Leave at least
                 // two intervening questions and keep the entire session at ten prompts.

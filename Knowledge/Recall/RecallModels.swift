@@ -326,6 +326,9 @@ nonisolated struct RecallSessionState: Codable, Sendable, Equatable {
     var independent = 0
     var supported = 0
     var needsPractice = 0
+    /// Supported successes that older summary counters also include in needsPractice.
+    /// Optional so existing saved sessions remain readable.
+    var supportedPracticeOverlap: Int? = 0
     var skipped = 0
     var seenMaterialIDs: [String] = []
     var additionalRecalled: Int? = nil
@@ -343,6 +346,26 @@ nonisolated struct RecallReviewPayload: Codable, Sendable {
     let schedulerVersion: String
     let assessmentPolicyVersion: String
     let rubricVersion: String
+}
+
+nonisolated enum RecallOverviewCategory: String, Identifiable {
+    case due, new, assessed
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .due: "Due for review"
+        case .new: "New targets"
+        case .assessed: "Assessed targets"
+        }
+    }
+
+    @MainActor func includes(_ target: RecallTarget, now: Date) -> Bool {
+        switch self {
+        case .due: target.dueAt.map { $0 <= now } == true && RecallScheduler.availableAt(target) <= now
+        case .new: target.assessedAt == nil && RecallScheduler.availableAt(target) <= now
+        case .assessed: target.assessedAt != nil
+        }
+    }
 }
 
 nonisolated struct RecallOverview {

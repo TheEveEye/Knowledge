@@ -1,13 +1,21 @@
 import SwiftUI
 import SwiftData
+import Charts
 
 nonisolated private struct RecallSessionDestination: Hashable {
     let sessionID: UUID
     let scope: RecallScope
+    var isHistory = false
 }
 
 private enum RecallOptionsDestination: Hashable {
     case history, preparation, troubleshooting
+}
+
+private struct RecallTargetSelection: Identifiable {
+    let category: RecallOverviewCategory
+    let targetIDs: Set<UUID>
+    var id: RecallOverviewCategory { category }
 }
 
 struct RecallHomeView: View {
@@ -20,11 +28,14 @@ struct RecallHomeView: View {
     @State private var sessionID: UUID?
     @State private var selectedSessionScope: RecallScope?
     @State private var showsQuestions = false
+    @State private var selectedTargets: RecallTargetSelection?
     @State private var error: String?
     @State private var showsAccount = false
     @State private var confirmsRepair = false
+    @State private var sessionToFinish: UUID?
     @State private var now = Date.now
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.calendar) private var calendar
 
     init(scope: RecallScope) {
         self.scope = scope
@@ -56,11 +67,16 @@ struct RecallHomeView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu("Recall options", systemImage: "ellipsis") {
-                    Button("Questions and sources", systemImage: "list.bullet.rectangle") { showsQuestions = true }
-                    NavigationLink("Session history", value: RecallOptionsDestination.history)
-                    NavigationLink("Question preparation", value: RecallOptionsDestination.preparation)
+                    NavigationLink(value: RecallOptionsDestination.history) {
+                        Label("Session history", systemImage: "clock.arrow.circlepath")
+                    }
+                    NavigationLink(value: RecallOptionsDestination.preparation) {
+                        Label("Question preparation", systemImage: "sparkles")
+                    }
                     Button("Model settings", systemImage: "slider.horizontal.3") { showsAccount = true }
-                    NavigationLink("Troubleshooting", value: RecallOptionsDestination.troubleshooting)
+                    NavigationLink(value: RecallOptionsDestination.troubleshooting) {
+                        Label("Troubleshooting", systemImage: "wrench.and.screwdriver")
+                    }
                 }
             }
         }
@@ -99,10 +115,30 @@ struct RecallHomeView: View {
             RecallSessionScreen(sessionID: id, scope: selectedSessionScope ?? scope)
         }
         .navigationDestination(for: RecallSessionDestination.self) { destination in
-            RecallSessionScreen(sessionID: destination.sessionID, scope: destination.scope)
+            RecallSessionScreen(sessionID: destination.sessionID, scope: destination.scope, isHistory: destination.isHistory)
         }
         .sheet(isPresented: $showsQuestions) { RecallQuestionLibrary(scope: scope) }
+        .sheet(item: $selectedTargets) { selection in
+            RecallQuestionLibrary(scope: scope, selection: selection)
+        }
         .sheet(isPresented: $showsAccount) { ChatGPTAccountView() }
+        .alert("Finish this session?", isPresented: Binding(
+            get: { sessionToFinish != nil },
+            set: { if !$0 { sessionToFinish = nil } }
+        )) {
+            if let id = sessionToFinish {
+                Button("Finish session") {
+                    do {
+                        try imports.recall.finishSession(id)
+                        now = .now; error = nil
+                    } catch { self.error = error.localizedDescription }
+                    sessionToFinish = nil
+                }
+            }
+            Button("Keep practising", role: .cancel) { sessionToFinish = nil }
+        } message: {
+            Text("Completed results and any fully graded answer are kept. Unfinished answers won't be graded, and remaining targets can appear in future sessions.")
+        }
         .task {
             now = .now
             do { try imports.recall.repository.synchronize(scope.subjectID) }
@@ -117,7 +153,7 @@ struct RecallHomeView: View {
     }
 
     @ViewBuilder private func overviewSections(_ overview: RecallOverview) -> some View {
-        RecallOverviewCards(overview: overview)
+        RecallOverviewCards(overview: overview, onSelect: showTargets)
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
@@ -133,6 +169,14 @@ struct RecallHomeView: View {
             }
         } footer: {
             Text("Up to 10 questions including retries, with at most 3 new targets. You can leave and resume at any time.")
+        }
+        if let resumable = sessions.first(where: { !$0.isFinished && $0.topicID == scope.topicID }) {
+            Section {
+                Button("Finish session", systemImage: "checkmark.circle") { sessionToFinish = resumable.id }
+            }
+        }
+        Section {
+            Button("Questions and sources", systemImage: "list.bullet.rectangle") { showsQuestions = true }
         }
         if overview.prepared == 0 || needsPreparationAttention || preparations.first?.status == "preparing" {
             preparationSection(overview, detailed: false)
@@ -157,6 +201,13 @@ struct RecallHomeView: View {
             guard let question = try? target.question() else { return true }
             return question.rubricVersion != RecallAI.rubricVersion || !question.hasCompleteCoverage
         }
+    }
+
+    private func showTargets(_ category: RecallOverviewCategory) {
+        do {
+            let targets = try imports.recall.repository.overviewTargets(scope, category: category, now: now)
+            selectedTargets = .init(category: category, targetIDs: Set(targets.map(\.id)))
+        } catch { self.error = error.localizedDescription }
     }
 
     private var needsPreparationAttention: Bool {
@@ -191,17 +242,59 @@ struct RecallHomeView: View {
                 Text("Sessions from this subject and its topics. Saved sessions reserve their questions until finished.")
             }
         }
-        if !finished.isEmpty {
-            Section("Completed sessions") {
-                ForEach(finished) { session in
+        ForEach(historyGroups(finished)) { group in
+            Section(group.title) {
+                ForEach(group.sessions) { session in
                     NavigationLink(value: RecallSessionDestination(sessionID: session.id,
-                        scope: .init(subjectID: session.subjectID, topicID: session.topicID))) {
+                        scope: .init(subjectID: session.subjectID, topicID: session.topicID), isHistory: true)) {
                         Label(session.updatedAt.formatted(date: .abbreviated, time: .shortened), systemImage: "clock.arrow.circlepath")
                     }
                 }
             }
         }
         if let error { Text(error).foregroundStyle(.red) }
+    }
+
+    private struct HistoryGroup: Identifiable {
+        let id: String
+        let title: String
+        var sessions: [RecallSessionRecord]
+    }
+
+    private func historyGroups(_ finished: [RecallSessionRecord]) -> [HistoryGroup] {
+        let today = Date.now
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)
+        let thisWeek = calendar.dateInterval(of: .weekOfYear, for: today)
+        let previousWeek = calendar.date(byAdding: .weekOfYear, value: -1, to: today)
+            .flatMap { calendar.dateInterval(of: .weekOfYear, for: $0) }
+        var groups: [HistoryGroup] = []
+        for session in finished {
+            let date = session.updatedAt
+            let id: String
+            let title: String
+            if calendar.isDate(date, inSameDayAs: today) {
+                id = "today"; title = "Today"
+            } else if let yesterday, calendar.isDate(date, inSameDayAs: yesterday) {
+                id = "yesterday"; title = "Yesterday"
+            } else if thisWeek?.contains(date) == true {
+                id = "this-week"; title = "This week"
+            } else if previousWeek?.contains(date) == true {
+                id = "last-week"; title = "Last week"
+            } else {
+                let month = calendar.dateInterval(of: .month, for: date)?.start ?? calendar.startOfDay(for: date)
+                id = "month-\(month.timeIntervalSinceReferenceDate)"
+                var format = Date.FormatStyle.dateTime.month(.wide).year()
+                format.calendar = calendar
+                format.timeZone = calendar.timeZone
+                title = date.formatted(format)
+            }
+            if let index = groups.firstIndex(where: { $0.id == id }) {
+                groups[index].sessions.append(session)
+            } else {
+                groups.append(.init(id: id, title: title, sessions: [session]))
+            }
+        }
+        return groups
     }
 
     @ViewBuilder private func preparationSection(_ overview: RecallOverview, detailed: Bool) -> some View {
@@ -263,7 +356,27 @@ struct RecallHomeView: View {
 
 private struct RecallOverviewCards: View {
     let overview: RecallOverview
+    let onSelect: (RecallOverviewCategory) -> Void
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayedCounts: Counts
+    @State private var isVisible = false
+
+    private struct Counts: Equatable {
+        let due: Int
+        let new: Int
+        let assessed: Int
+
+        init(_ overview: RecallOverview) {
+            due = overview.due; new = overview.new; assessed = overview.assessed
+        }
+    }
+
+    init(overview: RecallOverview, onSelect: @escaping (RecallOverviewCategory) -> Void) {
+        self.overview = overview
+        self.onSelect = onSelect
+        _displayedCounts = State(initialValue: Counts(overview))
+    }
 
     private var columns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 12), count: dynamicTypeSize.isAccessibilitySize ? 1 : 3)
@@ -272,9 +385,9 @@ private struct RecallOverviewCards: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                statistic("Due", value: overview.due.formatted(), detail: "for review")
-                statistic("New", value: overview.new.formatted(), detail: "targets")
-                statistic("Assessed", value: overview.assessed.formatted(), detail: "of \(overview.prepared) prepared")
+                statistic("Due", value: displayedCounts.due, detail: "for review", category: .due)
+                statistic("New", value: displayedCounts.new, detail: "targets", category: .new)
+                statistic("Assessed", value: displayedCounts.assessed, detail: "of \(overview.prepared) prepared", category: .assessed)
             }
             if overview.due == 0, let due = overview.nextDueAt {
                 HStack(spacing: 4) {
@@ -283,39 +396,58 @@ private struct RecallOverviewCards: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
             }
+        }
+        .onAppear {
+            isVisible = true
+            displayedCounts = Counts(overview)
+        }
+        .onDisappear { isVisible = false }
+        .onChange(of: Counts(overview)) { _, counts in
+            // Keep the previous visible values while a session covers the dashboard,
+            // then animate to the latest counts when the user returns.
+            if isVisible { displayedCounts = counts }
         }
     }
 
-    private func statistic(_ title: String, value: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.subheadline).foregroundStyle(.secondary)
-            Text(value).font(.title.weight(.semibold)).monospacedDigit()
-            Text(detail).font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private func statistic(_ title: String, value: Int, detail: String, category: RecallOverviewCategory) -> some View {
+        Button { onSelect(category) } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.subheadline).foregroundStyle(.secondary)
+                Text(value.formatted())
+                    .font(.title.weight(.semibold)).monospacedDigit()
+                    .contentTransition(reduceMotion ? .identity : .numericText(value: Double(value)))
+                    .animation(reduceMotion ? nil : .smooth(duration: 0.6), value: value)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
+            .padding(16)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title), \(value.formatted()), \(detail)")
         }
-        .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), \(value), \(detail)")
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows matching learning targets")
     }
 }
 
 private struct RecallSessionScreen: View {
     let sessionID: UUID
     let scope: RecallScope
+    var isHistory = false
     @Environment(ImportCoordinator.self) private var imports
     @State private var controller: RecallSessionController?
     @State private var error: String?
     var body: some View {
         Group {
-            if let controller { RecallSessionContent(controller: controller) }
+            if let controller { RecallSessionContent(controller: controller, isHistory: isHistory) }
             else if let error { ContentUnavailableView("Session unavailable", systemImage: "exclamationmark.bubble", description: Text(error)) }
             else { ProgressView("Opening session…") }
         }
-        .navigationTitle("Recall")
+        .navigationTitle(isHistory ? "Session summary" : "Recall")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             do { controller = try imports.recall.controller(sessionID: sessionID, scope: scope) }
@@ -326,6 +458,7 @@ private struct RecallSessionScreen: View {
 
 private struct RecallSessionContent: View {
     @Bindable var controller: RecallSessionController
+    var isHistory = false
     @Environment(\.dismiss) private var dismiss
     @State private var showsSource = false
     @State private var challenge: Challenge?
@@ -339,9 +472,10 @@ private struct RecallSessionContent: View {
 
     var body: some View {
         List {
-            if let episode = controller.state.episode { questionSections(episode) }
+            if isHistory { summary }
+            else if let episode = controller.state.episode { questionSections(episode) }
             else { summary }
-            if let error = controller.error {
+            if !isHistory, let error = controller.error {
                 Section {
                     Text(error).foregroundStyle(.red)
                     if controller.usageLimited { Link("Manage ChatGPT usage", destination: ChatGPTAccountLinks.usage) }
@@ -350,7 +484,7 @@ private struct RecallSessionContent: View {
                     }
                 }
             }
-            if controller.state.lastReviewEventID != nil {
+            if !isHistory, controller.state.lastReviewEventID != nil {
                 Section { Button("Undo last result", systemImage: "arrow.uturn.backward") { controller.undoLastReview() }.disabled(controller.isRequesting) }
             }
         }
@@ -359,7 +493,7 @@ private struct RecallSessionContent: View {
                 ? .active : .inactive))
         .scrollDismissesKeyboard(.interactively)
         .toolbar {
-            if controller.state.episode != nil {
+            if !isHistory, controller.state.episode != nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu("Session", systemImage: "ellipsis") {
                         Button("Save and leave", systemImage: "pause") { controller.interrupt(message: "Assessment paused. Retry when you resume."); dismiss() }
@@ -405,7 +539,9 @@ private struct RecallSessionContent: View {
             }
             .presentationDetents([.medium, .large])
         }
-        .onDisappear { controller.interrupt(message: "Assessment paused. Your answer was kept; retry when you resume.") }
+        .onDisappear {
+            if !isHistory { controller.interrupt(message: "Assessment paused. Your answer was kept; retry when you resume.") }
+        }
     }
 
     @ViewBuilder private func questionSections(_ episode: RecallEpisode) -> some View {
@@ -443,29 +579,46 @@ private struct RecallSessionContent: View {
                 }
                 HStack(spacing: 16) {
                     Button { answerFocused = false; controller.submit() } label: {
-                        Label("Submit answer", systemImage: "arrow.up")
-                            .frame(maxWidth: .infinity, minHeight: 32)
+                        Label {
+                            Text("Submit")
+                        } icon: {
+                            if episode.draft.trimmed.isEmpty {
+                                Image(systemName: "arrow.up")
+                            } else {
+                                Image(systemName: "arrow.up").foregroundStyle(.white)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(episode.draft.trimmed.isEmpty)
-                    if episode.turns.isEmpty {
-                        Button { answerFocused = false; controller.dontKnow() } label: {
-                            Text("I don't know")
-                                .frame(maxWidth: .infinity, minHeight: 32)
-                        }
-                        .buttonStyle(.bordered)
+                    Button { answerFocused = false; controller.dontKnow() } label: {
+                        Text("I don't know")
+                            .frame(maxWidth: .infinity, minHeight: 32)
                     }
+                    .buttonStyle(.bordered)
                 }
-                if !episode.turns.isEmpty { Button("Show answer and continue") { controller.finishFollowUps() } }
             }
         } else if episode.phase.hasPrefix("awaiting") {
             Section {
                 if controller.isRequesting {
                     HStack { ProgressView(); Text(episode.pendingOperation == "explain" ? "Preparing an explanation…" : "Checking your answer…") }
                     PlanRequestQueueNotice()
-                    Button("Stop") { controller.interrupt(message: "Assessment stopped. Your answer was kept; retry to continue.") }
                 } else if controller.error == nil {
                     Button("Retry assessment") { controller.retry() }
+                }
+                if controller.canEditPendingAnswer {
+                    Button("Stop grading", systemImage: "stop.fill") {
+                        if controller.stopGradingAndEditAnswer() {
+                            answerFocused = controller.state.episode?.nextInput.kind == .text
+                        }
+                    }
+                } else if episode.pendingOperation == "explain" {
+                    Button(controller.isRequesting ? "Stop" : "Back to feedback") {
+                        controller.stopExplanation()
+                    }
+                } else if controller.isRequesting {
+                    Button("Stop") { controller.interrupt(message: "Assessment stopped. Your answer was kept; retry to continue.") }
                 }
             }
         } else if episode.phase == "feedback" {
@@ -477,7 +630,6 @@ private struct RecallSessionContent: View {
                     answerFocused = false
                     if controller.revealSource() { showsSource = true }
                 }
-                Text("Viewing the source now won't change your recall credit.").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -533,10 +685,8 @@ private struct RecallSessionContent: View {
             }
         }
         if episode.canAdjustReviewEffort {
-            Section {
-                DisclosureGroup("Adjust review timing (optional)") {
-                    RecallEffortButtons(selection: episode.effort, select: controller.setEffort)
-                }
+            Section("How did it feel?") {
+                RecallEffortButtons(selection: episode.effort, select: controller.setEffort)
             }
         }
         Section {
@@ -547,18 +697,55 @@ private struct RecallSessionContent: View {
     }
 
     @ViewBuilder private var summary: some View {
+        let needsPractice = Result { try controller.summaryNeedsPractice() }
         Section {
             Label("Session complete", systemImage: "checkmark.circle.fill").font(.title2.weight(.semibold))
+            if case .success(let count) = needsPractice {
+                sessionDistribution(needsPractice: count)
+            }
             LabeledContent("Questions completed", value: controller.state.completed.formatted())
             LabeledContent("Independent recall", value: controller.state.independent.formatted())
             if let additional = controller.state.additionalRecalled, additional > 0 {
                 LabeledContent("Additional facts recalled", value: additional.formatted())
             }
             LabeledContent("Succeeded after support / revisits", value: controller.state.supported.formatted())
-            LabeledContent("Need another review", value: controller.state.needsPractice.formatted())
+            if case .success(let count) = needsPractice {
+                LabeledContent("Need another review", value: count.formatted())
+            } else {
+                LabeledContent("Need another review", value: controller.state.needsPractice.formatted())
+            }
             LabeledContent("Skipped or unassessed", value: controller.state.skipped.formatted())
-            Button("Done") { dismiss() }
         } footer: { Text("Future reviews follow your recorded recall and difficulty. Helped answers and immediate revisits are kept separate from independent recall.") }
+        if !isHistory {
+            Section {
+                Button("Done") { dismiss() }
+            }
+        }
+    }
+
+    @ViewBuilder private func sessionDistribution(needsPractice: Int) -> some View {
+        let segments: [(title: String, count: Int, color: Color)] = [
+            ("Independent recall", controller.state.independent, .accentColor),
+            ("Succeeded after support / revisits", controller.state.supported, RecallProficiencyColor.color(for: 0.5)),
+            ("Need another review", needsPractice, RecallProficiencyColor.color(for: 0)),
+            ("Skipped or unassessed", controller.state.skipped, .gray)
+        ]
+        if segments.contains(where: { $0.count > 0 }) {
+            Chart {
+                ForEach(segments.filter { $0.count > 0 }, id: \.title) { segment in
+                    BarMark(x: .value("Questions", segment.count), y: .value("Session", "Results"), stacking: .standard)
+                        .foregroundStyle(by: .value("Outcome", segment.title))
+                        .accessibilityLabel(segment.title)
+                        .accessibilityValue("\(segment.count) questions")
+                }
+            }
+            .chartForegroundStyleScale(domain: segments.map(\.title), range: segments.map(\.color))
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartLegend(position: .bottom, alignment: .leading)
+            .chartPlotStyle { plot in plot.frame(height: 24).clipShape(Capsule()) }
+            .padding(.vertical, 8)
+        }
     }
 }
 
@@ -569,7 +756,7 @@ private struct RecallEffortButtons: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Continue normally, or adjust if recall felt unusually difficult or easy.")
+            Text("Optional. Helps plan your next review.")
                 .font(.subheadline).foregroundStyle(.secondary)
             let layout = dynamicTypeSize.isAccessibilitySize
                 ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
@@ -581,7 +768,7 @@ private struct RecallEffortButtons: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Optional review timing adjustment")
+        .accessibilityLabel("How did it feel? Optional.")
     }
 
     @ViewBuilder private func effortButton(_ effort: RecallEffort) -> some View {
@@ -603,7 +790,7 @@ private struct RecallEffortButtons: View {
         .controlSize(.regular)
         .buttonBorderShape(.capsule)
         .accessibilityLabel(label)
-        .accessibilityHint(selected ? "Tap again to use normal review timing." : "Adjusts the next review. This is optional.")
+        .accessibilityHint(selected ? "Tap again to clear your choice." : "Helps plan your next review. Optional.")
         .accessibilityAddTraits(selected ? .isSelected : [])
 
         if selected { button.buttonStyle(.borderedProminent) }
@@ -621,14 +808,16 @@ private struct RecallText: View {
 
 private struct RecallQuestionLibrary: View {
     let scope: RecallScope
+    let selection: RecallTargetSelection?
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dismiss) private var dismiss
     @Query private var targets: [RecallTarget]
     @Query private var materials: [RecallMaterial]
     @State private var evidence: EvidencePresentation?
     @State private var error: String?
-    init(scope: RecallScope) {
+    init(scope: RecallScope, selection: RecallTargetSelection? = nil) {
         self.scope = scope
+        self.selection = selection
         let id = scope.subjectID
         _targets = Query(filter: #Predicate<RecallTarget> { $0.subjectID == id && !$0.isRetired })
         _materials = Query(filter: #Predicate<RecallMaterial> { $0.subjectID == id && $0.status != "retired" })
@@ -640,14 +829,16 @@ private struct RecallQuestionLibrary: View {
                                           try imports.recall.repository.practiceMaterialIDs(in: scope)) }) {
                 case .success(let scoped):
                     let ids = scoped.0
-                    ForEach(targets.filter { target in scoped.1.contains(target.materialID)
-                        && materials.contains { $0.id == target.materialID && $0.isPracticeMaterial } }) { target in
+                    let visibleTargets = targets.filter { target in scoped.1.contains(target.materialID)
+                        && materials.contains { $0.id == target.materialID && $0.isPracticeMaterial }
+                        && (selection?.targetIDs.contains(target.id) ?? true) }
+                    ForEach(visibleTargets) { target in
                         questionRow(target)
                     }
                     let otherMaterial = materials.filter {
                         ids.contains($0.conceptID) && (["context", "duplicate", "pending", "blocked", "failed"].contains($0.status) || $0.issue != nil)
                     }
-                    if !otherMaterial.isEmpty {
+                    if selection == nil, !otherMaterial.isEmpty {
                         Section {
                             materialGroup("Background information", items: otherMaterial.filter { $0.status == "context" })
                             materialGroup("Covered by other questions", items: otherMaterial.filter { $0.status == "duplicate" })
@@ -658,12 +849,17 @@ private struct RecallQuestionLibrary: View {
                             Text("Some saved material provides background or is covered elsewhere. Expand a group to see the material and why it has no separate question.")
                         }
                     }
-                    if targets.isEmpty && materials.isEmpty { Text("Prepare Recall to create questions from your saved facts.").foregroundStyle(.secondary) }
+                    if visibleTargets.isEmpty, let selection {
+                        ContentUnavailableView("No \(selection.category.title.lowercased())", systemImage: "list.bullet.rectangle",
+                            description: Text("There are no matching learning targets in this subject or topic."))
+                    } else if targets.isEmpty && materials.isEmpty {
+                        Text("Prepare Recall to create questions from your saved facts.").foregroundStyle(.secondary)
+                    }
                 case .failure(let failure): Text(failure.localizedDescription)
                 }
                 if let error { Text(error).foregroundStyle(.red) }
             }
-            .navigationTitle("Recall questions")
+            .navigationTitle(selection?.category.title ?? "Recall questions")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .sheet(item: $evidence) { EvidenceView(presentation: $0) }
         }
@@ -785,6 +981,7 @@ private struct RecallQuestionLibrary: View {
                 .padding(.vertical, 4)
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
+                    if selection != nil { Text(question.material.conceptName).font(.caption).foregroundStyle(.secondary) }
                     RecallText(source: question.prompt).font(.body.weight(.medium))
                     if target.isExcluded {
                         Label("Excluded from practice", systemImage: "pause.circle")

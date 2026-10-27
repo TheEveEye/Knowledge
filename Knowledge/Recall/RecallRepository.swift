@@ -158,21 +158,18 @@ import SwiftData
         let materials = try materials(scope.subjectID).filter { materialIDs.contains($0.id) }
         let targets = try targets(scope.subjectID).filter { materialIDs.contains($0.materialID) && !$0.isRetired }
         let readyIDs = Set(materials.filter { $0.status == "ready" }.map(\.id))
-        let usable = try targets.filter { target in
-            let complete = try target.question().hasCompleteCoverage
-            return !target.isExcluded && readyIDs.contains(target.materialID) && complete
-        }
+        let usable = try usableOverviewTargets(targets, readyIDs: readyIDs)
         var result = RecallOverview()
         result.total = materials.count; result.prepared = usable.count
         result.contextMaterials = scopedMaterials.filter { $0.status == "context" }.count
         result.duplicateMaterials = scopedMaterials.filter { $0.status == "duplicate" }.count
-        result.assessed = usable.filter { $0.assessedAt != nil }.count
-        result.due = usable.filter { $0.dueAt.map { $0 <= now } == true && RecallScheduler.availableAt($0) <= now }.count
+        result.assessed = usable.filter { RecallOverviewCategory.assessed.includes($0, now: now) }.count
+        result.due = usable.filter { RecallOverviewCategory.due.includes($0, now: now) }.count
         result.nextDueAt = usable.compactMap { target -> Date? in
             guard let due = target.dueAt else { return nil }
             return max(due, RecallScheduler.availableAt(target))
         }.filter { $0 > now }.min()
-        result.new = usable.filter { $0.assessedAt == nil && RecallScheduler.availableAt($0) <= now }.count
+        result.new = usable.filter { RecallOverviewCategory.new.includes($0, now: now) }.count
         let practiceIDs = Set(materials.map(\.id))
         result.issues = targets.filter { $0.isExcluded && practiceIDs.contains($0.materialID) }.count
         result.materialPending = materials.filter { $0.status == "pending" || $0.status == "failed" }.count
@@ -182,6 +179,20 @@ import SwiftData
             result.scopeName = topic.name
         } else { result.scopeName = try subject(scope.subjectID).name }
         return result
+    }
+
+    func overviewTargets(_ scope: RecallScope, category: RecallOverviewCategory, now: Date) throws -> [RecallTarget] {
+        let ids = try practiceMaterialIDs(in: scope)
+        let readyIDs = Set(try materials(scope.subjectID).filter { ids.contains($0.id) && $0.status == "ready" }.map(\.id))
+        let candidates = try targets(scope.subjectID).filter { ids.contains($0.materialID) }
+        return try usableOverviewTargets(candidates, readyIDs: readyIDs).filter { category.includes($0, now: now) }
+    }
+
+    private func usableOverviewTargets(_ targets: [RecallTarget], readyIDs: Set<String>) throws -> [RecallTarget] {
+        try targets.filter { target in
+            guard !target.isRetired, !target.isExcluded, readyIDs.contains(target.materialID) else { return false }
+            return try target.question().hasCompleteCoverage
+        }
     }
 
     func valid(_ episode: RecallEpisode, scope: RecallScope) throws -> RecallTarget {
