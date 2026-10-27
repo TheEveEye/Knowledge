@@ -1,5 +1,5 @@
 {
-  "originHash" : "2134568b9ca470c2388d8eb91a60d96b00f005da4f326b50f33d85956acf236f",
+  "originHash" : "5a30bac48e51b21aeb12831d67ff258cd8beb143c32bd0d83f6532fdfa72527c",
   "pins" : [
     {
       "identity" : "jwt-kit",
@@ -44,6 +44,14 @@
       "state" : {
         "revision" : "da9d28d69ebe3894b18376c8f2395c2f37b8448f",
         "version" : "4.5.2"
+      }
+    },
+    {
+      "identity" : "swift-fsrs",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/open-spaced-repetition/swift-fsrs.git",
+      "state" : {
+        "revision" : "4fbaf20184d62f82a9f44f343337c61a2c5483e9"
       }
     },
     {

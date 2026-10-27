@@ -128,6 +128,7 @@ extension KnowledgeRepository {
             try materialize(after, changes: changes)
             _ = try appendRevision(snapshot: after, parentID: before.revisionID, origin: "manual", title: title, operationID: UUID(), changes: changes, explanations: [])
             try context.save()
+            onSubjectChanged?(subjectID, nil)
         } catch { context.rollback(); throw error }
     }
 

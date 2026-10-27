@@ -139,6 +139,7 @@ nonisolated struct ChatMessage: Identifiable {
               authentication.activeAccount?.credentials?.planEnabled == true, !authentication.isBusy,
               !imports.defaultChatModel.isEmpty, queue.count < 10 || usageBlocked else { return }
         let turn = Turn(id: UUID(), text: old.text, accountID: accountID, model: imports.defaultChatModel)
+        client.resumeRequestsAfterUsageLimit()
         usageBlocked = false // Only an explicit retry probes availability after a usage-limit response.
         failed[id] = nil
         if let index = messages.firstIndex(where: { $0.id == id }) { messages[index].retryID = nil }

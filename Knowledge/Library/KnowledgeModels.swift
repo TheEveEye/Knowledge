@@ -167,7 +167,9 @@ enum KnowledgePersistence {
         Schema([KnowledgeSubject.self, KnowledgeSource.self, KnowledgeConcept.self,
                 KnowledgeFact.self, KnowledgeConnection.self, KnowledgeImportJob.self,
                 KnowledgeTopic.self, KnowledgeConceptPlacement.self, LibraryEntityVersion.self,
-                SubjectRevisionRecord.self, KnowledgeContribution.self])
+                SubjectRevisionRecord.self, KnowledgeContribution.self,
+                RecallPreparation.self, RecallMaterial.self, RecallTarget.self,
+                RecallSessionRecord.self, LearningEvent.self])
     }
     static func container(inMemory: Bool = false, url: URL? = nil) throws -> ModelContainer {
         let configuration: ModelConfiguration

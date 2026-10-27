@@ -435,6 +435,10 @@ nonisolated private enum ImportBatchOutcome: Sendable {
         if error is CancellationError || error is AuthenticationError || (error as? URLError)?.code == .cancelled { return true }
         if let error = error as? ImportError, error == .accountChanged { return true }
         guard let error = error as? PlanUsageError else { return false }
+        // The shared client has already paced and bounded temporary retries.
+        // Keep independent successful batches instead of canceling them here.
+        if error.isTemporaryServiceLimit { return false }
+        if error.isUsageLimit { return true }
         return error.kind == .permission || error.kind == .noModels || [400, 401, 403, 429].contains(error.status ?? 0)
             || ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "subscription_sharing_user_not_eligible",
                 "chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context"].contains(error.code ?? "")

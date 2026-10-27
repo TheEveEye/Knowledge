@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 nonisolated struct ChatGPTPlanModel: Decodable, Sendable, Equatable, Identifiable {
     let slug: String
@@ -23,6 +24,7 @@ nonisolated struct PlanResponseReceipt: Sendable, Equatable {
     var text: String?
     let inputTokens: Int?
     let outputTokens: Int?
+    var serviceTier: String? = nil
     var contentType: String? = nil
     var output: [PlanJSONValue] = []
 
@@ -49,12 +51,32 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     var code: String? = nil
     var requestID: String? = nil
     var bodyShape: String? = nil
-    var isUsageLimit: Bool { code == "subscription_sharing_usage_limit_exceeded" || status == 429 }
+    var retryAt: Date? = nil
+    var serverMessage: String? = nil
+    var errorType: String? = nil
+    var retryExhausted = false
+    var parameter: String? = nil
+    var requestedServiceTier: String? = nil
+    var isUsageLimit: Bool {
+        ["subscription_sharing_usage_limit_exceeded", "insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached"].contains(code ?? "")
+            || errorType == "insufficient_quota"
+    }
+    var isTemporaryServiceLimit: Bool {
+        !isUsageLimit && (status == 429 || status == 503 || code == "slow_down" || code == "server_is_overloaded"
+            || code == "subscription_sharing_usage_unavailable" || code == "rate_limit_exceeded" || errorType == "rate_limit_error")
+    }
 
     var errorDescription: String? {
+        if parameter == "service_tier", !isUsageLimit, !isTemporaryServiceLimit {
+            return "OpenAI did not accept Fast grading for this model or account. Turn off Fast grading in account settings, then retry. Your answer was kept."
+        }
+        if ["fast", "priority"].contains(requestedServiceTier ?? ""), status == 400 || status == 422 {
+            return "OpenAI rejected the grading request with Fast grading enabled. Turn off Fast grading in account settings and retry. Your answer was kept."
+        }
         if code == "subscription_sharing_usage_limit_exceeded" {
             return "A ChatGPT usage limit was reached. Review your plan and Knowledge’s limit in Manage usage."
         }
+        if isUsageLimit { return "OpenAI reported a usage or quota limit. Review your allowance before retrying." }
         if code == "subscription_sharing_usage_unavailable" {
             return "ChatGPT plan usage is currently unavailable. Review your connection in Manage usage and try again later."
         }
@@ -76,7 +98,7 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
             switch status {
             case 401: return "OpenAI did not accept this connection. Try signing in again through account settings."
             case 403: return "OpenAI did not allow this request for the selected account or workspace."
-            case 429: return "A request limit was reached. Check Manage usage and try again later."
+            case 429: return retryExhausted ? "OpenAI is still limiting requests. Automatic retries stopped; try again later." : "OpenAI temporarily limited the request rate. Please try again shortly."
             case .some(500...599): return "OpenAI is temporarily unavailable. Try again later."
             default: return "OpenAI could not complete the request."
             }
@@ -84,12 +106,13 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     }
 
     var diagnostic: String? {
-        let parts = [status.map { "HTTP \($0)" }, code, kind == .invalidResponse ? bodyShape : nil, requestID.map { "Request \($0)" }].compactMap { $0 }
+        let parts = [status.map { "HTTP \($0)" }, code, serverMessage, kind == .invalidResponse ? bodyShape : nil, requestID.map { "Request \($0)" }].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
 @MainActor protocol ChatGPTPlanRequesting {
+    func resumeRequestsAfterUsageLimit()
     func models(accessToken: String) async throws -> [ChatGPTPlanModel]
     func response(model: String, prompt: String, accessToken: String,
                   onDelta: @escaping @MainActor (String) -> Void) async throws -> PlanResponseReceipt
@@ -101,6 +124,7 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
 }
 
 extension ChatGPTPlanRequesting {
+    func resumeRequestsAfterUsageLimit() { }
     func response(_ payload: PlanResponseRequest, accessToken: String,
                   onDelta: @escaping @MainActor (String) -> Void,
                   onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt {
@@ -129,9 +153,17 @@ extension ChatGPTPlanRequesting {
 @MainActor final class PlanUsageAPIClient: ChatGPTPlanRequesting {
     private let transport: any PlanHTTPTransport
     private let observeEvent: @MainActor (String) -> Void
-    init(transport: (any PlanHTTPTransport)? = nil, observeEvent: @escaping @MainActor (String) -> Void = { _ in }) {
+    private weak var authentication: AuthenticationStore?
+    private let queue = PlanRequestQueue.shared
+    init(transport: (any PlanHTTPTransport)? = nil, authentication: AuthenticationStore? = nil,
+         observeEvent: @escaping @MainActor (String) -> Void = { _ in }) {
         self.transport = transport ?? PlanURLSessionTransport()
         self.observeEvent = observeEvent
+        self.authentication = authentication
+    }
+
+    func resumeRequestsAfterUsageLimit() {
+        if let id = authentication?.activeAccount?.id { queue.resumeUsage(key: PlanRequestQueue.accountKey(id)) }
     }
 
     func models(accessToken: String) async throws -> [ChatGPTPlanModel] {
@@ -164,6 +196,183 @@ extension ChatGPTPlanRequesting {
     func response(_ payload: PlanResponseRequest, accessToken: String,
                   onDelta: @escaping @MainActor (String) -> Void,
                   onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt {
+        let id = UUID().uuidString, started = Date.now
+        let log = AIRequestLog.shared
+        let purpose = payload.text?.format.name
+        let recordsRecall = RecallDiagnostics.shared.recordsRequest(purpose)
+        if recordsRecall { RecallDiagnostics.shared.request(payload, id: id) }
+        log.record("request_begin", (RecallDiagnostics.isGeneration(purpose) ? RecallDiagnosticScope.fields : [:]).merging([
+            "request_id": id, "model": payload.model, "purpose": purpose ?? "chat",
+            "requested_service_tier": payload.service_tier?.rawValue ?? "auto",
+            "reasoning_effort": payload.reasoning?.effort.rawValue ?? "provider_default"
+        ]) { _, new in new })
+        do {
+            let receipt = try await queuedResponse(payload, accessToken: accessToken, requestID: id, onDelta: onDelta, onActivity: onActivity)
+            if recordsRecall { RecallDiagnostics.shared.completed(receipt, id: id, elapsed: Date.now.timeIntervalSince(started), purpose: purpose) }
+            log.record("request_completed", ["request_id": id, "elapsed_s": String(Date.now.timeIntervalSince(started)),
+                "server_request_id": receipt.requestID ?? "none", "served_service_tier": receipt.serviceTier ?? "unreported", "input_tokens": receipt.inputTokens.map(String.init) ?? "unavailable",
+                "output_tokens": receipt.outputTokens.map(String.init) ?? "unavailable"])
+            return receipt
+        } catch {
+            if recordsRecall {
+                var fields = AIRequestLog.errorFields(error)
+                fields["request_id"] = id; fields["elapsed_s"] = String(Date.now.timeIntervalSince(started))
+                if let message = (error as? PlanUsageError)?.serverMessage { fields["sanitized_server_message"] = message }
+                RecallDiagnostics.shared.record(RecallDiagnostics.isGeneration(purpose) ? "generation_request_failed" : "grading_request_failed", fields)
+            }
+            log.record("request_failed", AIRequestLog.errorFields(error).merging([
+                "request_id": id, "elapsed_s": String(Date.now.timeIntervalSince(started))]) { _, new in new })
+            throw error
+        }
+    }
+
+    private func queuedResponse(_ payload: PlanResponseRequest, accessToken: String, requestID: String,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void) async throws -> PlanResponseReceipt {
+        let accountID = authentication?.activeAccount?.id
+        if let authentication, authentication.isBusy || accountID == nil { throw ImportError.accountChanged }
+        let key = accountID.map(PlanRequestQueue.accountKey)
+            ?? "credential:" + SHA256.hash(data: Data(accessToken.utf8)).map { String(format: "%02x", $0) }.joined()
+        let purpose = payload.text?.format.name
+        let interactive = purpose == nil || ["knowledge_recall_assessment_v1", "knowledge_recall_extra_verify_v1", "knowledge_recall_explanation_v1"].contains(purpose ?? "")
+        var retryDeadline: Date?, lastError: PlanUsageError?
+        var lastConnectionError: URLError?
+        onActivity(.waiting)
+        for attempt in 1...PlanRequestQueue.maximumAttempts {
+            let permit: PlanRequestQueue.Permit, token: String
+            do {
+                (permit, token) = try await authorizedAdmission(key: key, accountID: accountID, model: payload.model,
+                    interactive: interactive, deadline: retryDeadline, suppliedToken: accessToken, requestID: requestID, attempt: attempt)
+            }
+            catch is PlanRequestWaitExpired {
+                AIRequestLog.shared.record("retry_stopped", ["request_id": requestID, "reason": "admission_retry_deadline"])
+                if let lastConnectionError { throw lastConnectionError }
+                var error = lastError ?? PlanUsageError(kind: .server, status: 429)
+                error.retryExhausted = true; throw error
+            }
+            defer { queue.release(permit) }
+            try Task.checkCancellation()
+            AIRequestLog.shared.record("request_attempt", ["request_id": requestID, "attempt_id": permit.id.uuidString,
+                "attempt": String(attempt), "account": AIRequestLog.shared.accountAlias(key)])
+            var streamStarted = false
+            do {
+                let receipt = try await boundedResponse(payload, accessToken: token, deadline: retryDeadline, onDelta: { delta in
+                        streamStarted = true; onDelta(delta)
+                    },
+                    onActivity: { activity in
+                        if activity == .processing, !streamStarted {
+                            AIRequestLog.shared.record("stream_started", ["request_id": requestID, "attempt_id": permit.id.uuidString])
+                            streamStarted = true
+                        }
+                        onActivity(activity)
+                    }, permit: permit)
+                queue.succeeded(permit)
+                return receipt
+            } catch var error as PlanUsageError {
+                error.requestedServiceTier = payload.service_tier?.rawValue
+                queue.failed(error, permit: permit, attempt: attempt)
+                AIRequestLog.shared.record("attempt_failed", AIRequestLog.errorFields(error).merging([
+                    "request_id": requestID, "attempt_id": permit.id.uuidString, "stream_started": String(streamStarted)]) { _, new in new })
+                if error.isUsageLimit || !error.isTemporaryServiceLimit || streamStarted {
+                    AIRequestLog.shared.record("retry_stopped", ["request_id": requestID,
+                        "reason": error.isUsageLimit ? "usage_limit" : (streamStarted ? "stream_already_started" : "not_retryable")])
+                    throw error
+                }
+                if retryDeadline == nil { retryDeadline = Date.now.addingTimeInterval(PlanRequestQueue.retryBudget) }
+                lastError = error
+                guard attempt < PlanRequestQueue.maximumAttempts, let retryDeadline,
+                      Date.now < retryDeadline, error.retryAt.map({ $0 < retryDeadline }) ?? true else {
+                    AIRequestLog.shared.record("retry_stopped", ["request_id": requestID, "reason": "attempt_or_time_budget",
+                        "attempt": String(attempt), "deadline": retryDeadline?.ISO8601Format() ?? "none"])
+                    error.retryExhausted = true; throw error
+                }
+                AIRequestLog.shared.record("retry_scheduled", ["request_id": requestID, "next_attempt": String(attempt + 1),
+                    "deadline": retryDeadline.ISO8601Format()])
+                onActivity(.waiting)
+            } catch let error as URLError where PlanConnectionRecovery.isTransient(error) {
+                // Only replay background question generation/verification. No answer,
+                // chat, import, or other request is silently replayed after streaming.
+                let preparation = ["knowledge_recall_questions_v1", "knowledge_recall_verify_v1", "knowledge_recall_questions_v2", "knowledge_recall_verify_v2", "knowledge_recall_questions_v3", "knowledge_recall_verify_v3"].contains(purpose ?? "")
+                guard preparation, !Task.isCancelled else { throw error }
+                lastConnectionError = error
+                queue.connectionFailed(error, permit: permit, attempt: attempt)
+                if retryDeadline == nil { retryDeadline = Date.now.addingTimeInterval(PlanRequestQueue.retryBudget) }
+                guard attempt < 3, let retryDeadline, Date.now < retryDeadline else {
+                    AIRequestLog.shared.record("retry_stopped", ["request_id": requestID, "reason": "connection_retry_exhausted"])
+                    throw error
+                }
+                AIRequestLog.shared.record("retry_scheduled", ["request_id": requestID, "next_attempt": String(attempt + 1),
+                    "reason": "connection_interrupted", "stream_started": String(streamStarted), "deadline": retryDeadline.ISO8601Format()])
+                onActivity(.waiting)
+            } catch is PlanRequestWaitExpired {
+                AIRequestLog.shared.record("retry_stopped", ["request_id": requestID, "reason": "network_retry_deadline"])
+                if let lastConnectionError { throw lastConnectionError }
+                var error = lastError ?? PlanUsageError(kind: .server, status: 429)
+                error.retryExhausted = true; throw error
+            }
+        }
+        throw lastError ?? PlanUsageError(kind: .interrupted)
+    }
+
+    private func authorizedAdmission(key: String, accountID: String?, model: String, interactive: Bool,
+                                     deadline: Date?, suppliedToken: String, requestID: String, attempt: Int) async throws -> (PlanRequestQueue.Permit, String) {
+        while true {
+            try Task.checkCancellation()
+            if let deadline, deadline <= .now { throw PlanRequestWaitExpired() }
+            if let accountID {
+                guard let authentication, !authentication.isBusy, authentication.activeAccount?.id == accountID else { throw ImportError.accountChanged }
+                // Refresh before admission so a slow shared token refresh cannot
+                // release a burst of already-admitted HTTP requests at once.
+                _ = try await authentication.authorizedAccessToken()
+            }
+            let permit = try await queue.acquire(key: key, model: model, interactive: interactive, deadline: deadline, requestID: requestID, attempt: attempt)
+            do {
+                try Task.checkCancellation()
+                guard let accountID else { return (permit, suppliedToken) }
+                guard let authentication, !authentication.isBusy, let account = authentication.activeAccount,
+                      account.id == accountID else { throw ImportError.accountChanged }
+                guard account.credentials?.planEnabled == true, let token = account.credentials?.accessToken else {
+                    throw AuthenticationError.sessionExpired
+                }
+                if account.pendingRefresh != nil || account.credentials?.expiresAt.map({ $0 <= Date.now.addingTimeInterval(60) }) == true {
+                    // Credentials aged out while queued: refresh, then rejoin
+                    // admission rather than bypassing the start spacing.
+                    queue.release(permit)
+                    continue
+                }
+                return (permit, token)
+            } catch { queue.release(permit); throw error }
+        }
+    }
+
+    /// The retry budget includes queued waits and the retried network request.
+    /// A timeout cancels the transport; it never schedules another attempt.
+    private func boundedResponse(_ payload: PlanResponseRequest, accessToken: String, deadline: Date?,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void,
+                  permit: PlanRequestQueue.Permit) async throws -> PlanResponseReceipt {
+        guard let deadline else {
+            return try await performResponse(payload, accessToken: accessToken, onDelta: onDelta, onActivity: onActivity, permit: permit)
+        }
+        guard deadline > .now else { throw PlanRequestWaitExpired() }
+        return try await withThrowingTaskGroup(of: PlanResponseReceipt.self) { group in
+            group.addTask { @MainActor in
+                try await self.performResponse(payload, accessToken: accessToken, onDelta: onDelta, onActivity: onActivity, permit: permit)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow)))
+                throw PlanRequestWaitExpired()
+            }
+            defer { group.cancelAll() }
+            guard let receipt = try await group.next() else { throw CancellationError() }
+            return receipt
+        }
+    }
+
+    private func performResponse(_ payload: PlanResponseRequest, accessToken: String,
+                  onDelta: @escaping @MainActor (String) -> Void,
+                  onActivity: @escaping @MainActor (PlanResponseActivity) -> Void,
+                  permit: PlanRequestQueue.Permit) async throws -> PlanResponseReceipt {
         var request = try request(path: "responses", accessToken: accessToken)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -171,9 +380,13 @@ extension ChatGPTPlanRequesting {
         request.timeoutInterval = 240
         request.httpBody = try JSONEncoder().encode(payload)
         onActivity(.waiting)
+        AIRequestLog.shared.record("http_start", ["attempt_id": permit.id.uuidString,
+            "body_bytes": String(request.httpBody?.count ?? 0), "model": payload.model])
         let stream = try await transport.stream(for: request)
         defer { stream.cancel() }
         try validate(stream.response, for: request)
+        AIRequestLog.shared.receivedHTTP(stream.response, attemptID: permit.id)
+        queue.observe(stream.response, permit: permit)
         guard (200..<300).contains(stream.response.statusCode) else {
             var body = Data()
             for try await chunk in stream.chunks {
@@ -245,6 +458,7 @@ extension ChatGPTPlanRequesting {
                          hasText: Bool, onDelta: @MainActor (String) -> Void,
                          onActivity: @MainActor (PlanResponseActivity) -> Void) throws -> PlanResponseReceipt? {
         if event.data == "[DONE]" { return nil }
+        onActivity(.processing)
         guard let data = event.data.data(using: .utf8),
               let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw PlanUsageError(kind: .invalidResponse, requestID: requestID(response), bodyShape: "Invalid stream JSON (\(event.data.utf8.count) bytes)")
@@ -309,9 +523,11 @@ extension ChatGPTPlanRequesting {
         }
         let text = textParts.joined(separator: "\n"), usage = body["usage"] as? [String: Any]
         guard text.utf8.count <= 2_097_152 else { throw PlanUsageError(kind: .invalidResponse, bodyShape: "Completion text exceeded the size limit") }
+        let reportedTier = body["service_tier"] as? String
+        let serviceTier = reportedTier.flatMap { ["auto", "default", "flex", "scale", "priority", "fast", "ultrafast"].contains($0) ? $0 : nil }
         return PlanResponseReceipt(responseID: body["id"] as? String, requestID: requestID(response),
             text: text.isEmpty ? nil : text, inputTokens: usage?["input_tokens"] as? Int,
-            outputTokens: usage?["output_tokens"] as? Int, contentType: response.value(forHTTPHeaderField: "Content-Type"), output: output)
+            outputTokens: usage?["output_tokens"] as? Int, serviceTier: serviceTier, contentType: response.value(forHTTPHeaderField: "Content-Type"), output: output)
     }
 
     private func request(path: String, accessToken: String) throws -> URLRequest {
@@ -352,8 +568,38 @@ extension ChatGPTPlanRequesting {
             }
             return nil
         }
+        func message(in value: [String: Any], depth: Int) -> String? {
+            guard depth < 4 else { return nil }
+            if let message = value["message"] as? String ?? value["msg"] as? String { return message }
+            for key in ["error", "detail", "response"] {
+                if let nested = value[key] as? [String: Any], let found = message(in: nested, depth: depth + 1) { return found }
+                if let text = value[key] as? String { return text }
+                if let details = value[key] as? [[String: Any]] {
+                    let messages = details.prefix(6).compactMap { message(in: $0, depth: depth + 1) }
+                    if !messages.isEmpty { return messages.joined(separator: "; ") }
+                }
+            }
+            return nil
+        }
+        let error = payload["error"] as? [String: Any]
+        let nestedError = (payload["response"] as? [String: Any])?["error"] as? [String: Any]
+        let details = payload["detail"] as? [[String: Any]] ?? []
+        let type = safeCode(error?["type"] as? String ?? nestedError?["type"] as? String ?? details.first?["type"] as? String)
+        let rawParameter = error?["param"] as? String ?? nestedError?["param"] as? String
+        let roots = ["model", "input", "instructions", "text", "reasoning", "store", "stream", "tools", "service_tier"]
+        let locationParameter = details.prefix(6).compactMap { detail in
+            (detail["loc"] as? [Any])?.compactMap { $0 as? String }.first { roots.contains($0) }
+        }.first
+        let rawMessage = message(in: payload, depth: 0)
+        let tierNamed = rawMessage?.range(of: "service_tier", options: .caseInsensitive) != nil
+        let parameter = (rawParameter ?? locationParameter ?? (tierNamed ? "service_tier" : nil)).flatMap { value -> String? in
+            // Retain only a known structural parameter, never arbitrary content.
+            return roots.first { value == $0 || value.hasPrefix($0 + ".") || value.hasPrefix($0 + "[") }
+        }
         return PlanUsageError(kind: .server, status: response.statusCode, code: code(in: payload, depth: 0),
-            requestID: requestID(response), bodyShape: "Server error envelope")
+            requestID: requestID(response), bodyShape: "Server error envelope: " + payload.keys.sorted().prefix(8).joined(separator: ", "),
+            retryAt: PlanRateLimitTime.retryDate(response.value(forHTTPHeaderField: "Retry-After")),
+            serverMessage: rawMessage.map(PlanServerDiagnostic.sanitize), errorType: type, parameter: parameter)
     }
 
     private func requestID(_ response: HTTPURLResponse) -> String? {

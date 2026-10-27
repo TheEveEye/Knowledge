@@ -3,6 +3,7 @@ import SwiftData
 
 @MainActor final class KnowledgeRepository {
     let container: ModelContainer
+    var onSubjectChanged: ((UUID, String?) -> Void)?
     init(container: ModelContainer) { self.container = container }
 
     func createSubject(name: String) throws -> KnowledgeSubject {
@@ -81,6 +82,7 @@ import SwiftData
         for version in versions where !retainedHashes.contains(version.contentHash) { context.delete(version) }
         context.delete(subject)
         do {
+            try RecallRepository(container: container).deleteSubject(id)
             try context.save()
         } catch { context.rollback(); throw error }
         // Delete bytes only after the database commit, so a failed save retains all source material.

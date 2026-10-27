@@ -8,12 +8,18 @@ import UIKit
     private(set) var selectedModel = ""
     private(set) var defaultImportModel = ""
     private(set) var defaultChatModel = ""
+    private(set) var defaultRecallModel = ""
+    private(set) var defaultRecallPreparationModel = ""
+    private(set) var recallPreparationReasoning = RecallPreparationReasoning.automatic
+    private(set) var recallAssessmentReasoning = RecallAssessmentReasoning.medium
+    private(set) var fastRecallGrading = false
     private(set) var isLoadingModels = false
     private var runners: [UUID: ImportJobRunner] = [:]
     var modelError: String?
     var message: String?
     @ObservationIgnored let repository: KnowledgeRepository
     let merges: LibraryMergeCoordinator
+    let recall: RecallCoordinator
     @ObservationIgnored private let authentication: AuthenticationStore
     @ObservationIgnored private let client: any ChatGPTPlanRequesting
     @ObservationIgnored private let extractor: any ConceptExtractor
@@ -30,7 +36,10 @@ import UIKit
         self.authentication = authentication
         let repository = KnowledgeRepository(container: container)
         self.repository = repository
-        let client = client ?? PlanUsageAPIClient()
+        let client = client ?? PlanUsageAPIClient(authentication: authentication)
+        let recall = RecallCoordinator(repository: repository, authentication: authentication, client: client)
+        self.recall = recall
+        repository.onSubjectChanged = { [weak recall] subjectID, _ in recall?.libraryDidChange(subjectID) }
         self.merges = LibraryMergeCoordinator(repository: repository, authentication: authentication, client: client)
         self.client = client; self.extractor = extractor ?? ChatGPTConceptExtractor(client: client); self.preferences = preferences
     }
@@ -39,7 +48,7 @@ import UIKit
         guard !isLoadingModels else { return }
         let accountID = authentication.activeAccount?.id
         guard let accountID, authentication.activeAccount?.credentials?.planEnabled == true else {
-            models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""
+            models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; defaultRecallModel = ""; defaultRecallPreparationModel = ""; recallPreparationReasoning = .automatic; recallAssessmentReasoning = .medium; fastRecallGrading = false
             modelError = "Connect your ChatGPT plan in account settings to process notes."
             return
         }
@@ -54,13 +63,28 @@ import UIKit
             self.models = models
             let savedImport = preferences.dictionary(forKey: "knowledge.modelSelections")?[accountID] as? String
             let savedChat = preferences.dictionary(forKey: "knowledge.chatModelSelections")?[accountID] as? String
+            let savedRecall = preferences.dictionary(forKey: "knowledge.recallModelSelections")?[accountID] as? String
+            let savedPreparation = preferences.dictionary(forKey: "knowledge.recallPreparationModels")?[accountID] as? String
+            let savedReasoning = preferences.dictionary(forKey: "knowledge.recallPreparationReasoning")?[accountID] as? String
             defaultImportModel = models.first(where: { $0.slug == savedImport })?.slug ?? models.first?.slug ?? ""
             defaultChatModel = models.first(where: { $0.slug == savedChat })?.slug ?? models.first?.slug ?? ""
+            defaultRecallModel = models.first(where: { $0.slug == savedRecall })?.slug
+                ?? models.first(where: { $0.slug == "gpt-6-luna" })?.slug ?? defaultChatModel
+            defaultRecallPreparationModel = models.first(where: { $0.slug == savedPreparation })?.slug
+                ?? models.first(where: { $0.slug == "gpt-6-luna" })?.slug ?? defaultImportModel
+            let reasoning = RecallPreparationReasoning(rawValue: savedReasoning ?? "") ?? .automatic
+            recallPreparationReasoning = RecallPreparationReasoning.options(for: defaultRecallPreparationModel).contains(reasoning) ? reasoning : .automatic
+            let assessmentReasoning = RecallAssessmentReasoning(rawValue:
+                preferences.dictionary(forKey: "knowledge.recallAssessmentReasoning")?[accountID] as? String ?? "") ?? .medium
+            recallAssessmentReasoning = RecallAssessmentReasoning.options(for: defaultRecallModel).contains(assessmentReasoning)
+                ? assessmentReasoning : .automatic
+            fastRecallGrading = preferences.dictionary(forKey: "knowledge.fastRecallGrading")?[accountID] as? Bool ?? false
             if !models.contains(where: { $0.slug == selectedModel }) { selectedModel = defaultImportModel }
             if models.isEmpty { modelError = PlanUsageError(kind: .noModels).localizedDescription }
+            configureRecall()
         } catch {
             if catalogRunID == run, authentication.activeAccount?.id == accountID {
-                models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""
+                models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; defaultRecallModel = ""; defaultRecallPreparationModel = ""; recallPreparationReasoning = .automatic; recallAssessmentReasoning = .medium; fastRecallGrading = false
                 modelError = error.localizedDescription
             }
         }
@@ -78,12 +102,63 @@ import UIKit
         defaultImportModel = slug
         if followsDefault { selectedModel = slug }
         storeDefaultModel(slug, key: "knowledge.modelSelections")
+        configureRecall()
     }
 
     func setDefaultChatModel(_ slug: String) {
         guard models.contains(where: { $0.slug == slug }) else { return }
         defaultChatModel = slug
         storeDefaultModel(slug, key: "knowledge.chatModelSelections")
+    }
+
+    func setDefaultRecallModel(_ slug: String) {
+        guard models.contains(where: { $0.slug == slug }) else { return }
+        defaultRecallModel = slug
+        storeDefaultModel(slug, key: "knowledge.recallModelSelections")
+        if !RecallAssessmentReasoning.options(for: slug).contains(recallAssessmentReasoning) {
+            recallAssessmentReasoning = .automatic
+            storeDefaultModel(recallAssessmentReasoning.rawValue, key: "knowledge.recallAssessmentReasoning")
+        }
+        configureRecall()
+    }
+
+    func setFastRecallGrading(_ enabled: Bool) {
+        guard let accountID = authentication.activeAccount?.id else { return }
+        fastRecallGrading = enabled
+        var values = preferences.dictionary(forKey: "knowledge.fastRecallGrading") ?? [:]
+        values[accountID] = enabled
+        preferences.set(values, forKey: "knowledge.fastRecallGrading")
+        configureRecall()
+    }
+
+    func setRecallPreparationModel(_ slug: String) {
+        guard models.contains(where: { $0.slug == slug }) else { return }
+        defaultRecallPreparationModel = slug
+        storeDefaultModel(slug, key: "knowledge.recallPreparationModels")
+        if !RecallPreparationReasoning.options(for: slug).contains(recallPreparationReasoning) {
+            recallPreparationReasoning = .automatic
+            storeDefaultModel(recallPreparationReasoning.rawValue, key: "knowledge.recallPreparationReasoning")
+        }
+        configureRecall()
+    }
+
+    func setRecallPreparationReasoning(_ reasoning: RecallPreparationReasoning) {
+        guard RecallPreparationReasoning.options(for: defaultRecallPreparationModel).contains(reasoning) else { return }
+        recallPreparationReasoning = reasoning
+        storeDefaultModel(reasoning.rawValue, key: "knowledge.recallPreparationReasoning")
+        configureRecall()
+    }
+
+    func setRecallAssessmentReasoning(_ reasoning: RecallAssessmentReasoning) {
+        guard RecallAssessmentReasoning.options(for: defaultRecallModel).contains(reasoning) else { return }
+        recallAssessmentReasoning = reasoning
+        storeDefaultModel(reasoning.rawValue, key: "knowledge.recallAssessmentReasoning")
+        configureRecall()
+    }
+
+    private func configureRecall() {
+        recall.configure(preparation: defaultRecallPreparationModel, reasoning: recallPreparationReasoning,
+                         assessment: defaultRecallModel, assessmentReasoning: recallAssessmentReasoning, fastGrading: fastRecallGrading)
     }
 
     private func storeDefaultModel(_ slug: String, key: String) {
@@ -115,6 +190,7 @@ import UIKit
     }
 
     func interruptChats(message: String) {
+        recall.interrupt(message: message)
         for chat in Array(chats.values) + Array(subjectChats.values) { chat.interrupt(message: message) }
     }
 
@@ -175,6 +251,7 @@ import UIKit
         do {
             let job = try repository.job(jobID)
             guard job.status != .saved, job.status != .review else { return }
+            client.resumeRequestsAfterUsageLimit()
             let runner: ImportJobRunner
             if let existing = runners[jobID] { runner = existing }
             else {
@@ -215,6 +292,7 @@ import UIKit
     }
 
     func deleteSubject(subjectID: UUID) throws {
+        recall.deleteSubject(subjectID)
         merges.cancelSubject(subjectID)
         let jobs = try repository.container.mainContext.fetch(
             FetchDescriptor<KnowledgeImportJob>(predicate: #Predicate { $0.subjectID == subjectID }))
@@ -231,15 +309,17 @@ import UIKit
     }
 
     func accountChanged() {
+        recall.accountChanged()
         interruptChats(message: "Your ChatGPT connection changed. Send your request again with the selected account.")
         merges.interrupt()
         pauseAll(message: ImportError.accountChanged.localizedDescription)
         catalogRunID = UUID(); isLoadingModels = false
-        models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; modelError = nil
+        models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; defaultRecallModel = ""; defaultRecallPreparationModel = ""; recallPreparationReasoning = .automatic; recallAssessmentReasoning = .medium; fastRecallGrading = false; modelError = nil
     }
 
     func sceneDidEnterBackground() {
         isForeground = false
+        recall.background()
         for chat in Array(chats.values) + Array(subjectChats.values) { chat.suspend() }
         merges.interrupt()
         for runner in Array(runners.values) { runner.sceneDidEnterBackground() }
@@ -247,10 +327,12 @@ import UIKit
 
     func sceneDidBecomeActive() {
         isForeground = true
+        recall.foreground()
         for chat in Array(chats.values) + Array(subjectChats.values) { chat.resumeQueued() }
     }
 
     func save(_ draft: ImportDraft, jobID: UUID) {
+        client.resumeRequestsAfterUsageLimit()
         do {
             if let editor = draftEditors[jobID], editor.loaded {
                 try editor.persist()

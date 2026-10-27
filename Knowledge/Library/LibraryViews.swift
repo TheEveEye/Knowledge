@@ -134,10 +134,15 @@ private struct LearningMethodView: View {
     let destination: PracticeDestination
 
     var body: some View {
-        Color(uiColor: .systemGroupedBackground)
-            .ignoresSafeArea()
-            .navigationTitle(destination.method.rawValue)
-            .navigationBarTitleDisplayMode(.large)
+        Group {
+            if destination.method == .recall {
+                RecallHomeView(scope: .init(subjectID: destination.subjectID, topicID: destination.topicID))
+            } else {
+                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+            }
+        }
+        .navigationTitle(destination.method.rawValue)
+        .navigationBarTitleDisplayMode(.large)
     }
 }
 
@@ -194,11 +199,14 @@ struct SubjectLibraryView: View {
     }
     private var libraryContent: some View {
         List {
-            Section("Practice") {
-                LearningMethodGrid { method in
-                    onStartPractice(PracticeDestination(method: method, subjectID: subject.id, topicID: nil))
+            if !concepts.isEmpty {
+                Section("Practice") {
+                    LearningMethodGrid { method in
+                        onStartPractice(PracticeDestination(method: method, subjectID: subject.id, topicID: nil))
+                    }
                 }
             }
+            SubjectRecallPreparationSection(subjectID: subject.id)
             let drafts = jobs.filter { $0.status != .saved }
             if !drafts.isEmpty {
                 Section("Draft imports") {
@@ -381,6 +389,7 @@ struct ConceptDetailView: View {
                 Button("View source") { showEvidence(title: concept.name, load: concept.evidence) }
             }
             ConceptTopicSection(concept: concept)
+            ConceptRecallProgressSection(conceptID: concept.id)
             if !resolutionSuggestions.isEmpty {
                 Section("AI-assisted interpretations") {
                     ForEach(Array(resolutionSuggestions.enumerated()), id: \.offset) { _, suggestion in

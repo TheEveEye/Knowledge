@@ -356,6 +356,19 @@ private struct ChatGPTDefaultModelsSection: View {
                         Text(model.displayName).tag(model.slug)
                     }
                 }
+                RecallPreparationModelControls()
+                RecallAssessmentModelControls()
+            }
+            if !imports.models.isEmpty {
+                Toggle("Fast grading (experimental)", isOn: Binding(
+                    get: { imports.fastRecallGrading }, set: { imports.setFastRecallGrading($0) }
+                ))
+                if imports.fastRecallGrading, imports.recall.lastGradingTier == "default" {
+                    Text("The last grading response used standard processing despite requesting Fast.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Requests faster processing for Recall answer checking only. Availability depends on the model and account. May use your plan allowance or credits faster.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if let error = imports.modelError {
                 Text(error).font(.callout).foregroundStyle(.secondary)
@@ -366,7 +379,7 @@ private struct ChatGPTDefaultModelsSection: View {
         } header: {
             Text("Default models")
         } footer: {
-            Text("Saved separately for each account. These defaults apply to new imports and chat requests. You can choose a different model for an individual import.")
+            Text("Saved separately for each account. Recall assessment has its own model and reasoning for answer checking and explanations; question generation has separate settings for design and verification. Changes apply to the next request or preparation run. You can choose a different model for an individual import.")
         }
         .disabled(authentication.isBusy)
     }

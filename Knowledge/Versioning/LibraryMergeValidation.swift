@@ -140,6 +140,7 @@ extension KnowledgeRepository {
                 subject.pendingUndoData = remaining.isEmpty ? nil : try LibraryCoding.encode(remaining)
             }
             try context.save()
+            onSubjectChanged?(subjectID, job?.model)
             return revisionID
         } catch { context.rollback(); throw error }
     }

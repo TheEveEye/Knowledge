@@ -2,7 +2,7 @@ import Foundation
 
 /// A small, typed JSON tree keeps schemas out of untyped networking dictionaries.
 nonisolated indirect enum SchemaValue: Encodable, Sendable {
-    case object([String: SchemaValue]), array([SchemaValue]), string(String), bool(Bool), null
+    case object([String: SchemaValue]), array([SchemaValue]), string(String), integer(Int), bool(Bool), null
 
     func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -10,6 +10,7 @@ nonisolated indirect enum SchemaValue: Encodable, Sendable {
         case .object(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
         case .string(let value): try container.encode(value)
+        case .integer(let value): try container.encode(value)
         case .bool(let value): try container.encode(value)
         case .null: try container.encodeNil()
         }
@@ -21,6 +22,9 @@ nonisolated indirect enum SchemaValue: Encodable, Sendable {
                  "additionalProperties": .bool(false)])
     }
     static func list(_ item: SchemaValue) -> SchemaValue { .object(["type": .string("array"), "items": item]) }
+    static func list(_ item: SchemaValue, minimum: Int, maximum: Int) -> SchemaValue {
+        .object(["type": .string("array"), "items": item, "minItems": .integer(minimum), "maxItems": .integer(maximum)])
+    }
     static var text: SchemaValue { .object(["type": .string("string")]) }
     static var boolean: SchemaValue { .object(["type": .string("boolean")]) }
     static var nullableText: SchemaValue { .object(["type": .array([.string("string"), .string("null")])]) }
@@ -103,6 +107,16 @@ nonisolated struct PlanTextConfiguration: Encodable, Sendable {
     let format: PlanJSONFormat
 }
 
+nonisolated struct PlanReasoningConfiguration: Encodable, Sendable {
+    enum Effort: String, Encodable, Sendable { case low, medium, high, xhigh, max }
+    let effort: Effort
+}
+
+nonisolated enum PlanServiceTier: String, Encodable, Sendable {
+    // Documented alias for Fast mode; keep the UI name separate from the wire value.
+    case fast = "priority"
+}
+
 nonisolated struct PlanResponseRequest: Encodable, Sendable {
     let model: String
     let input: [PlanInputMessage]
@@ -111,6 +125,8 @@ nonisolated struct PlanResponseRequest: Encodable, Sendable {
     var tools: [PlanFunctionTool]? = nil
     var parallel_tool_calls: Bool? = nil
     var include: [String]? = nil
+    var reasoning: PlanReasoningConfiguration? = nil
+    var service_tier: PlanServiceTier? = nil
     let store = false
     let stream = true
 }

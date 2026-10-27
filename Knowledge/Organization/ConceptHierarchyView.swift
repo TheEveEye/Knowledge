@@ -30,6 +30,11 @@ struct ConceptHierarchySection: View {
     @Environment(ImportCoordinator.self) private var imports
     @Query private var topics: [KnowledgeTopic]
     @Query private var placements: [KnowledgeConceptPlacement]
+    @Query private var recallMaterials: [RecallMaterial]
+    @Query private var recallTargets: [RecallTarget]
+    @Query private var learningEvents: [LearningEvent]
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var estimateDate = Date.now
     @AppStorage private var expandedTopicIDs: String
 
     init(subject: KnowledgeSubject, concepts: [KnowledgeConcept], search: String, actions: TopicLibraryActions) {
@@ -38,19 +43,23 @@ struct ConceptHierarchySection: View {
         let id = subject.id
         _topics = Query(filter: #Predicate<KnowledgeTopic> { $0.subjectID == id && !$0.isRetired })
         _placements = Query(filter: #Predicate<KnowledgeConceptPlacement> { $0.subjectID == id })
+        _recallMaterials = Query(filter: #Predicate<RecallMaterial> { $0.subjectID == id })
+        _recallTargets = Query(filter: #Predicate<RecallTarget> { $0.subjectID == id })
+        _learningEvents = Query(filter: #Predicate<LearningEvent> { $0.subjectID == id && ($0.kind == "review" || $0.kind == "undo") })
         _expandedTopicIDs = AppStorage(wrappedValue: "", "knowledge.expandedTopics." + id.uuidString)
     }
 
     var body: some View {
         let index = TopicLibraryIndex(conceptIDs: concepts.map(\.id), topics: topics.map(\.record), placements: placements.map(\.record))
+        let proficiency = proficiencyIndex(for: index)
         Group {
             if !search.trimmed.isEmpty {
-                searchResults(index: index)
+                searchResults(index: index, proficiency: proficiency.index)
             } else if !concepts.isEmpty {
                 if !index.roots.isEmpty {
                     Section("Topics") {
                         ForEach(index.roots) { node in
-                            TopicBranchView(node: node, concepts: concepts, placements: index.placements,
+                            TopicBranchView(node: node, concepts: concepts, placements: index.placements, proficiency: proficiency.index,
                                 expandedIDs: expandedBinding, onMove: { actions.movingConcept = $0 },
                                 onLock: setLocked, onRename: actions.beginRename,
                                 onPractice: { actions.practicingTopic = $0 })
@@ -61,15 +70,36 @@ struct ConceptHierarchySection: View {
                     Section("Unsorted · \(index.unsortedIDs.count)") {
                         ForEach(concepts.filter { index.unsortedIDs.contains($0.id) }) { concept in
                             HierarchyConceptRow(concept: concept, placement: index.placements[concept.id],
+                                proficiency: proficiency.index.concepts[concept.id] ?? .init(),
                                 onMove: { actions.movingConcept = concept }, onLock: { setLocked(concept.id, $0) })
                         }
                     }
                 }
             }
+            if let error = proficiency.error {
+                Section { Text(error).font(.caption).foregroundStyle(.secondary) }
+            }
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            estimateDate = .now
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch { return }
+                estimateDate = .now
+            }
         }
     }
 
-    @ViewBuilder private func searchResults(index: TopicLibraryIndex) -> some View {
+    private func proficiencyIndex(for index: TopicLibraryIndex) -> (index: RecallProficiencyIndex, error: String?) {
+        do {
+            return (try RecallProficiencyIndex(conceptIDs: concepts.map(\.id), roots: index.roots,
+                materials: recallMaterials, targets: recallTargets, events: learningEvents,
+                revisionID: subject.currentRevisionID, now: estimateDate), nil)
+        } catch { return (.init(), "Recall indicators are unavailable: " + error.localizedDescription) }
+    }
+
+    @ViewBuilder private func searchResults(index: TopicLibraryIndex, proficiency: RecallProficiencyIndex) -> some View {
         let query = search.trimmed
         let matches = concepts.filter {
             ($0.name + " " + $0.aliases.joined(separator: " ") + " " + index.path(for: $0.id)).localizedCaseInsensitiveContains(query)
@@ -78,6 +108,7 @@ struct ConceptHierarchySection: View {
             if matches.isEmpty { ContentUnavailableView.search(text: query) }
             ForEach(matches) { concept in
                 HierarchyConceptRow(concept: concept, placement: index.placements[concept.id], path: index.path(for: concept.id),
+                    proficiency: proficiency.concepts[concept.id] ?? .init(),
                     onMove: { actions.movingConcept = concept }, onLock: { setLocked(concept.id, $0) })
             }
         }
@@ -122,6 +153,7 @@ private struct TopicBranchView: View {
     let node: TopicLibraryNode
     let concepts: [KnowledgeConcept]
     let placements: [UUID: ConceptPlacementRecord]
+    let proficiency: RecallProficiencyIndex
     @Binding var expandedIDs: Set<UUID>
     let onMove: (KnowledgeConcept) -> Void
     let onLock: (UUID, Bool) -> Void
@@ -129,16 +161,18 @@ private struct TopicBranchView: View {
     let onPractice: (TopicRecord) -> Void
 
     var body: some View {
+        let estimate = proficiency.topics[node.id] ?? .init()
         DisclosureGroup(isExpanded: Binding(get: { expandedIDs.contains(node.id) }, set: {
             if $0 { expandedIDs.insert(node.id) } else { expandedIDs.remove(node.id) }
         })) {
             ForEach(node.children) { child in
-                TopicBranchView(node: child, concepts: concepts, placements: placements,
+                TopicBranchView(node: child, concepts: concepts, placements: placements, proficiency: proficiency,
                     expandedIDs: $expandedIDs, onMove: onMove, onLock: onLock, onRename: onRename,
                     onPractice: onPractice)
             }
             ForEach(concepts.filter { node.conceptIDs.contains($0.id) }) { concept in
                 HierarchyConceptRow(concept: concept, placement: placements[concept.id],
+                    proficiency: proficiency.concepts[concept.id] ?? .init(),
                     onMove: { onMove(concept) }, onLock: { onLock(concept.id, $0) })
             }
             if node.conceptCount == 0 { Text("No concepts yet").foregroundStyle(.secondary) }
@@ -146,7 +180,12 @@ private struct TopicBranchView: View {
             HStack {
                 Label(node.topic.name, systemImage: "folder")
                 Spacer()
+                ProficiencyRowLabel(proficiency: estimate)
                 Text(node.conceptCount.formatted()).foregroundStyle(.secondary).monospacedDigit()
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button("Practice", systemImage: "brain.head.profile") { onPractice(node.topic) }
+                    .tint(.orange)
             }
             .contextMenu {
                 Button("Practice", systemImage: "brain.head.profile") { onPractice(node.topic) }
@@ -154,11 +193,9 @@ private struct TopicBranchView: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(node.topic.name), \(node.conceptCount) concepts")
+            .accessibilityValue(estimate.accessibilityValue)
         }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("Practice", systemImage: "brain.head.profile") { onPractice(node.topic) }
-                .tint(.orange)
-        }
+        .listRowBackground(ProficiencyRowBackground(value: estimate.value))
     }
 }
 
@@ -166,6 +203,7 @@ private struct HierarchyConceptRow: View {
     let concept: KnowledgeConcept
     let placement: ConceptPlacementRecord?
     var path: String? = nil
+    var proficiency = RecallProficiency()
     let onMove: () -> Void
     let onLock: (Bool) -> Void
     var body: some View {
@@ -176,6 +214,8 @@ private struct HierarchyConceptRow: View {
                     if placement?.isLocked == true {
                         Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Placement locked")
                     }
+                    Spacer(minLength: 8)
+                    ProficiencyRowLabel(proficiency: proficiency)
                 }
                 if let path { Text(path).font(.caption).foregroundStyle(.secondary) }
                 Text(concept.explanation).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
@@ -184,6 +224,8 @@ private struct HierarchyConceptRow: View {
                 }
             }
         }
+        .listRowBackground(ProficiencyRowBackground(value: proficiency.value))
+        .accessibilityValue(proficiency.accessibilityValue)
         .contextMenu {
             Button("Move to topic", systemImage: "folder") { onMove() }
             if let placement {
