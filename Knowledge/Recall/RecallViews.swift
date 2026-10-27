@@ -639,16 +639,20 @@ private struct RecallQuestionLibrary: View {
                     let ids = scoped.0
                     ForEach(targets.filter { target in scoped.1.contains(target.materialID)
                         && materials.contains { $0.id == target.materialID && $0.isPracticeMaterial } }) { target in
-                        questionSection(target)
+                        questionRow(target)
                     }
-                    ForEach(materials.filter { ids.contains($0.conceptID) && $0.issue != nil }) { material in
-                        Section(material.status == "context" ? "Context only" : (material.status == "duplicate" ? "Equivalent knowledge" : "Preparation needs attention")) {
-                            Text(material.issue ?? "Question preparation needs attention.")
-                            if ["context", "duplicate"].contains(material.status) {
-                                Button("Reconsider practice eligibility") { regenerate(material.id) }
-                            } else {
-                                Button("Retry preparation") { regenerate(material.id) }
-                            }
+                    let otherMaterial = materials.filter {
+                        ids.contains($0.conceptID) && (["context", "duplicate", "pending", "blocked", "failed"].contains($0.status) || $0.issue != nil)
+                    }
+                    if !otherMaterial.isEmpty {
+                        Section {
+                            materialGroup("Background information", items: otherMaterial.filter { $0.status == "context" })
+                            materialGroup("Covered by other questions", items: otherMaterial.filter { $0.status == "duplicate" })
+                            materialGroup("Needs attention", items: otherMaterial.filter { !["context", "duplicate"].contains($0.status) })
+                        } header: {
+                            Text("Other saved material")
+                        } footer: {
+                            Text("Some saved material provides background or is covered elsewhere. Expand a group to see the material and why it has no separate question.")
                         }
                     }
                     if targets.isEmpty && materials.isEmpty { Text("Prepare Recall to create questions from your saved facts.").foregroundStyle(.secondary) }
@@ -661,15 +665,106 @@ private struct RecallQuestionLibrary: View {
             .sheet(item: $evidence) { EvidenceView(presentation: $0) }
         }
     }
-    @ViewBuilder private func questionSection(_ target: RecallTarget) -> some View {
+    @ViewBuilder private func materialGroup(_ title: String, items: [RecallMaterial]) -> some View {
+        if !items.isEmpty {
+            DisclosureGroup {
+                ForEach(items) { material in
+                    materialDetails(material)
+                }
+            } label: {
+                HStack {
+                    Text(title)
+                    Spacer()
+                    Text(items.count.formatted()).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func materialDetails(_ material: RecallMaterial) -> some View {
+        switch Result(catching: { try RecallCoding.decode(RecallMaterialSnapshot.self, material.snapshotData) }) {
+        case .success(let snapshot):
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    if material.status == "context" {
+                        Text("Kept as background information rather than a separate practice question.")
+                            .foregroundStyle(.secondary)
+                    } else if material.status == "duplicate" {
+                        Text("This material was identified as covering the same knowledge as another saved item, so it has no separate question.")
+                            .foregroundStyle(.secondary)
+                        if let canonicalID = snapshot.learningPlan?.canonicalMaterialID,
+                           let canonical = materials.first(where: { $0.id == canonicalID && $0.signature == snapshot.learningPlan?.canonicalSignature }),
+                           let covered = try? RecallCoding.decode(RecallMaterialSnapshot.self, canonical.snapshotData) {
+                            Text("Covered by").font(.subheadline.weight(.semibold))
+                            Text(covered.conceptName).font(.caption).foregroundStyle(.secondary)
+                            RecallText(source: covered.statement)
+                            if let target = targets.first(where: { $0.materialID == canonical.id && !$0.isExcluded }),
+                               let question = try? target.question() {
+                                Text("Related question").font(.subheadline.weight(.semibold))
+                                RecallText(source: question.prompt)
+                            }
+                        } else {
+                            Text("The related saved item is no longer available. Try creating a question to review this material again.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text(material.status == "pending" ? "A question has not been prepared for this material yet." : "A question could not be prepared for this material.")
+                            .foregroundStyle(.secondary)
+                    }
+                    if material.status != "duplicate", let issue = material.issue, !issue.trimmed.isEmpty {
+                        Text("Preparation details").font(.subheadline.weight(.semibold))
+                        Text(issue).font(.callout).foregroundStyle(.secondary)
+                    }
+                    Button("View source", systemImage: "doc.text.magnifyingglass") {
+                        showMaterialSource(material, snapshot: snapshot)
+                    }
+                    Button(["context", "duplicate"].contains(material.status) ? "Try creating a question" : "Retry preparation",
+                           systemImage: "arrow.clockwise") { regenerate(material.id) }
+                }
+                .buttonStyle(.borderless)
+                .padding(.vertical, 4)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(snapshot.conceptName).font(.caption).foregroundStyle(.secondary)
+                    RecallText(source: snapshot.statement)
+                }
+            }
+        case .failure:
+            Text("This saved material could not be read. Question preparation needs attention.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func showMaterialSource(_ material: RecallMaterial, snapshot: RecallMaterialSnapshot) {
+        do {
+            try imports.recall.repository.transaction {
+                let exposed = materials.filter {
+                    $0.id == material.id || (material.status == "duplicate"
+                        && $0.id == snapshot.learningPlan?.canonicalMaterialID
+                        && $0.signature == snapshot.learningPlan?.canonicalSignature)
+                }
+                for item in exposed {
+                    var saved = try RecallCoding.decode(RecallMaterialSnapshot.self, item.snapshotData)
+                    saved.disclosedAt = .now
+                    item.snapshotData = try RecallCoding.encode(saved)
+                    if let target = targets.first(where: { $0.materialID == item.id }) {
+                        try imports.recall.repository.recordExposure(target)
+                    }
+                }
+            }
+            evidence = .init(title: snapshot.conceptName, references: snapshot.evidence)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    @ViewBuilder private func questionRow(_ target: RecallTarget) -> some View {
         switch Result(catching: { try target.question() }) {
         case .success(let question):
-            Section {
-                RecallText(source: question.prompt).font(.headline)
-                DisclosureGroup("Expected answer and criteria", isExpanded: exposureBinding(target)) {
-                    RecallText(source: question.expectedAnswer)
-                    ForEach(question.criteria) { Text($0.point) }
-                    Text(question.boundary).font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: exposureBinding(target)) {
+                VStack(alignment: .leading, spacing: 8) {
+                    answerDetails(question)
+                    if !question.boundary.trimmed.isEmpty {
+                        Text(question.boundary).font(.caption).foregroundStyle(.secondary)
+                    }
                     if let notes = question.precisionNotes, !notes.isEmpty {
                         Text("Non-blocking precision notes").font(.subheadline)
                         ForEach(notes) { Text($0.text).font(.caption).foregroundStyle(.secondary) }
@@ -678,41 +773,78 @@ private struct RecallQuestionLibrary: View {
                     if let variants = question.alternatives, !variants.isEmpty {
                         ForEach(Array(variants.enumerated()), id: \.offset) { _, variant in
                             Divider()
-                            RecallText(source: variant.prompt).font(.headline)
-                            RecallText(source: variant.expectedAnswer)
+                            RecallText(source: variant.prompt).font(.subheadline.weight(.semibold))
+                            answerDetails(variant)
                             Text("Answer format: " + variant.answerInput.kind.rawValue).font(.caption)
                         }
                     }
                 }
-                if let issue = target.issue { Text(issue).foregroundStyle(.secondary) }
-                Button("View source") {
+                .padding(.vertical, 4)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    RecallText(source: question.prompt).font(.body.weight(.medium))
+                    if target.isExcluded {
+                        Label("Excluded from practice", systemImage: "pause.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let issue = target.issue { Text(issue).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                Button("View source", systemImage: "doc.text.magnifyingglass") {
                     do {
                         try imports.recall.repository.transaction { try imports.recall.repository.recordExposure(question, anchor: target) }
                         evidence = .init(title: "Recall source", references: question.sourceEvidence)
                     } catch { self.error = error.localizedDescription }
                 }
-                Button(target.isExcluded ? "Restore question" : "Exclude from practice") {
+                .tint(.blue)
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button(target.isExcluded ? "Restore" : "Exclude", systemImage: target.isExcluded ? "arrow.uturn.backward" : "pause.circle") {
                     do { try imports.recall.repository.transaction { target.isExcluded.toggle(); target.issue = nil } }
                     catch { self.error = error.localizedDescription }
                 }
-                Button("Regenerate from saved material") { regenerate(target.materialID) }
+                .tint(target.isExcluded ? .green : .orange)
+                Button("Regenerate", systemImage: "arrow.clockwise") { regenerate(target.materialID) }
+                    .tint(.indigo)
             }
         case .failure(let failure): Text(failure.localizedDescription)
         }
     }
+    private func answerDetails(_ question: RecallQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Expected answer").font(.subheadline.weight(.semibold))
+            RecallText(source: question.expectedAnswer)
+            if question.criteria.count > 1 {
+                Text("What your answer should cover")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.top, 4)
+                ForEach(question.criteria) { criterion in
+                    Label {
+                        RecallText(source: criterion.point)
+                    } icon: {
+                        Image(systemName: "circle").foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
     @State private var expandedAnswers: Set<UUID> = []
     private func exposureBinding(_ target: RecallTarget) -> Binding<Bool> {
         Binding(get: { expandedAnswers.contains(target.id) }, set: { expanded in
-            if expanded {
-                do {
-                    try imports.recall.repository.transaction {
-                        let question = try target.question()
-                        try imports.recall.repository.recordExposure(question, anchor: target)
-                        for variant in question.alternatives ?? [] { try imports.recall.repository.recordExposure(variant, anchor: target) }
-                    }
-                    expandedAnswers.insert(target.id)
-                } catch { self.error = error.localizedDescription }
-            } else { expandedAnswers.remove(target.id) }
+            withAnimation(.default) {
+                if expanded {
+                    do {
+                        try imports.recall.repository.transaction {
+                            let question = try target.question()
+                            try imports.recall.repository.recordExposure(question, anchor: target)
+                            for variant in question.alternatives ?? [] { try imports.recall.repository.recordExposure(variant, anchor: target) }
+                        }
+                        expandedAnswers.insert(target.id)
+                    } catch { self.error = error.localizedDescription }
+                } else { expandedAnswers.remove(target.id) }
+            }
         })
     }
     private func regenerate(_ materialID: String) {
