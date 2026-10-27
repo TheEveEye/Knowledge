@@ -208,6 +208,12 @@ import FSRS
         generation = UUID(); task?.cancel(); task = nil; isRequesting = false; error = message
     }
 
+    func learningProgressDidReset() {
+        generation = UUID(); task?.cancel(); task = nil
+        isRequesting = false; usageLimited = false; error = nil
+        state = RecallSessionState(queue: [], episode: nil)
+    }
+
     @discardableResult func revealSource() -> Bool {
         recordDiagnostic("source_view_requested")
         guard let episode = state.episode, episode.phase == "feedback" else { return false }

@@ -39,6 +39,21 @@ import SwiftData
         try libraryMutation(subjectID: id, title: "Renamed subject") { subject.name = name }
     }
 
+    /// Subject-wide entry point for every learning method, separate from library revisions.
+    func resetLearningProgress(_ subjectID: UUID) throws {
+        let recall = RecallRepository(container: container)
+        _ = try recall.subject(subjectID)
+        try recall.transaction {
+            try recall.resetLearningProgress(subjectID)
+            // LearningEvent is shared by all methods: never filter this reset by method.
+            for event in try container.mainContext.fetch(FetchDescriptor<LearningEvent>(
+                predicate: #Predicate { $0.subjectID == subjectID })) {
+                container.mainContext.delete(event)
+            }
+            // Additional learning methods reset their persisted state in this transaction.
+        }
+    }
+
     @discardableResult func deleteSubject(_ id: UUID, sourceDirectory: URL? = nil) throws -> String? {
         let context = container.mainContext
         guard let subject = try context.fetch(FetchDescriptor<KnowledgeSubject>(predicate: #Predicate { $0.id == id })).first else {

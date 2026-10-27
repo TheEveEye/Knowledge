@@ -313,20 +313,24 @@ nonisolated struct RecallRepairStatus {
         interrupt(message: "Your ChatGPT connection changed. Your answers were kept; retry with the selected account.")
         preparationModel = ""; preparationReasoning = .automatic; assessmentModel = ""; assessmentReasoning = .medium
     }
-    func deleteSubject(_ id: UUID) {
-        stopSubject(id, message: "This subject was deleted.")
+    func pauseForLearningProgressReset(_ id: UUID) {
+        if tasks[id] != nil { pausePreparation(id) }
+        for controller in sessions.values where controller.scope.subjectID == id {
+            controller.interrupt(message: "Learning progress is being reset.")
+        }
     }
 
-    /// Temporary iteration tool. Library content and AI model preferences are
-    /// outside Recall storage and are never deleted by this operation.
-    func resetSubject(_ id: UUID) throws {
-        AIRequestLog.shared.record("recall_subject_reset")
-        _ = try repository.subject(id)
-        stopSubject(id, message: "Recall was reset for this subject.")
-        try repository.transaction { try repository.deleteSubject(id) }
-        // Recreate only the pending fact snapshots. Preparation remains explicit.
-        try repository.synchronize(id)
+    func learningProgressDidReset(_ id: UUID) {
+        for controller in sessions.values where controller.scope.subjectID == id {
+            controller.learningProgressDidReset()
+        }
+        sessions = sessions.filter { $0.value.scope.subjectID != id }
+        repairs[id] = nil
         notice = nil
+    }
+
+    func deleteSubject(_ id: UUID) {
+        stopSubject(id, message: "This subject was deleted.")
     }
 
     private func stopSubject(_ id: UUID, message: String) {

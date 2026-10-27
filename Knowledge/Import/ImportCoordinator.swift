@@ -338,6 +338,12 @@ import UIKit
         if let cleanupMessage { message = cleanupMessage }
     }
 
+    func resetLearningProgress(subjectID: UUID) throws {
+        recall.pauseForLearningProgressReset(subjectID)
+        try repository.resetLearningProgress(subjectID)
+        recall.learningProgressDidReset(subjectID)
+    }
+
     func deleteSubject(subjectID: UUID) throws {
         recall.deleteSubject(subjectID)
         merges.cancelSubject(subjectID)

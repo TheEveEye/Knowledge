@@ -310,6 +310,8 @@ struct SubjectSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var error: String?
+    @State private var showResetConfirmation = false
+    @State private var didResetProgress = false
     @State private var showDeleteConfirmation = false
 
     init(subject: KnowledgeSubject) {
@@ -330,7 +332,13 @@ struct SubjectSettingsView: View {
                         .onSubmit(save)
                 } header: { Text("Subject name") }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
+                if didResetProgress {
+                    Section { Label("Learning progress reset", systemImage: "checkmark.circle") }
+                }
                 Section {
+                    Button("Reset learning progress", systemImage: "arrow.counterclockwise", role: .destructive) {
+                        showResetConfirmation = true
+                    }
                     Button("Delete subject", systemImage: "trash", role: .destructive) { showDeleteConfirmation = true }
                 }
             }
@@ -344,6 +352,12 @@ struct SubjectSettingsView: View {
             }
         }
         .interactiveDismissDisabled(name != originalName)
+        .alert("Reset learning progress?", isPresented: $showResetConfirmation) {
+            Button("Reset learning progress", role: .destructive, action: resetLearningProgress)
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This permanently clears learning progress, review schedules, answers and session history for “\(originalName)” across all topics and learning methods. Your notes, sources and prepared questions are kept. This can’t be undone.")
+        }
         .alert("Delete subject?", isPresented: $showDeleteConfirmation) {
             Button("Delete subject", role: .destructive, action: delete)
             Button("Cancel", role: .cancel) { }
@@ -356,6 +370,16 @@ struct SubjectSettingsView: View {
         guard canSave else { return }
         do { try imports.repository.renameSubject(subjectID, name: name); dismiss() }
         catch { self.error = error.localizedDescription }
+    }
+
+    private func resetLearningProgress() {
+        do {
+            try imports.resetLearningProgress(subjectID: subjectID)
+            error = nil; didResetProgress = true
+        } catch {
+            didResetProgress = false
+            self.error = "Learning progress could not be reset: \(error.localizedDescription)"
+        }
     }
 
     private func delete() {

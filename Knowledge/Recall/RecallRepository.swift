@@ -583,6 +583,35 @@ import SwiftData
         context.insert(event)
     }
 
+    /// Clears learner state while retaining question designs, source issues and exclusions.
+    /// The subject repository owns the transaction and shared learning-event deletion.
+    func resetLearningProgress(_ subjectID: UUID) throws {
+        for target in try targets(subjectID) {
+            target.questionData = try RecallCoding.encode(Self.clearingExposure(try target.question()))
+            target.memoryData = nil; target.dueAt = nil
+            target.assessedAt = nil; target.exposedAt = nil
+        }
+        for material in try materials(subjectID) {
+            var snapshot = try RecallCoding.decode(RecallMaterialSnapshot.self, material.snapshotData)
+            snapshot.disclosedAt = nil
+            material.snapshotData = try RecallCoding.encode(snapshot)
+        }
+        for session in try context.fetch(FetchDescriptor<RecallSessionRecord>(
+            predicate: #Predicate { $0.subjectID == subjectID })) {
+            context.delete(session)
+        }
+    }
+
+    private static func clearingExposure(_ original: RecallQuestion) -> RecallQuestion {
+        var question = original
+        question.material.disclosedAt = nil
+        question.supportingMaterials = question.supportingMaterials?.map { original in
+            var snapshot = original; snapshot.disclosedAt = nil; return snapshot
+        }
+        question.alternatives = question.alternatives?.map { clearingExposure($0) }
+        return question
+    }
+
     func deleteSubject(_ subjectID: UUID) throws {
         for item in try context.fetch(FetchDescriptor<RecallPreparation>(predicate: #Predicate { $0.subjectID == subjectID })) { context.delete(item) }
         for item in try materials(subjectID) { context.delete(item) }
