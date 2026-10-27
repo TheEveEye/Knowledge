@@ -338,48 +338,42 @@ private struct ChatGPTDefaultModelsSection: View {
 
     var body: some View {
         Section {
-            if imports.isLoadingModels {
-                ImportActivityLabel(title: "Loading your models…")
-            }
-            if !imports.models.isEmpty {
-                Picker("Importing", selection: Binding(
-                    get: { imports.defaultImportModel }, set: { imports.setDefaultImportModel($0) }
-                )) {
-                    ForEach(imports.models) { model in
-                        Text(model.displayName).tag(model.slug)
+            Toggle("Use default models", isOn: Binding(
+                get: { imports.useDefaultModels }, set: { imports.setUseDefaultModels($0) }
+            ))
+            .disabled(imports.isLoadingModels)
+            Group {
+                if imports.isLoadingModels {
+                    ImportActivityLabel(title: "Loading your models…")
+                }
+                if !imports.models.isEmpty {
+                    Picker("Importing", selection: Binding(
+                        get: { imports.defaultImportModel }, set: { imports.setDefaultImportModel($0) }
+                    )) {
+                        ForEach(imports.models) { model in
+                            Text(model.displayName).tag(model.slug)
+                        }
                     }
-                }
-                Picker("Chat", selection: Binding(
-                    get: { imports.defaultChatModel }, set: { imports.setDefaultChatModel($0) }
-                )) {
-                    ForEach(imports.models) { model in
-                        Text(model.displayName).tag(model.slug)
+                    Picker("Chat", selection: Binding(
+                        get: { imports.defaultChatModel }, set: { imports.setDefaultChatModel($0) }
+                    )) {
+                        ForEach(imports.models) { model in
+                            Text(model.displayName).tag(model.slug)
+                        }
                     }
+                    RecallPreparationModelControls()
+                    RecallAssessmentModelControls()
                 }
-                RecallPreparationModelControls()
-                RecallAssessmentModelControls()
-            }
-            if !imports.models.isEmpty {
-                Toggle("Fast grading (experimental)", isOn: Binding(
-                    get: { imports.fastRecallGrading }, set: { imports.setFastRecallGrading($0) }
-                ))
-                if imports.fastRecallGrading, imports.recall.lastGradingTier == "default" {
-                    Text("The last grading response used standard processing despite requesting Fast.")
-                        .font(.caption).foregroundStyle(.secondary)
+                if let error = imports.modelError {
+                    Text(error).font(.callout).foregroundStyle(.secondary)
                 }
-                Text("Requests faster processing for Recall answer checking only. Availability depends on the model and account. May use your plan allowance or credits faster.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if !imports.isLoadingModels {
+                    Button("Reload models") { Task { await imports.loadModels() } }
+                }
             }
-            if let error = imports.modelError {
-                Text(error).font(.callout).foregroundStyle(.secondary)
-            }
-            if !imports.isLoadingModels {
-                Button("Reload models") { Task { await imports.loadModels() } }
-            }
+            .disabled(imports.useDefaultModels)
         } header: {
             Text("Default models")
-        } footer: {
-            Text("Saved separately for each account. Recall assessment has its own model and reasoning for answer checking and explanations; question generation has separate settings for design and verification. Changes apply to the next request or preparation run. You can choose a different model for an individual import.")
         }
         .disabled(authentication.isBusy)
     }

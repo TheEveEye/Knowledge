@@ -112,11 +112,6 @@ nonisolated struct PlanReasoningConfiguration: Encodable, Sendable {
     let effort: Effort
 }
 
-nonisolated enum PlanServiceTier: String, Encodable, Sendable {
-    // Documented alias for Fast mode; keep the UI name separate from the wire value.
-    case fast = "priority"
-}
-
 nonisolated struct PlanResponseRequest: Encodable, Sendable {
     let model: String
     let input: [PlanInputMessage]
@@ -126,7 +121,6 @@ nonisolated struct PlanResponseRequest: Encodable, Sendable {
     var parallel_tool_calls: Bool? = nil
     var include: [String]? = nil
     var reasoning: PlanReasoningConfiguration? = nil
-    var service_tier: PlanServiceTier? = nil
     let store = false
     let stream = true
 }

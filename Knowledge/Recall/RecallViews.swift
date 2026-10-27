@@ -501,9 +501,6 @@ private struct RecallSessionContent: View {
                 }
             }
         }
-        if ["priority", "fast"].contains(assessment?.requestedServiceTier ?? ""), assessment?.servedServiceTier == "default" {
-            Section { Text("Fast processing was requested, but OpenAI used standard processing for this answer.").font(.caption).foregroundStyle(.secondary) }
-        }
         Section {
             Button("Next question", systemImage: "arrow.right") { controller.next() }
             Button("Explain more", systemImage: "text.bubble") { controller.explainMore() }

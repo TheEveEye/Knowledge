@@ -56,7 +56,6 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     var errorType: String? = nil
     var retryExhausted = false
     var parameter: String? = nil
-    var requestedServiceTier: String? = nil
     var isUsageLimit: Bool {
         ["subscription_sharing_usage_limit_exceeded", "insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached"].contains(code ?? "")
             || errorType == "insufficient_quota"
@@ -67,12 +66,6 @@ nonisolated struct PlanUsageError: Error, LocalizedError, Equatable {
     }
 
     var errorDescription: String? {
-        if parameter == "service_tier", !isUsageLimit, !isTemporaryServiceLimit {
-            return "OpenAI did not accept Fast grading for this model or account. Turn off Fast grading in account settings, then retry. Your answer was kept."
-        }
-        if ["fast", "priority"].contains(requestedServiceTier ?? ""), status == 400 || status == 422 {
-            return "OpenAI rejected the grading request with Fast grading enabled. Turn off Fast grading in account settings and retry. Your answer was kept."
-        }
         if code == "subscription_sharing_usage_limit_exceeded" {
             return "A ChatGPT usage limit was reached. Review your plan and Knowledge’s limit in Manage usage."
         }
@@ -203,7 +196,6 @@ extension ChatGPTPlanRequesting {
         if recordsRecall { RecallDiagnostics.shared.request(payload, id: id) }
         log.record("request_begin", (RecallDiagnostics.isGeneration(purpose) ? RecallDiagnosticScope.fields : [:]).merging([
             "request_id": id, "model": payload.model, "purpose": purpose ?? "chat",
-            "requested_service_tier": payload.service_tier?.rawValue ?? "auto",
             "reasoning_effort": payload.reasoning?.effort.rawValue ?? "provider_default"
         ]) { _, new in new })
         do {
@@ -269,7 +261,6 @@ extension ChatGPTPlanRequesting {
                 queue.succeeded(permit)
                 return receipt
             } catch var error as PlanUsageError {
-                error.requestedServiceTier = payload.service_tier?.rawValue
                 queue.failed(error, permit: permit, attempt: attempt)
                 AIRequestLog.shared.record("attempt_failed", AIRequestLog.errorFields(error).merging([
                     "request_id": requestID, "attempt_id": permit.id.uuidString, "stream_started": String(streamStarted)]) { _, new in new })

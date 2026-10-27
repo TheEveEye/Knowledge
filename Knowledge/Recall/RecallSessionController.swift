@@ -116,7 +116,6 @@ import FSRS
             _ = try repository.valid(episode, scope: scope)
             let account = try owner.account(), model = owner.assessmentModel
             let reasoning = owner.assessmentReasoning
-            let gradingTier: PlanServiceTier? = owner.fastGrading ? .fast : nil
             guard !model.isEmpty else { throw RecallError.invalid("Choose a Recall assessment model in account settings to assess answers.") }
             let run = UUID(); generation = run; isRequesting = true; error = nil; usageLimited = false
             task = Task { [weak self] in
@@ -144,14 +143,13 @@ import FSRS
                             "operation": reconsider ? "reconsider" : "assess", "assessment_reasoning": reasoning.rawValue]
                         let assessment = try await RecallDiagnosticScope.$fields.withValue(context) {
                             try await self.owner.ai.assess(episode, model: model, reconsider: reconsider,
-                                reasoningSetting: reasoning, serviceTier: gradingTier, additionalCandidates: candidates,
+                                reasoningSetting: reasoning, additionalCandidates: candidates,
                                 supportingContext: try self.repository.terminologyContext(subjectID: self.scope.subjectID,
                                     question: episode.question, answer: episode.turns.map(\.answer).joined(separator: " ")),
                                 disputeHistory: try self.repository.disputeHistory(sessionID: self.sessionID, episode: episode,
                                     scope: episode.reconsiderationScope ?? .initial), accessToken: accessToken)
                         }
                         try self.finishCheck(run, account: account, episode: episode)
-                        self.owner.reportGradingTier(assessment.servedServiceTier)
                         var reconciledIDs: [String] = []
                         let applied = self.change { updated in
                             guard var current = updated.episode else { return }

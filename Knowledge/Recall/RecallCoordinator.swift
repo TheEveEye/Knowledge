@@ -28,9 +28,6 @@ nonisolated struct RecallRepairStatus {
     private(set) var preparationReasoning = RecallPreparationReasoning.automatic
     private(set) var assessmentModel = ""
     private(set) var assessmentReasoning = RecallAssessmentReasoning.medium
-    private(set) var fastGrading = false
-    private(set) var lastGradingTier: String?
-    func reportGradingTier(_ tier: String?) { lastGradingTier = tier }
     private(set) var isForeground = true
     private(set) var notice: String?
     @ObservationIgnored private let authentication: AuthenticationStore
@@ -67,8 +64,8 @@ nonisolated struct RecallRepairStatus {
         return token
     }
 
-    func configure(preparation: String, reasoning: RecallPreparationReasoning = .automatic, assessment: String, assessmentReasoning: RecallAssessmentReasoning = .medium, fastGrading: Bool = false) {
-        preparationModel = preparation; preparationReasoning = reasoning; assessmentModel = assessment; self.assessmentReasoning = assessmentReasoning; self.fastGrading = fastGrading
+    func configure(preparation: String, reasoning: RecallPreparationReasoning = .automatic, assessment: String, assessmentReasoning: RecallAssessmentReasoning = .medium) {
+        preparationModel = preparation; preparationReasoning = reasoning; assessmentModel = assessment; self.assessmentReasoning = assessmentReasoning
         resumePreparation()
     }
 
@@ -314,7 +311,7 @@ nonisolated struct RecallRepairStatus {
     func foreground() { isForeground = true; resumePreparation() }
     func accountChanged() {
         interrupt(message: "Your ChatGPT connection changed. Your answers were kept; retry with the selected account.")
-        preparationModel = ""; preparationReasoning = .automatic; assessmentModel = ""; assessmentReasoning = .medium; fastGrading = false; lastGradingTier = nil
+        preparationModel = ""; preparationReasoning = .automatic; assessmentModel = ""; assessmentReasoning = .medium
     }
     func deleteSubject(_ id: UUID) {
         stopSubject(id, message: "This subject was deleted.")

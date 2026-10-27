@@ -62,14 +62,14 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
 
     func request<Input: Encodable, Output: Decodable>(_ input: Input, model: String, name: String,
         schema: SchemaValue, instructions: String, reasoning: PlanReasoningConfiguration? = nil,
-        serviceTier: PlanServiceTier? = nil, accessToken: @MainActor () async throws -> String) async throws -> (Output, PlanResponseReceipt) {
+        accessToken: @MainActor () async throws -> String) async throws -> (Output, PlanResponseReceipt) {
         let data = try RecallCoding.encode(input)
         guard data.count <= 90_000 else { throw RecallError.invalid("This learning target is too large to assess safely. Report the question to prepare a smaller target.") }
         let token = try await accessToken()
         try Task.checkCancellation()
         let receipt = try await client.response(.init(model: model,
             input: [.init(role: "user", content: String(decoding: data, as: UTF8.self))], instructions: instructions,
-            text: .init(format: .init(name: name, schema: schema)), reasoning: reasoning, service_tier: serviceTier), accessToken: token, onDelta: { _ in })
+            text: .init(format: .init(name: name, schema: schema)), reasoning: reasoning), accessToken: token, onDelta: { _ in })
         try Task.checkCancellation()
         guard let text = receipt.text, text.utf8.count <= 100_000 else { throw PlanUsageError(kind: .invalidResponse) }
         let output: Output
@@ -86,7 +86,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
     }
 
     func assess(_ episode: RecallEpisode, model: String, reconsider: Bool,
-                reasoningSetting: RecallAssessmentReasoning = .automatic, serviceTier: PlanServiceTier? = nil,
+                reasoningSetting: RecallAssessmentReasoning = .automatic,
                 additionalCandidates: [RecallAdditionalCandidate] = [], supportingContext: [RecallTerminologyContext] = [],
                 disputeHistory: [String] = [], accessToken: @MainActor () async throws -> String) async throws -> RecallAssessment {
         // Reassess the learner's evidence, not the tutor's earlier verdicts.
@@ -180,7 +180,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
             let (result, receipt): (RecallJudgment, PlanResponseReceipt) = try await request(input, model: model,
                 name: "knowledge_recall_assessment_v1", schema: schema, instructions: Self.assessmentInstructions,
                 reasoning: assessmentReasoning(model: model, setting: reasoningSetting,
-                    effort: needsMoreReasoning ? .medium : .low), serviceTier: serviceTier, accessToken: accessToken)
+                    effort: needsMoreReasoning ? .medium : .low), accessToken: accessToken)
             let met = ids.filter { result.criteria[$0] == .met }
             let missing = ids.filter { result.criteria[$0] != .met }
             let partial = ids.filter { result.criteria[$0] == .partial }
@@ -357,7 +357,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
                 let outcome: RecallOutcome = unresolvedAmbiguity && followUp == nil ? .uncertain : result.outcome
                 let credits = !unresolvedAmbiguity && (sourceConcern == nil || canCreditOtherTargets)
                     ? try await confirmExtras(proposedExtras, candidates: byKey, episode: episode,
-                        model: model, reasoningSetting: reasoningSetting, serviceTier: serviceTier, accessToken: accessToken) : []
+                        model: model, reasoningSetting: reasoningSetting, accessToken: accessToken) : []
                 if unresolvedAmbiguity {
                     RecallDiagnostics.shared.record("learner_ambiguity", ["criterion_ids": RecallDiagnostics.json(result.ambiguousIDs),
                         "readings": RecallDiagnostics.json(result.ambiguities), "clarification": followUp ?? "unresolved_no_penalty"])
@@ -373,7 +373,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
                     sourceConcern: nil, model: model, policyVersion: RecallScheduler.policyVersion,
                     responseID: receipt.responseID, assessedAt: .now,
                     additionalRecall: credits, partialCriterionIDs: partial, followUpCriterionID: followUp == nil ? nil : result.followUp?.criterionID,
-                    requestedServiceTier: serviceTier?.rawValue, servedServiceTier: receipt.serviceTier, creditRetractions: result.creditRetractions, interpretedAnswer: result.interpretedAnswer.trimmed, followUpInput: followUp == nil ? nil : result.followUp?.input, criterionDecisions: result.decisions, followUpInterpretations: followUp == nil ? nil : result.followUp?.interpretations,
+                    servedServiceTier: receipt.serviceTier, creditRetractions: result.creditRetractions, interpretedAnswer: result.interpretedAnswer.trimmed, followUpInput: followUp == nil ? nil : result.followUp?.input, criterionDecisions: result.decisions, followUpInterpretations: followUp == nil ? nil : result.followUp?.interpretations,
                     canCreditOtherTargets: canCreditOtherTargets, reportedQuestionIssue: sourceConcern,
                     ambiguousCriterionIDs: result.ambiguousIDs)
             }
@@ -402,7 +402,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
     /// Rare optional awards get a small independent review. A failed confirmation drops
     /// only the extras: it cannot discard a completed primary assessment or trigger retries.
     private func confirmExtras(_ proposed: [String: RecallExtraDecision], candidates: [String: RecallAdditionalCandidate],
-                               episode: RecallEpisode, model: String, reasoningSetting: RecallAssessmentReasoning, serviceTier: PlanServiceTier?,
+                               episode: RecallEpisode, model: String, reasoningSetting: RecallAssessmentReasoning,
                                accessToken: @MainActor () async throws -> String) async throws -> [RecallAdditionalCredit] {
         guard !proposed.isEmpty, let first = episode.turns.first,
               first.kind == .initial, first.input?.isRecognition != true,
@@ -429,7 +429,7 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
                 candidate knowledge. No unspoken inferences, hints, quantities repaired for the learner or invented
                 quotes. met requires completionTurn=0, missingMeaning=null and 1–3 verbatim FIRST-answer quotes;
                 partial/missing require completionTurn=null and a substantive gap. Prefer no award when unsure.
-                """, reasoning: assessmentReasoning(model: model, setting: reasoningSetting, effort: .medium), serviceTier: serviceTier, accessToken: accessToken)
+                """, reasoning: assessmentReasoning(model: model, setting: reasoningSetting, effort: .medium), accessToken: accessToken)
             var credits: [RecallAdditionalCredit] = []
             for key in keys {
                 guard let candidate = candidates[key], let decision = output.confirmations[key],

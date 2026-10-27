@@ -64,7 +64,6 @@ nonisolated private struct AIRequestLogEntry: Encodable, Sendable {
             var fields = ["error_kind": error.kind.rawValue, "http_status": error.status.map(String.init) ?? "none",
                 "error_code": error.code ?? "none", "error_type": error.errorType ?? "none",
                 "server_request_id": error.requestID ?? "none", "server_parameter": error.parameter ?? "none",
-                "requested_service_tier": error.requestedServiceTier ?? "unreported",
                 "temporary_limit": String(error.isTemporaryServiceLimit), "usage_limit": String(error.isUsageLimit),
                 "retry_exhausted": String(error.retryExhausted)]
             if let date = error.retryAt { fields["retry_at"] = date.ISO8601Format() }
