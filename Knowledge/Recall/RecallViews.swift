@@ -6,6 +6,10 @@ nonisolated private struct RecallSessionDestination: Hashable {
     let scope: RecallScope
 }
 
+private enum RecallOptionsDestination: Hashable {
+    case history, preparation, troubleshooting
+}
+
 struct RecallHomeView: View {
     let scope: RecallScope
     @Environment(ImportCoordinator.self) private var imports
@@ -17,7 +21,7 @@ struct RecallHomeView: View {
     @State private var selectedSessionScope: RecallScope?
     @State private var showsQuestions = false
     @State private var error: String?
-    @State private var confirmsRecallReset = false
+    @State private var showsAccount = false
     @State private var confirmsRepair = false
     @State private var now = Date.now
     @Environment(\.scenePhase) private var scenePhase
@@ -48,55 +52,48 @@ struct RecallHomeView: View {
                     Button("Dismiss message") { imports.recall.clearNotice() }
                 }
             }
-            Section {
-                RecallPreparationModelControls()
-            } header: { Text("Question generation settings") } footer: {
-                Text("Saved for this account. Applies to planning, generation and verification, including retries and bank updates. Changes apply to the next preparation run. Higher reasoning may take longer and use more allowance.")
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu("Recall options", systemImage: "ellipsis") {
+                    Button("Questions and sources", systemImage: "list.bullet.rectangle") { showsQuestions = true }
+                    NavigationLink("Session history", value: RecallOptionsDestination.history)
+                    NavigationLink("Question preparation", value: RecallOptionsDestination.preparation)
+                    Button("Model settings", systemImage: "slider.horizontal.3") { showsAccount = true }
+                    NavigationLink("Troubleshooting", value: RecallOptionsDestination.troubleshooting)
+                }
             }
-            Section {
-                RecallAssessmentModelControls()
-            } header: { Text("Assessment settings") }
-            RecallGenerationDiagnosticsSection(subjectID: scope.subjectID,
-                isPreparing: preparations.first?.status == "preparing",
-                hasUnprepared: materials.contains { ["pending", "blocked", "failed"].contains($0.status) })
-            RecallDiagnosticsSection()
-            AIRequestLogSection()
-            #if DEBUG
-            Section {
-                if let repair = imports.recall.repairs[scope.subjectID] {
-                    Text("\(repair.completed) repaired · \(repair.failed) failed · \(repair.skipped) skipped of \(repair.total)")
-                    if let message = repair.message { Text(message).font(.footnote).foregroundStyle(.secondary) }
-                    if repair.isRunning {
-                        ProgressView()
-                        Button("Cancel repair") { imports.recall.pausePreparation(scope.subjectID) }
+        }
+        .navigationDestination(for: RecallOptionsDestination.self) { destination in
+            switch destination {
+            case .history:
+                List { sessionHistory }
+                    .navigationTitle("Session history")
+            case .preparation:
+                List {
+                    switch Result(catching: { try imports.recall.repository.overview(scope, now: now) }) {
+                    case .success(let overview): preparationSection(overview, detailed: true)
+                    case .failure(let failure): Text(failure.localizedDescription).foregroundStyle(.red)
                     }
+                    if let notice = imports.recall.notice { Text(notice).foregroundStyle(.secondary) }
                 }
-                Button("Repair existing questions", systemImage: "wrench.and.screwdriver") { confirmsRepair = true }
-                    .disabled(imports.recall.repairs[scope.subjectID]?.isRunning == true)
-                Button("Reset Recall for this subject", systemImage: "arrow.counterclockwise", role: .destructive) {
-                    confirmsRecallReset = true
+                .navigationTitle("Question preparation")
+                .confirmationDialog("Update questions for the entire subject?", isPresented: $confirmsRepair, titleVisibility: .visible) {
+                    Button("Update question bank") { imports.recall.repairQuestions(scope.subjectID) }
+                } message: {
+                    Text("Updates outdated or excluded questions across this subject, including its other topics. Progress and history are kept. Questions in saved sessions are skipped.")
                 }
-            } header: {
-                Text("Temporary tools")
-            } footer: {
-                Text("Clears all Recall questions, progress and sessions for the entire subject, including its other topics. Notes and library content are kept.")
+            case .troubleshooting:
+                List {
+                    AIRequestLogSection()
+                    #if DEBUG
+                    RecallGenerationDiagnosticsSection(subjectID: scope.subjectID,
+                        isPreparing: preparations.first?.status == "preparing")
+                    RecallDiagnosticsSection()
+                    #endif
+                }
+                .navigationTitle("Troubleshooting")
             }
-            #endif
-        }
-        .confirmationDialog("Update the question bank?", isPresented: $confirmsRepair, titleVisibility: .visible) {
-            Button("Repair questions") { imports.recall.repairQuestions(scope.subjectID) }
-        } message: {
-            Text("Uses the selected preparation model to design questions across concepts, facts and supported connections. Progress and history stay saved. Open-session targets are skipped. Each question is verified before saving.")
-        }
-        .confirmationDialog("Reset all Recall data for this subject?", isPresented: $confirmsRecallReset, titleVisibility: .visible) {
-            Button("Reset Recall", role: .destructive) {
-                do {
-                    try imports.recall.resetSubject(scope.subjectID)
-                    sessionID = nil; selectedSessionScope = nil; error = nil; now = .now
-                } catch { self.error = error.localizedDescription }
-            }
-        } message: {
-            Text("This removes prepared questions, review progress, answers and sessions for the entire subject. Your notes stay saved. Tap Prepare Recall afterwards to generate fresh questions.")
         }
         .navigationDestination(item: $sessionID) { id in
             RecallSessionScreen(sessionID: id, scope: selectedSessionScope ?? scope)
@@ -105,6 +102,7 @@ struct RecallHomeView: View {
             RecallSessionScreen(sessionID: destination.sessionID, scope: destination.scope)
         }
         .sheet(isPresented: $showsQuestions) { RecallQuestionLibrary(scope: scope) }
+        .sheet(isPresented: $showsAccount) { ChatGPTAccountView() }
         .task {
             now = .now
             do { try imports.recall.repository.synchronize(scope.subjectID) }
@@ -126,11 +124,6 @@ struct RecallHomeView: View {
         Section {
             if let resumable = sessions.first(where: { !$0.isFinished && $0.topicID == scope.topicID }) {
                 Button("Resume session", systemImage: "play.fill") { selectedSessionScope = scope; sessionID = resumable.id }
-                Button("Finish this session", systemImage: "checkmark") {
-                    do {
-                        try imports.recall.finishSession(resumable.id)
-                    } catch { self.error = error.localizedDescription }
-                }
             } else {
                 Button("Start Recall", systemImage: "brain.head.profile") {
                     do { selectedSessionScope = scope; sessionID = try imports.recall.repository.newSession(scope) }
@@ -141,49 +134,107 @@ struct RecallHomeView: View {
         } footer: {
             Text("Up to 10 questions including retries, with at most 3 new targets. You can leave and resume at any time.")
         }
-        ForEach(sessions.filter { !$0.isFinished && $0.topicID != scope.topicID }) { session in
+        if overview.prepared == 0 || needsPreparationAttention || preparations.first?.status == "preparing" {
+            preparationSection(overview, detailed: false)
+        }
+        if preparations.first?.status != "preparing",
+           needsQuestionBankUpdate || (overview.materialPending > 0 && overview.prepared > 0 && !needsPreparationAttention) {
             Section {
-                Button("Resume saved session from another scope", systemImage: "play") {
-                    selectedSessionScope = .init(subjectID: session.subjectID, topicID: session.topicID)
-                    sessionID = session.id
-                }
-                Text("Continue the original subject or topic session. Its questions are reserved until that session is finished.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Finish saved session") {
-                    do { try imports.recall.finishSession(session.id) }
-                    catch { self.error = error.localizedDescription }
-                }
+                NavigationLink(needsQuestionBankUpdate ? "Update question bank" : "Prepare remaining material",
+                    value: RecallOptionsDestination.preparation)
             }
         }
-        if let preparation = preparations.first {
-            Section("Question preparation") {
-                if preparation.status == "preparing" {
-                    HStack { ProgressView(); Text("Preparing Recall…") }
-                    PlanRequestQueueNotice()
-                    Button("Pause preparation") { imports.recall.pausePreparation(scope.subjectID) }
-                }
-                if let message = preparation.message { Text(message).foregroundStyle(.secondary) }
-                if preparation.usageLimited { Link("Manage ChatGPT usage", destination: ChatGPTAccountLinks.usage) }
-                preparationDetails(overview, isPreparing: preparation.status == "preparing")
+        if overview.issues > 0 || overview.materialBlocked > 0 {
+            Section {
+                Button("Questions needing attention", systemImage: "exclamationmark.circle") { showsQuestions = true }
             }
-        } else {
-            Section("Question preparation") { preparationDetails(overview, isPreparing: false) }
         }
-        Section {
-            Button("Questions and sources", systemImage: "list.bullet.rectangle") { showsQuestions = true }
-            if overview.issues > 0 { Text("\(overview.issues) reported or excluded questions are paused.").foregroundStyle(.secondary) }
-        } footer: {
-            Text("Coverage measures what has been assessed. New material is unassessed, not failed. Review timing is an estimate; an overall mastery score is not assigned.")
+    }
+
+    private var needsQuestionBankUpdate: Bool {
+        targets.contains { target in
+            guard !target.isRetired else { return false }
+            guard let question = try? target.question() else { return true }
+            return question.rubricVersion != RecallAI.rubricVersion || !question.hasCompleteCoverage
         }
-        if sessions.contains(where: \.isFinished) {
-            Section("Recent sessions") {
-                ForEach(Array(sessions.filter(\.isFinished).prefix(5))) { session in
+    }
+
+    private var needsPreparationAttention: Bool {
+        preparations.first.map { ["pending", "paused", "failed", "partial"].contains($0.status) || $0.usageLimited } ?? false
+    }
+
+    @ViewBuilder private var sessionHistory: some View {
+        let saved = sessions.filter { !$0.isFinished }
+        let finished = sessions.filter(\.isFinished)
+        if saved.isEmpty && finished.isEmpty {
+            Text("Your sessions will appear here after you start practising.").foregroundStyle(.secondary)
+        }
+        if !saved.isEmpty {
+            Section {
+                ForEach(saved) { session in
+                    NavigationLink(value: RecallSessionDestination(sessionID: session.id,
+                        scope: .init(subjectID: session.subjectID, topicID: session.topicID))) {
+                        VStack(alignment: .leading) {
+                            Text(session.topicID == scope.topicID ? "Resume session" : "Resume session from another scope")
+                            Text(session.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Button("Finish saved session") {
+                        do { try imports.recall.finishSession(session.id) }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+            } header: {
+                Text("Saved sessions")
+            } footer: {
+                Text("Sessions from this subject and its topics. Saved sessions reserve their questions until finished.")
+            }
+        }
+        if !finished.isEmpty {
+            Section("Completed sessions") {
+                ForEach(finished) { session in
                     NavigationLink(value: RecallSessionDestination(sessionID: session.id,
                         scope: .init(subjectID: session.subjectID, topicID: session.topicID))) {
                         Label(session.updatedAt.formatted(date: .abbreviated, time: .shortened), systemImage: "clock.arrow.circlepath")
                     }
                 }
             }
+        }
+        if let error { Text(error).foregroundStyle(.red) }
+    }
+
+    @ViewBuilder private func preparationSection(_ overview: RecallOverview, detailed: Bool) -> some View {
+        Section {
+            let preparation = preparations.first
+            let isPreparing = preparation?.status == "preparing"
+            if isPreparing {
+                HStack { ProgressView(); Text("Preparing Recall…") }
+                if let repair = imports.recall.repairs[scope.subjectID] {
+                    Text("\(repair.completed) updated · \(repair.failed) failed · \(repair.skipped) skipped of \(repair.total)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                PlanRequestQueueNotice()
+                Button("Pause preparation") { imports.recall.pausePreparation(scope.subjectID) }
+            }
+            if let preparation, detailed || needsPreparationAttention {
+                if let message = preparation.message { Text(message).foregroundStyle(.secondary) }
+                if preparation.usageLimited { Link("Manage ChatGPT usage", destination: ChatGPTAccountLinks.usage) }
+            }
+            if detailed {
+                preparationDetails(overview, isPreparing: isPreparing)
+            } else if !isPreparing {
+                Button(overview.prepared == 0 ? "Prepare Recall" : "Resume preparation", systemImage: "sparkles") {
+                    imports.recall.prepare(scope.subjectID)
+                }
+                if overview.materialBlocked > 0 {
+                    Button("Retry targets needing attention") { imports.recall.prepare(scope.subjectID, retryBlocked: true) }
+                }
+            }
+        } header: {
+            Text("Question preparation")
+        } footer: {
+            Text("Prepares questions for the entire subject, including its other topics. Existing progress is kept.")
         }
     }
 
@@ -195,11 +246,7 @@ struct RecallHomeView: View {
                 .font(.footnote).foregroundStyle(.secondary)
         }
         if !isPreparing {
-            if targets.contains(where: { target in
-                guard !target.isRetired else { return false }
-                guard let question = try? target.question() else { return true }
-                return question.rubricVersion != RecallAI.rubricVersion || !question.hasCompleteCoverage
-            }) {
+            if needsQuestionBankUpdate {
                 Text("Update the bank to verify complete question coverage. Your stored progress and history are kept.")
                     .font(.footnote).foregroundStyle(.secondary)
                 Button("Update question bank", systemImage: "arrow.triangle.2.circlepath") { confirmsRepair = true }
@@ -284,8 +331,6 @@ private struct RecallSessionContent: View {
     @State private var challenge: Challenge?
     @State private var reconsiderationScope: RecallReconsiderationScope = .initial
     @State private var reason = ""
-    @State private var showsDiagnosticFlag = false
-    @State private var diagnosticComment = ""
     @FocusState private var answerFocused: Bool
     private enum Challenge: String, Identifiable {
         case assessment, question
@@ -317,9 +362,6 @@ private struct RecallSessionContent: View {
                         Button("Save and leave", systemImage: "pause") { controller.interrupt(message: "Assessment paused. Retry when you resume."); dismiss() }
                         Button("Skip question", systemImage: "forward.end") { answerFocused = false; controller.skip() }
                         Button("Question has a problem", systemImage: "flag") { reason = ""; challenge = .question }
-                        Button("Mark interaction as problematic", systemImage: "exclamationmark.bubble") {
-                            diagnosticComment = ""; showsDiagnosticFlag = true
-                        }.disabled(!RecallDiagnostics.shared.enabled)
                     }
                 }
             }
@@ -359,13 +401,6 @@ private struct RecallSessionContent: View {
                 }
             }
             .presentationDetents([.medium, .large])
-        }
-        .alert("Flag this interaction", isPresented: $showsDiagnosticFlag) {
-            TextField("Optional comment", text: $diagnosticComment)
-            Button("Save flag") { controller.flagDiagnostic(diagnosticComment) }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Adds this interaction and your comment to the local diagnostic log. Your grade and practice session are unchanged.")
         }
         .onDisappear { controller.interrupt(message: "Assessment paused. Your answer was kept; retry when you resume.") }
     }

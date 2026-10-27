@@ -18,14 +18,25 @@ nonisolated private struct RecallDiagnosticEntry: Codable, Sendable {
 /// Callers supply grading content only, never credentials, headers, or account records.
 @MainActor @Observable final class RecallDiagnostics {
     static let shared = RecallDiagnostics()
-    private(set) var enabled = UserDefaults.standard.bool(forKey: "knowledge.recallDiagnostics.enabled")
-    private(set) var generationEnabled = UserDefaults.standard.bool(forKey: "knowledge.recallGenerationDiagnostics.enabled")
+    private(set) var enabled = false
+    private(set) var generationEnabled = false
     private(set) var storageError: String?
     private let run = UUID().uuidString
     private let storage = RecallDiagnosticsStorage()
     @ObservationIgnored private var pending: Task<Void, Never>?
 
+    private init() {
+        #if DEBUG
+        enabled = UserDefaults.standard.bool(forKey: "knowledge.recallDiagnostics.enabled")
+        generationEnabled = UserDefaults.standard.bool(forKey: "knowledge.recallGenerationDiagnostics.enabled")
+        #else
+        UserDefaults.standard.set(false, forKey: "knowledge.recallDiagnostics.enabled")
+        UserDefaults.standard.set(false, forKey: "knowledge.recallGenerationDiagnostics.enabled")
+        #endif
+    }
+
     func setGenerationEnabled(_ value: Bool) {
+        #if DEBUG
         guard value != generationEnabled else { return }
         if !value { record("generation_recording_disabled") }
         generationEnabled = value
@@ -33,6 +44,7 @@ nonisolated private struct RecallDiagnosticEntry: Codable, Sendable {
         if value { record("generation_recording_enabled", ["rubric_version": RecallAI.rubricVersion,
             "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
             "app_build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"]) }
+        #endif
     }
 
     func recordsRequest(_ purpose: String?) -> Bool {
@@ -45,6 +57,7 @@ nonisolated private struct RecallDiagnosticEntry: Codable, Sendable {
     }
 
     func setEnabled(_ value: Bool) {
+        #if DEBUG
         guard value != enabled else { return }
         if !value { record("recording_disabled") }
         enabled = value
@@ -53,6 +66,7 @@ nonisolated private struct RecallDiagnosticEntry: Codable, Sendable {
             "app_build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown",
             "os": ProcessInfo.processInfo.operatingSystemVersionString, "assessment_policy": RecallScheduler.policyVersion,
             "scheduler": RecallScheduler.version]) }
+        #endif
     }
 
     static func json<T: Encodable>(_ value: T) -> String {
@@ -86,7 +100,7 @@ nonisolated private struct RecallDiagnosticEntry: Codable, Sendable {
         record(generation ? "generation_request" : "grading_request", ["request_id": id, "instructions_sha256": hash,
             "purpose": payload.text?.format.name ?? "unknown",
             "model": payload.model, "reasoning_effort": payload.reasoning?.effort.rawValue ?? "provider_default",
-            "requested_service_tier": payload.service_tier?.rawValue ?? "auto", "input": Self.json(payload.input),
+            "input": Self.json(payload.input),
             "text_schema": Self.json(payload.text), "store": String(payload.store), "stream": String(payload.stream)])
     }
 
@@ -259,6 +273,7 @@ private actor RecallDiagnosticsStorage {
     }
 }
 
+#if DEBUG
 struct RecallDiagnosticsSection: View {
     @State private var diagnostics = RecallDiagnostics.shared
     @State private var exportURL: URL?
@@ -296,3 +311,5 @@ struct RecallDiagnosticsSection: View {
         } message: { Text("Removes local grading and question generation diagnostic recordings and exports. Your Recall progress and answers in session history are kept.") }
     }
 }
+
+#endif

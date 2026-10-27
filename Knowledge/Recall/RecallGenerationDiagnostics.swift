@@ -27,11 +27,10 @@ import SwiftUI
     }
 }
 
+#if DEBUG
 struct RecallGenerationDiagnosticsSection: View {
     let subjectID: UUID
     let isPreparing: Bool
-    let hasUnprepared: Bool
-    @Environment(ImportCoordinator.self) private var imports
     @State private var diagnostics = RecallDiagnostics.shared
     @State private var exportURL: URL?
     @State private var busy = false
@@ -43,16 +42,6 @@ struct RecallGenerationDiagnosticsSection: View {
             Toggle("Record question generation", isOn: Binding(
                 get: { diagnostics.generationEnabled }, set: { diagnostics.setGenerationEnabled($0) }
             )).disabled(busy)
-            Button("Record and retry preparation", systemImage: "arrow.clockwise") {
-                diagnostics.setGenerationEnabled(true)
-                imports.recall.prepare(subjectID, retryBlocked: true)
-            }
-            .disabled(busy || isPreparing || !hasUnprepared || !imports.recall.canRequest || imports.defaultRecallPreparationModel.isEmpty)
-            Button("Record and update question bank", systemImage: "arrow.triangle.2.circlepath") {
-                diagnostics.setGenerationEnabled(true)
-                imports.recall.repairQuestions(subjectID)
-            }
-            .disabled(busy || isPreparing || !imports.recall.canRequest || imports.defaultRecallPreparationModel.isEmpty)
             Button(busy ? "Preparing export…" : "Export generation diagnostics", systemImage: "doc.text") {
                 busy = true
                 Task { @MainActor in
@@ -66,7 +55,7 @@ struct RecallGenerationDiagnosticsSection: View {
                 .disabled(busy || isPreparing)
             if let error = error ?? diagnostics.storageError { Text(error).foregroundStyle(.secondary) }
         } header: { Text("Question generation diagnostics") } footer: {
-            Text("Records source excerpts, generation responses, validation failures, repair attempts, verifier decisions and save outcomes. Retry prepares missing targets. Update also replaces outdated questions. Accepted current questions and learning progress are kept. Export after completion. Recording and exporting make no AI requests. Clear question generation diagnostics removes generation recordings on this device while keeping session diagnostics and learning progress.")
+            Text("Records source excerpts, generation responses, validation failures, repair attempts, verifier decisions and save outcomes. Use Question preparation to retry or update questions, then export after completion. Recording and exporting make no AI requests. Clear question generation diagnostics removes generation recordings on this device while keeping session diagnostics and learning progress.")
         }
         .confirmationDialog("Clear question generation diagnostics?", isPresented: $confirmsClear) {
             Button("Clear generation recordings", role: .destructive) {
@@ -82,3 +71,5 @@ struct RecallGenerationDiagnosticsSection: View {
         }
     }
 }
+
+#endif

@@ -38,10 +38,6 @@ import FSRS
         RecallDiagnostics.shared.record(event, context.merging(fields) { _, new in new })
     }
 
-    func flagDiagnostic(_ comment: String) {
-        recordDiagnostic("user_flagged_problem", ["comment": String(comment.prefix(2000))])
-    }
-
     @discardableResult private func change(_ operation: (inout RecallSessionState) throws -> Void) -> Bool {
         do {
             var updated = state
