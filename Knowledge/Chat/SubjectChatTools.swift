@@ -5,13 +5,16 @@ import SwiftData
 @MainActor final class SubjectChatTools: ChatTools {
     private let snapshot: SubjectVersionSnapshot
     private let sources: [KnowledgeSource]
+    private let recall: Result<SubjectChatRecallTools, Error>
     private var prepared: [UUID: PreparedSource] = [:]
     private let searchableKinds: [LibraryEntityKind] = [.source, .topic, .concept, .fact, .connection, .contribution]
 
     init(subjectID: UUID, repository: KnowledgeRepository) throws {
-        snapshot = try repository.versionSnapshot(subjectID: subjectID)
+        let library = try repository.versionSnapshot(subjectID: subjectID)
+        snapshot = library
         sources = try repository.container.mainContext.fetch(FetchDescriptor<KnowledgeSource>(
             predicate: #Predicate { $0.subjectID == subjectID && !$0.isArchived }, sortBy: [SortDescriptor(\.id)]))
+        recall = Result { try SubjectChatRecallTools(snapshot: library, repository: repository) }
     }
 
     var definitions: [PlanFunctionTool] {
@@ -24,11 +27,12 @@ import SwiftData
                 parameters: .record(["entry_ids": .list(.text)])),
             .init(name: "get_subject_passages", description: "Read full original passages across this subject's saved active sources. Use source_id null to search all sources or a source UUID to read one. Empty query browses; paginate with next_offset. To read evidence provide source_id and up to 24 segment_ids; otherwise use []. Returns citation_url for each passage. Cite only these exact URLs.",
                 parameters: .record(["source_id": .nullableText, "segment_ids": .list(.text), "query": .text, "offset": integer]))
-        ]
+        ] + ((try? recall.get().definitions) ?? [])
     }
 
     func activity(for call: PlanFunctionCall) -> String {
-        call.name == "get_subject_passages" ? "Reading your notes…" : "Exploring this subject…"
+        if call.name.contains("recall") { return "Reading your Recall progress…" }
+        return call.name == "get_subject_passages" ? "Reading your notes…" : "Exploring this subject…"
     }
 
     func execute(_ call: PlanFunctionCall) throws -> ChatToolResult {
@@ -37,12 +41,21 @@ import SwiftData
             throw ImportError.invalidSelection("The requested subject tool or arguments are not supported.")
         }
         switch call.name {
+        case "get_recall_overview", "search_recall_questions", "get_recall_questions", "get_recall_stats", "get_recall_reviews":
+            return try recall.get().execute(call)
         case "get_subject_overview":
             let counts = Dictionary(uniqueKeysWithValues: searchableKinds.map {
                 ($0.rawValue, PlanJSONValue.number(Double(snapshot.active($0).count)))
             })
+            let recallOverview: PlanJSONValue
+            switch recall {
+            case .success(let tools): recallOverview = tools.overview
+            case .failure: recallOverview = .object(["available": .bool(false),
+                "message": .string("Recall data could not be read for this turn. Do not infer progress or scores; saved library material is still available.")])
+            }
             return try result(.object(["subject": .string(snapshot.name), "revision_id": .string(snapshot.revisionID.uuidString),
-                "counts": .object(counts), "scope": .string("Saved active material and complete original passages. Unsaved import drafts and archived sources are excluded. Use search_subject to browse sources and topics.")]))
+                "counts": .object(counts), "recall": recallOverview,
+                "scope": .string("Saved active material, complete original passages, and a read-only snapshot of this subject's Recall question bank and learning progress. Unsaved import drafts and archived sources are excluded from library tools. Recall questions may contain older saved material; check is_current. Use search_subject to browse sources and topics.")]))
         case "search_subject":
             let args = try JSONDecoder().decode(Search.self, from: data)
             try validate(query: args.query, offset: args.offset)
@@ -150,6 +163,9 @@ import SwiftData
             fields["connection_ids"] = .array(snapshot.active(.connection).filter {
                 $0.reference("fromID") == record.id || $0.reference("toID") == record.id
             }.map { .string($0.id.uuidString) })
+        }
+        if case .success(let tools) = recall, let stats = tools.stats(for: record.id) {
+            fields["recall_stats"] = stats
         }
         return .object(["id": .string(record.id.uuidString), "kind": .string(record.kind.rawValue), "fields": .object(fields)])
     }

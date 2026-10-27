@@ -26,6 +26,7 @@ nonisolated struct RecallProficiency {
 @MainActor struct RecallProficiencyIndex {
     var concepts: [UUID: RecallProficiency] = [:]
     var topics: [UUID: RecallProficiency] = [:]
+    var materialScores: [String: RecallProficiency] = [:]
 
     init(conceptIDs: [UUID], roots: [TopicLibraryNode], materials: [RecallMaterial], targets: [RecallTarget],
          events: [LearningEvent], revisionID: UUID, now: Date) throws {
@@ -57,30 +58,32 @@ nonisolated struct RecallProficiency {
             if review.rating != nil && latest[event.targetID] == nil { latest[event.targetID] = review }
         }
 
-        for id in conceptIDs {
-            var proficiency = RecallProficiency()
-            for material in byConcept[id] ?? [] {
-                let candidates = (byMaterial[material.id] ?? []).filter { $0.materialSignature == material.signature && material.status == "ready" }
-                var sum = 0.0, assessed = 0
-                for target in candidates {
-                    guard let memory = target.memoryData, let review = latest[target.id],
-                          review.afterMemory == memory, let rating = review.rating else { continue }
-                    assessed += 1
-                    let readiness = try RecallScheduler.retrievability(memory: memory, now: now)
-                    if rating >= 2 { sum += (review.episode.turns.first?.input?.isRecognition == true ? 0.5 : 1) * readiness }
-                    else if let attempt = latestAttempt[target.id],
-                            (attempt.afterMemory ?? attempt.beforeMemory) == memory,
-                            !attempt.episode.disputed, attempt.episode.lastAssessment?.sourceConcern == nil,
-                            attempt.episode.lastAssessment?.outcome == .correct {
-                        // Successfully answering after help is learning progress,
-                        // but earns only half credit until independent recall.
-                        // Merely viewing the correction still earns no credit.
-                        sum += 0.5 * readiness
-                    }
+        for material in activeMaterials {
+            let candidates = (byMaterial[material.id] ?? []).filter { $0.materialSignature == material.signature && material.status == "ready" }
+            var sum = 0.0, assessed = 0
+            for target in candidates {
+                guard let memory = target.memoryData, let review = latest[target.id],
+                      review.afterMemory == memory, let rating = review.rating else { continue }
+                assessed += 1
+                let readiness = try RecallScheduler.retrievability(memory: memory, now: now)
+                if rating >= 2 { sum += (review.episode.turns.first?.input?.isRecognition == true ? 0.5 : 1) * readiness }
+                else if let attempt = latestAttempt[target.id],
+                        (attempt.afterMemory ?? attempt.beforeMemory) == memory,
+                        !attempt.episode.disputed, attempt.episode.lastAssessment?.sourceConcern == nil,
+                        attempt.episode.lastAssessment?.outcome == .correct {
+                    // Successfully answering after help is learning progress,
+                    // but earns only half credit until independent recall.
+                    // Merely viewing the correction still earns no credit.
+                    sum += 0.5 * readiness
                 }
-                let slots = max(1, candidates.count)
-                proficiency = proficiency + .init(units: 1, assessedTargets: assessed, targetSlots: slots,
-                    readinessSum: sum / Double(slots))
+            }
+            let slots = max(1, candidates.count)
+            materialScores[material.id] = .init(units: 1, assessedTargets: assessed, targetSlots: slots,
+                readinessSum: sum / Double(slots))
+        }
+        for id in conceptIDs {
+            let proficiency = (byConcept[id] ?? []).reduce(RecallProficiency()) {
+                $0 + (materialScores[$1.id] ?? .init())
             }
             // Concepts without prepared material remain unknown and limit their parent's coverage.
             let hasOnlyContext = materials.contains { material in
