@@ -5,6 +5,7 @@ struct RecallAnswerInputView: View {
     let response: RecallResponse?
     let seed: String
     let update: (RecallResponse) -> Void
+    @Environment(\.isEnabled) private var isEnabled
     @State private var numberText = ""
 
     private func ordered(_ options: [RecallOption]) -> [RecallOption] {
@@ -14,24 +15,38 @@ struct RecallAnswerInputView: View {
         return options.sorted { rank($0.id) < rank($1.id) }
     }
     private var order: [String] { response?.order ?? ordered(input.options).map(\.id) }
-    private func move(_ id: String, by offset: Int) {
+    private func move(from offsets: IndexSet, to destination: Int) {
         var result = order
-        guard let index = result.firstIndex(of: id), result.indices.contains(index + offset) else { return }
-        result.swapAt(index, index + offset); update(.init(order: result))
+        result.move(fromOffsets: offsets, toOffset: destination)
+        update(.init(order: result))
     }
     var body: some View {
+        answerControls
+            .onChange(of: response?.order, initial: true) { _, value in
+                // The displayed order is an answer even before the learner moves an item.
+                if input.kind == .ordering, value == nil, isEnabled {
+                    update(.init(order: order))
+                }
+            }
+    }
+
+    @ViewBuilder private var answerControls: some View {
         switch input.kind {
         case .text: EmptyView()
         case .choice:
             ForEach(ordered(input.options)) { option in
+                let isSelected = response?.optionID == option.id
                 Button { update(.init(optionID: option.id)) } label: {
-                    HStack(alignment: .top) {
-                        Image(systemName: response?.optionID == option.id ? "checkmark.circle.fill" : "circle")
+                    Label {
                         Text(option.text).frame(maxWidth: .infinity, alignment: .leading)
+                    } icon: {
+                        Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                            .accessibilityHidden(true)
                     }.padding(.vertical, 6).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(response?.optionID == option.id ? .isSelected : [])
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         case .number:
             HStack {
@@ -63,13 +78,11 @@ struct RecallAnswerInputView: View {
                     Text("\(index + 1).").foregroundStyle(.secondary)
                     Text(input.options.first { $0.id == id }?.text ?? "")
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Button { move(id, by: -1) } label: { Image(systemName: "arrow.up").frame(minWidth: 44, minHeight: 44) }
-                        .disabled(index == 0).accessibilityLabel("Move item \(index + 1) earlier")
-                    Button { move(id, by: 1) } label: { Image(systemName: "arrow.down").frame(minWidth: 44, minHeight: 44) }
-                        .disabled(index == order.count - 1).accessibilityLabel("Move item \(index + 1) later")
-                }.buttonStyle(.borderless).padding(.vertical, 4)
+                }
+                .padding(.vertical, 4)
+                .moveDisabled(!isEnabled)
             }
-            if response?.order == nil { Button("Use this order") { update(.init(order: order)) } }
+            .onMove(perform: move)
         case .matching:
             let leftIDs = Set(input.matches.map(\.leftID)), rightIDs = Set(input.matches.map(\.rightID))
             ForEach(ordered(input.options.filter { leftIDs.contains($0.id) })) { left in

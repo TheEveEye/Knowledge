@@ -354,6 +354,9 @@ private struct RecallSessionContent: View {
                 Section { Button("Undo last result", systemImage: "arrow.uturn.backward") { controller.undoLastReview() }.disabled(controller.isRequesting) }
             }
         }
+        .environment(\.editMode, .constant(
+            controller.state.episode?.phase == "answer" && controller.state.episode?.nextInput.kind == .ordering
+                ? .active : .inactive))
         .scrollDismissesKeyboard(.interactively)
         .toolbar {
             if controller.state.episode != nil {
