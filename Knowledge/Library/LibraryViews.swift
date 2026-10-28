@@ -163,11 +163,13 @@ struct SubjectChatBoundsKey: PreferenceKey {
 struct SubjectDetailView: View {
     let subject: KnowledgeSubject
     @Binding var search: String
+    let onShowSettings: () -> Void
     @State private var path = NavigationPath()
 
     var body: some View {
         NavigationStack(path: $path) {
-            SubjectLibraryView(subject: subject, search: $search, onStartPractice: { path.append($0) })
+            SubjectLibraryView(subject: subject, search: $search, onShowSettings: onShowSettings,
+                               onStartPractice: { path.append($0) })
         }
         .anchorPreference(key: SubjectChatBoundsKey.self, value: .bounds) {
             // Keep the stack's stationary frame available while the controls fade during navigation.
@@ -178,18 +180,20 @@ struct SubjectDetailView: View {
 
 struct SubjectLibraryView: View {
     let subject: KnowledgeSubject
+    let onShowSettings: () -> Void
     let onStartPractice: (PracticeDestination) -> Void
     @Environment(ImportCoordinator.self) private var imports
     @Query private var concepts: [KnowledgeConcept]
     @Query private var sources: [KnowledgeSource]
     @Query private var jobs: [KnowledgeImportJob]
     @State private var showImport = false
-    @State private var showSettings = false
     @Binding private var search: String
     @State private var topicActions = TopicLibraryActions()
     @State private var pendingPractice: PracticeDestination?
-    init(subject: KnowledgeSubject, search: Binding<String>, onStartPractice: @escaping (PracticeDestination) -> Void) {
+    init(subject: KnowledgeSubject, search: Binding<String>, onShowSettings: @escaping () -> Void,
+         onStartPractice: @escaping (PracticeDestination) -> Void) {
         self.subject = subject
+        self.onShowSettings = onShowSettings
         self.onStartPractice = onStartPractice
         _search = search
         let id = subject.id
@@ -244,7 +248,7 @@ struct SubjectLibraryView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                SubjectOptionsMenu(subjectID: subject.id, onShowSettings: { showSettings = true })
+                SubjectOptionsMenu(subjectID: subject.id, onShowSettings: onShowSettings)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
@@ -273,12 +277,6 @@ struct SubjectLibraryView: View {
             Button("OK", role: .cancel) { topicActions.error = nil }
         } message: { Text(topicActions.error ?? "") }
         .sheet(isPresented: $showImport) { NewImportView(subject: subject) }
-        .sheet(isPresented: $showSettings) {
-            SubjectSettingsView(subject: subject)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationSizing(.form)
-        }
         .navigationDestination(for: LibraryDestination.self) { destination in
             switch destination {
             case .concept(let id):
@@ -314,10 +312,10 @@ struct SubjectSettingsView: View {
     @State private var didResetProgress = false
     @State private var showDeleteConfirmation = false
 
-    init(subject: KnowledgeSubject) {
-        subjectID = subject.id
-        originalName = subject.name
-        _name = State(initialValue: subject.name)
+    init(subjectID: UUID, name: String) {
+        self.subjectID = subjectID
+        originalName = name
+        _name = State(initialValue: name)
     }
 
     private var canSave: Bool { !name.trimmed.isEmpty && name.trimmed != originalName }

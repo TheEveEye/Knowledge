@@ -92,7 +92,7 @@ import SwiftData
 #Preview("Subject bottom toolbar") {
     let data = try! LibraryPreviewData()
     let subject = try! data.container.mainContext.fetch(FetchDescriptor<KnowledgeSubject>()).first!
-    SubjectDetailView(subject: subject, search: .constant(""))
+    SubjectDetailView(subject: subject, search: .constant(""), onShowSettings: {})
         .environment(data.authentication).environment(data.imports).modelContainer(data.container)
 }
 #endif

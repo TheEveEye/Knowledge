@@ -20,9 +20,18 @@ struct ContentView: View {
         case importJob(UUID)
     }
 
-    private enum RootSheet: String, Identifiable {
+    private enum RootSheet: Identifiable {
         case account, welcome, subject
-        var id: String { rawValue }
+        case subjectSettings(id: UUID, name: String)
+
+        var id: String {
+            switch self {
+            case .account: "account"
+            case .welcome: "welcome"
+            case .subject: "subject"
+            case .subjectSettings(let id, _): "subjectSettings-\(id)"
+            }
+        }
     }
     var body: some View {
         NavigationSplitView {
@@ -63,7 +72,9 @@ struct ContentView: View {
                 switch selection {
                 case .subject(let id):
                     if let subject = subjects.first(where: { $0.id == id }) {
-                        SubjectDetailView(subject: subject, search: $subjectSearch)
+                        SubjectDetailView(subject: subject, search: $subjectSearch) {
+                            sheet = .subjectSettings(id: subject.id, name: subject.name)
+                        }
                     }
                 case .importJob(let id):
                     NavigationStack { ImportJobView(jobID: id) }
@@ -131,6 +142,11 @@ struct ContentView: View {
             case .account: ChatGPTAccountView()
             case .welcome: ChatGPTPlanWelcomeView()
             case .subject: NewSubjectView()
+            case .subjectSettings(let id, let name):
+                SubjectSettingsView(subjectID: id, name: name)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                    .presentationSizing(.form)
             }
         }
         .onAppear { if authentication.planWelcomeAccountID != nil { sheet = .welcome } }
