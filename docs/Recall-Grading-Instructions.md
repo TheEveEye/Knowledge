@@ -4,7 +4,7 @@ Current bank: **recall-design-v13**. Current assessment policy: **recall-evidenc
 
 Bank v13 and policy v21 replace fixed illustrative examples with general instructions across planning, eligibility review, generation, verification, grading and extra-credit confirmation. Source facts, question-specific accepted wording, learner records and rejected candidates remain task data. Evidence contracts, scheduling and historical records are unchanged. No live model or device validation was performed; compilation alone does not establish equivalent model quality.
 
-The authoritative main grading contract is `Knowledge/Recall/RecallAI.swift`. The exact concatenated common and assessment instructions are reproduced below. Private source excerpts, learner answers and earlier tutor messages remain untrusted data. The AI never chooses memory parameters, grades for FSRS, or dates.
+The authoritative main grading contract is [RecallAI.swift](../apps/ios/Knowledge/Recall/RecallAI.swift). The exact concatenated common and assessment instructions are reproduced below. Private source excerpts, learner answers and earlier tutor messages remain untrusted data. The AI never chooses memory parameters, grades for FSRS, or dates.
 
 ## Coverage and compatibility
 
