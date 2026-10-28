@@ -576,7 +576,8 @@ extension RecallAI {
         // Candidates carry their evidence for grading. Verify bounded chunks so
         // a group of individually valid questions cannot exceed the 90 KB limit.
         struct TargetClaim: Encodable {
-            let id: String; let kind: String; let claim: String; let evidence: [String]
+            let id: String; let kind: String; let concept: String; let aliases: [String]
+            let claim: String; let qualifications: String; let evidence: [String]
             let learningPlan: RecallLearningPlan?
         }
         struct VerificationInput: Encodable {
@@ -585,7 +586,62 @@ extension RecallAI {
                 let left: [Left]
                 let right: [String]
             }
-            let questions: [RecallQuestion]
+            struct Question: Encodable {
+                struct VisibleTask: Encodable {
+                    let prompt: String
+                    let kind: RecallInputKind
+                    let options: [RecallOption]
+                    let unit: String?
+                    let minimum: Double?; let maximum: Double?; let step: Double?
+                }
+                struct Criterion: Encodable {
+                    let id: String; let point: String; let givenQuote: String?
+                    let requiredMeaning: String?; let requestedPart: String?; let acceptedExamples: [String]?
+                    let essentialReason: String?; let promptGivens: [String]?
+                    let sourceEvidenceIndices: [Int]; let additionalEvidence: [String]
+                }
+                struct Binding: Encodable { let materialID: String; let criterionIDs: [String] }
+                struct Rubric: Encodable {
+                    let expectedAnswer: String; let acceptableWording: String
+                    let criteria: [Criterion]; let bindings: [Binding]
+                    let answerKey: RecallInput
+                    let givenContext: String?
+                    let precisionNotes: [RecallPrecisionNote]
+                    let facet: String; let boundary: String
+                    let kind: RecallQuestionKind?; let goal: RecallRetrievalGoal?; let practiceValue: RecallPracticeValue?
+                }
+                let designID: String
+                let visibleTask: VisibleTask
+                let privateRubric: Rubric
+                init(_ question: RecallQuestion, catalog: [TargetClaim]) {
+                    designID = question.designID!.uuidString
+                    let input = question.answerInput
+                    visibleTask = .init(prompt: question.prompt, kind: input.kind, options: input.options,
+                        unit: input.unit, minimum: input.minimum, maximum: input.maximum, step: input.step)
+                    var key = input
+                    // Matching must be solved independently rather than echoed from the proposed key.
+                    if input.kind == .matching { key.matches = [] }
+                    // Options are already present once in visibleTask.
+                    key.options = []
+                    privateRubric = .init(expectedAnswer: question.expectedAnswer, acceptableWording: question.acceptableWording,
+                        criteria: question.criteria.map { criterion in
+                            let materialID = question.bindings?.first { $0.criterionIDs.contains(criterion.id) }?.materialID
+                            let evidence = catalog.first { $0.id == materialID }?.evidence ?? []
+                            let quotes = criterion.evidenceReferences?.map(\.quote) ?? [criterion.sourceQuote]
+                            return .init(id: criterion.id, point: criterion.point, givenQuote: criterion.givenQuote,
+                                requiredMeaning: criterion.requiredMeaning, requestedPart: criterion.requestedPart,
+                                acceptedExamples: criterion.acceptedExamples, essentialReason: criterion.essentialReason,
+                                promptGivens: criterion.promptGivens,
+                                sourceEvidenceIndices: quotes.compactMap { evidence.firstIndex(of: $0) },
+                                additionalEvidence: quotes.filter { !evidence.contains($0) })
+                        },
+                        bindings: (question.bindings ?? []).map { .init(materialID: $0.materialID, criterionIDs: $0.criterionIDs) },
+                        answerKey: key, givenContext: question.givenContext, precisionNotes: question.precisionNotes ?? [],
+                        facet: question.facet, boundary: question.boundary, kind: question.kind,
+                        goal: question.goal, practiceValue: question.practiceValue)
+                }
+            }
+            let questions: [Question]
             let targetCatalog: [TargetClaim]
             let matchingSets: [String: MatchingSet]
             init(questions: [RecallQuestion], targetCatalog: [TargetClaim]) {
@@ -595,18 +651,21 @@ extension RecallAI {
                         .init(id: $0.leftID, criterionID: $0.criterionID)
                     }, right: question.answerInput.matches.map(\.rightID)))
                 })
-                self.questions = questions.map { question in
-                    var copy = question
-                    // The reviewer independently enumerates all valid matches; it cannot
-                    // simply echo the proposed key. The app compares its result locally.
-                    if copy.answerInput.kind == .matching { copy.input?.matches = [] }
-                    return copy
-                }
+                self.questions = questions.map { Question($0, catalog: targetCatalog) }
             }
         }
-        let catalog = bundle.units.map { TargetClaim(id: $0.materialID, kind: $0.snapshot.kind,
-            claim: $0.snapshot.statement, evidence: $0.snapshot.evidence.prefix(3).map { String($0.quote.prefix(1000)) },
-            learningPlan: $0.snapshot.learningPlan) }
+        // Bound targets retain the full evidence previously embedded in their snapshots.
+        // Neighbour context retains the original excerpt budget; deduplication does not
+        // expand unrelated context or remove evidence used by a question's rubric.
+        let boundIDs = Set(candidates.flatMap { $0.coveredMaterialIDs })
+        let catalog = bundle.units.map { unit in
+            let evidence = boundIDs.contains(unit.materialID) ? unit.snapshot.evidence.map(\.quote)
+                : unit.snapshot.evidence.prefix(3).map { String($0.quote.prefix(1000)) }
+            return TargetClaim(id: unit.materialID, kind: unit.snapshot.kind,
+                concept: unit.snapshot.conceptName, aliases: unit.snapshot.aliases,
+                claim: unit.snapshot.statement, qualifications: unit.snapshot.qualifications,
+                evidence: Array(Set(evidence)).sorted(), learningPlan: unit.snapshot.learningPlan)
+        }
         let issueSchema: SchemaValue = .record(["gate": .choices(["support", "answerability", "leakage", "rubric", "input", "mapping"]),
             "basis": .choices(["source", "task", "format", "scope", "presentation"]),
             "problem": .text, "counterexample": .text, "repair": .text])
@@ -965,6 +1024,12 @@ extension RecallAI {
 
     static let designVerificationInstructions = commonInstructions + """
 
+    Only visibleTask is shown to the learner: its prompt, options, units and control bounds.
+    privateRubric and targetCatalog are HIDDEN. Claims, binding IDs, expected answers, givenContext annotations
+    and precision notes are not visible cues. Never reject a question because hidden metadata contains its answer.
+    Use privateRubric.bindings to find each complete original claim, qualifications and evidence in targetCatalog.
+    A criterion's sourceEvidenceIndices are zero-based indices into its bound target's evidence array;
+    additionalEvidence preserves any criterion quotations absent from that array.
     Independently review EVERY designID against original evidence. Return issues:[] only for a fair usable task.
     A blocker states gate, basis, a substantive problem, a concrete failing interpretation in counterexample, and
     minimal repair. Use source/task/format for those defects; scope for an excluded source-supported correct

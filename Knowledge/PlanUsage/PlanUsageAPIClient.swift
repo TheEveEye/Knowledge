@@ -369,7 +369,8 @@ extension ChatGPTPlanRequesting {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 240
-        request.httpBody = try JSONEncoder().encode(payload)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        request.httpBody = try encoder.encode(payload)
         onActivity(.waiting)
         AIRequestLog.shared.record("http_start", ["attempt_id": permit.id.uuidString,
             "body_bytes": String(request.httpBody?.count ?? 0), "model": payload.model])

@@ -447,7 +447,8 @@ nonisolated private enum ImportBatchOutcome: Sendable {
     private func send<T: Encodable>(model: String, input: T, name: String, instructions: String,
                                     schema: SchemaValue, accessToken: @MainActor () async throws -> String,
                                     progress: ImportProgressReporter) async throws -> PlanResponseReceipt {
-        let data = try JSONEncoder().encode(input)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(input)
         guard data.count <= 120_000, let text = String(data: data, encoding: .utf8) else {
             throw ImportValidator.invalid("The extraction is too large to reconcile in one batch.")
         }

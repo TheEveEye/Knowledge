@@ -65,8 +65,14 @@ nonisolated private struct RecallJudgment: Codable, Sendable {
         accessToken: @MainActor () async throws -> String) async throws -> (Output, PlanResponseReceipt) {
         let data = try RecallCoding.encode(input)
         guard data.count <= 90_000 else { throw RecallError.invalid("This learning target is too large to assess safely. Report the question to prepare a smaller target.") }
+        let runtime = RecallDiagnostics.isGeneration(name) && RecallDiagnosticScope.fields["preparation_id"] != nil
+            ? RecallPreparationRuntime.shared : nil
+        try await runtime?.waitUntilForeground()
         let token = try await accessToken()
+        try await runtime?.waitUntilForeground()
         try Task.checkCancellation()
+        runtime?.beginRequest()
+        defer { runtime?.endRequest() }
         let receipt = try await client.response(.init(model: model,
             input: [.init(role: "user", content: String(decoding: data, as: UTF8.self))], instructions: instructions,
             text: .init(format: .init(name: name, schema: schema)), reasoning: reasoning), accessToken: token, onDelta: { _ in })

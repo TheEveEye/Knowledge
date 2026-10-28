@@ -1,3 +1,13 @@
+## Quality restoration — 2026-10-28
+
+Original per-concept batching, context selection/budgets, planning inputs, reconciliation candidates/facts, drafting instructions, automatic enrichment and schema-enforced result keys are restored. No `{key,value}` output adaptation remains. Explicit cache parameters and cache-only retry attempts have been removed; the original top-level instruction contract is retained.
+
+The retained efficiency changes are canonical JSON encoding, background grace for active preparation requests, and a verifier input with explicit visible/hidden sections. A shared target catalog retains claims, qualifications, concept context and full evidence for bound questions; neighbouring targets retain the original excerpt budget. Criterion evidence points into that catalog, with any unmatched quote preserved verbatim. Duplicate snapshots and storage-only fields are omitted. Matching keys remain withheld for independent verification, as before.
+
+The temporary all-AI activity recorder, New subject toggle, export/share/clear controls and recording-specific hooks have been removed. Pre-existing transport and Recall diagnostics remain available under Troubleshooting.
+
+Bank format v13, assessment policy and learning progress remain unchanged. Previously generated questions are not silently replaced. Use a fresh subject for source-to-bank comparisons, or explicitly regenerate existing questions through Questions and sources. No Recall reset is required. Validation is Debug simulator compilation; no automated or manual tests were run.
+
 > Recall navigation: secondary controls live in Recall options. Content diagnostic recorders and exports below are developer-build tools under Troubleshooting; release builds disable recording. Temporary reset, duplicate repair, recording-plus-retry, and interaction-flag controls have been removed. Use ordinary Question preparation actions after enabling any developer recording. Model settings opens account settings.
 
 # Recall question design and evidence policy

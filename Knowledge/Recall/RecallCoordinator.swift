@@ -55,7 +55,9 @@ nonisolated struct RecallRepairStatus {
     }
     func check(account: String) throws {
         try Task.checkCancellation()
-        guard canRequest, authentication.activeAccount?.id == account else { throw ImportError.accountChanged }
+        // An already-sent request may finish and checkpoint during background grace.
+        guard !authentication.isBusy, authentication.activeAccount?.credentials?.planEnabled == true,
+              authentication.activeAccount?.id == account else { throw ImportError.accountChanged }
     }
     func accessToken(account: String) async throws -> String {
         try check(account: account)
@@ -114,6 +116,7 @@ nonisolated struct RecallRepairStatus {
                 defer {
                     if self.generations[subjectID] == run {
                         self.tasks[subjectID] = nil; self.repairs[subjectID]?.isRunning = false
+                        RecallPreparationRuntime.shared.checkpointSaved()
                     }
                 }
                 await RecallDiagnosticScope.$fields.withValue([
@@ -147,7 +150,9 @@ nonisolated struct RecallRepairStatus {
                                 let batchID = UUID().uuidString
                                 let fields = RecallDiagnosticScope.fields.merging(["batch_id": batchID]) { _, new in new }
                                 group.addTask { @MainActor in
-                                    await RecallDiagnosticScope.$fields.withValue(fields) {
+                                    RecallPreparationRuntime.shared.beginBatch()
+                                    defer { RecallPreparationRuntime.shared.endBatch() }
+                                    return await RecallDiagnosticScope.$fields.withValue(fields) {
                                     do {
                                         RecallGenerationTrace.record("batch_started", ["focus_targets": String(plan.1.count),
                                             "unit_count": String(plan.0.units.count)], content: ["focus_materials": RecallDiagnostics.json(plan.1), "context": RecallDiagnostics.json(plan.0)])
@@ -156,6 +161,7 @@ nonisolated struct RecallRepairStatus {
                                             guard self.generations[subjectID] == run else { throw CancellationError() }
                                             try self.repository.synchronize(subjectID)
                                             try self.repository.installDesign(partial, subjectID: subjectID)
+                                            RecallPreparationRuntime.shared.checkpointSaved()
                                         }, accessToken: {
                                             try self.check(account: account)
                                             guard self.generations[subjectID] == run else { throw CancellationError() }
@@ -307,8 +313,23 @@ nonisolated struct RecallRepairStatus {
             try repository.transaction { status.status = "paused"; status.message = message; status.updatedAt = .now }
         } catch { notice = error.localizedDescription }
     }
-    func background() { isForeground = false; interrupt(message: "Recall paused when Knowledge entered the background. Retry to continue.") }
-    func foreground() { isForeground = true; resumePreparation() }
+    func background() {
+        isForeground = false
+        for controller in sessions.values {
+            controller.interrupt(message: "Recall paused when Knowledge entered the background. Retry to continue.")
+        }
+        RecallPreparationRuntime.shared.background { [weak self] in
+            guard let self else { return }
+            for id in Array(self.tasks.keys) {
+                self.pausePreparation(id, message: "Background time ended. Completed questions were kept; resume preparation to continue.")
+            }
+        }
+    }
+    func foreground() {
+        isForeground = true
+        RecallPreparationRuntime.shared.foreground()
+        resumePreparation()
+    }
     func accountChanged() {
         interrupt(message: "Your ChatGPT connection changed. Your answers were kept; retry with the selected account.")
         preparationModel = ""; preparationReasoning = .automatic; assessmentModel = ""; assessmentReasoning = .medium
