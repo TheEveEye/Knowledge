@@ -51,6 +51,20 @@ function authenticationConfig() {
   return { secret, baseURL, trustedOrigins: [...new Set(trustedOrigins)], trustCloudflare: trustCloudflare === "true" };
 }
 
+function emailConfig() {
+  const enabled = process.env.EMAIL_AUTH_ENABLED ?? "false";
+  if (!["true", "false"].includes(enabled)) throw new Error("Invalid EMAIL_AUTH_ENABLED");
+  const from = process.env.EMAIL_FROM ?? "signin@auth.kiwiapps.dev";
+  if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(from)) throw new Error("Invalid EMAIL_FROM");
+  const filename = process.env.EMAIL_API_KEY_FILE;
+  const apiKey = enabled === "true"
+    ? (filename ? readFileSync(filename, "utf8").trim() : process.env.EMAIL_API_KEY)
+    : undefined;
+  if (enabled === "true" && (!apiKey || !/^re_[A-Za-z0-9_-]+$/.test(apiKey))) throw new Error("A Resend EMAIL_API_KEY_FILE or EMAIL_API_KEY is required");
+  if (process.env.RESEND_DEBUG === "true") throw new Error("RESEND_DEBUG must remain disabled to protect email credentials and recipients");
+  return { enabled: enabled === "true", from, apiKey, dailyLimit: integer("EMAIL_DAILY_LIMIT", 90, 100_000) };
+}
+
 export function loadConfig() {
   const logLevel = process.env.LOG_LEVEL ?? "info";
   if (!["fatal", "error", "warn", "info", "debug", "trace", "silent"].includes(logLevel)) {
@@ -61,9 +75,10 @@ export function loadConfig() {
     port: integer("PORT", 3000, 65535),
     logLevel,
     revision: process.env.APP_REVISION ?? "development",
-    version: "0.2.0",
+    version: "0.4.0",
     database: loadDatabaseConfig(),
     auth: authenticationConfig(),
+    email: emailConfig(),
   };
 }
 

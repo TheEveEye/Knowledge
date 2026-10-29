@@ -12,6 +12,8 @@ The Knowledge backend runs independently of Shrimp and Portainer on the Raspberr
 | `caddy` | Forwards `/api/*` to Fastify without stripping the prefix |
 | `cloudflared` | Optional dedicated Knowledge tunnel, enabled after its token is installed |
 
+Email sign-in uses Resend's HTTPS API rather than a separate mail container. The `email.yaml` overlay is included only after the private sending key is installed. See [email sign-in](Email-Sign-In.md) for domain verification and the activation command; the API remains ready while email delivery is disabled.
+
 Only Caddy is published on the Pi, at `127.0.0.1:8088`. The API and database are private to the Knowledge network. The public origin is `https://knowledge.kiwiapps.dev`; Cloudflare supplies public HTTPS and the encrypted outbound tunnel. The connector uses HTTP to reach Caddy on the private Docker network.
 
 The site root currently returns 404. A future web application will use `/`, while application endpoints retain `/api/`.

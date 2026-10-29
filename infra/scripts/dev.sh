@@ -6,6 +6,7 @@ if [[ ! -f .env ]]; then cp .env.example .env; fi
 bash infra/scripts/init-secrets.sh "$repo_dir/.secrets"
 args=(--project-name knowledge --project-directory "$repo_dir" --env-file "$repo_dir/.env"
   -f infra/compose/compose.yaml -f infra/compose/development.yaml)
+if [[ -s "$repo_dir/.secrets/email-api-key" ]]; then args+=(-f infra/compose/email.yaml); fi
 case ${1:-up} in
   up)
     docker compose "${args[@]}" build api

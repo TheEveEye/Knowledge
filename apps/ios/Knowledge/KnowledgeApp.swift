@@ -11,6 +11,7 @@ import SwiftData
 @main
 struct KnowledgeApp: App {
     @State private var authentication: AuthenticationStore
+    @State private var account = KnowledgeAccountStore()
     @State private var imports: ImportCoordinator
     let sharedModelContainer: ModelContainer
 
@@ -35,6 +36,7 @@ struct KnowledgeApp: App {
 
     private var authenticatedContent: some View {
             AuthenticationRootView()
+                .environment(account)
                 .environment(authentication)
                 .environment(imports)
                 .onChange(of: authentication.isBusy) { _, busy in

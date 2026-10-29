@@ -15,7 +15,7 @@ These endpoints are production operations features. No test targets, fixtures, t
 
 ## Knowledge accounts
 
-The account foundation provides PostgreSQL-backed users, linked identities, sessions, verification records, and authentication rate limits. `GET /api/me` returns the current user's profile or 401. Better Auth session inspection, sign-out, and session revocation run under `/api/auth/`. Email, Apple, and Google sign-in will be enabled in the following milestones; no public account creation or development login bypass is available yet.
+The account foundation provides PostgreSQL-backed users, linked identities, sessions, verification records, and authentication rate limits. `GET /api/me` returns the current user's profile or 401. Session inspection, sign-out, and revocation run under `/api/auth/`. Email/password sign-in and registration are implemented, with required email verification and code-based password recovery. Registration and recovery require configured delivery; verified users can sign in without sending an email. Apple and Google follow later. No development login bypass is available. See [email sign-in](../../docs/Email-Sign-In.md) for the real provider setup and endpoint contracts.
 
 See the [account foundation](../../docs/User-Accounts.md) for endpoint contracts, credential handling, and migration steps.
 
@@ -73,8 +73,12 @@ The initial role bootstrap runs only on an empty PostgreSQL volume. Changing a c
 | `AUTH_BASE_URL` | `https://knowledge.kiwiapps.dev` | Explicit public authentication origin; loopback HTTP allowed for development |
 | `AUTH_TRUSTED_ORIGINS` | Empty | Additional exact trusted origins, separated by commas; no CORS configuration implied |
 | `AUTH_TRUST_CLOUDFLARE` | `false` in code; `true` in production Compose | Trust edge-set `CF-Connecting-IP` behind the private tunnel origin |
+| `EMAIL_AUTH_ENABLED` | `false` | Enable registration, verification emails, and password recovery with a real provider key |
+| `EMAIL_API_KEY_FILE` | Required when enabled unless `EMAIL_API_KEY` is set | Mounted Resend sending key |
+| `EMAIL_FROM` | `signin@auth.kiwiapps.dev` | Bare sender email on a verified sending domain |
+| `EMAIL_DAILY_LIMIT` | `90` | Global application delivery budget per UTC day |
 
-Database connections remain inside the private Docker network in production. There are no public database or API container ports; Caddy is the gateway. Knowledge session handling is implemented; sign-in providers, client integration, AI-provider access, library sync, and background processing are later milestones.
+Database connections remain inside the private Docker network in production. There are no public database or API container ports; Caddy is the gateway. Knowledge session handling is implemented; social sign-in providers, AI-provider access, library sync, and background processing are later milestones.
 
 Request logging excludes query strings, headers, and bodies; error responses omit internal details. SIGTERM/SIGINT initiate graceful HTTP and database shutdown, with a bounded deadline.
 

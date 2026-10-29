@@ -2,25 +2,38 @@ import SwiftUI
 import UIKit
 
 struct AuthenticationRootView: View {
+    @Environment(KnowledgeAccountStore.self) private var account
     @Environment(AuthenticationStore.self) private var authentication
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.scenePhase) private var scenePhase
 
     private var modelCatalogSessionID: String? {
-        guard !authentication.isBusy, let account = authentication.activeAccount else { return nil }
-        return account.id + ":" + String(account.credentials?.planEnabled == true)
+        guard !account.isRestoring, let user = account.user,
+              !authentication.isBusy, let provider = authentication.activeAccount else { return nil }
+        return user.id.uuidString + ":" + provider.id + ":" + String(provider.credentials?.planEnabled == true)
     }
 
     var body: some View {
         Group {
-            switch authentication.state {
-            case .restoring:
-                ProgressView("Restoring your connection…")
+            if account.isRestoring {
+                ProgressView("Signing in to Knowledge…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .signedIn:
+            } else if let user = account.user {
                 ContentView()
-            case .signedOut, .signingIn, .recovery:
-                ChatGPTSignInView()
+                    .id(user.id)
+            } else if account.needsSessionValidation {
+                ContentUnavailableView {
+                    Label("Reconnect to Knowledge", systemImage: "wifi.exclamationmark")
+                } description: {
+                    Text(account.message ?? "Connect to the internet to restore your Knowledge session.")
+                } actions: {
+                    Button("Try again") { Task { await account.refresh() } }
+                        .buttonStyle(.borderedProminent)
+                    Button("Sign in with another account") { Task { await account.signOut() } }
+                }
+                .disabled(account.isBusy)
+            } else {
+                NavigationStack { KnowledgeEmailSignInView() }
             }
         }
         .background {
@@ -30,7 +43,7 @@ struct AuthenticationRootView: View {
             .frame(width: 0, height: 0)
         }
         .safeAreaInset(edge: .bottom) {
-            if case .signedIn = authentication.state, let message = authentication.message {
+            if account.user != nil, case .signedIn = authentication.state, let message = authentication.message {
                 HStack(alignment: .top, spacing: 16) {
                     Text(message)
                         .font(.callout)
@@ -46,104 +59,30 @@ struct AuthenticationRootView: View {
         .task {
             await authentication.restore()
         }
+        .task { await account.restore() }
         .task(id: modelCatalogSessionID) {
             guard !authentication.isBusy else { return }
             // Invalidate the previous session before starting its replacement fetch.
             imports.accountChanged()
-            guard authentication.activeAccount != nil else { return }
+            guard account.user != nil, !account.isRestoring, authentication.activeAccount != nil else { return }
             await imports.loadModels()
         }
+        .onChange(of: account.user?.id) { previous, current in
+            if previous != nil, previous != current {
+                imports.interruptChats(message: "Sign in to Knowledge to continue. Your drafts were kept.")
+                imports.merges.interrupt()
+                imports.pauseAll(message: "Sign in to Knowledge to continue. Your drafts were kept.")
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { imports.sceneDidBecomeActive() }
+            if phase == .active {
+                if account.user != nil { imports.sceneDidBecomeActive() }
+                Task { await account.refresh() }
+            }
             if phase == .background {
                 imports.sceneDidEnterBackground()
                 authentication.sceneDidEnterBackground()
             }
-        }
-    }
-}
-
-private struct ChatGPTSignInView: View {
-    @Environment(AuthenticationStore.self) private var authentication
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Welcome to Knowledge")
-                            .font(.largeTitle.bold())
-                            .accessibilityAddTraits(.isHeader)
-                        Text("Connect your ChatGPT account to get started.")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if !authentication.accounts.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Your accounts")
-                                .font(.headline)
-                                .accessibilityAddTraits(.isHeader)
-                            ForEach(authentication.accounts) { account in
-                                Button {
-                                    Task { await authentication.selectAccount(account.id) }
-                                } label: {
-                                    AccountRow(account: account)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(16)
-                                        .background(.background, in: RoundedRectangle(cornerRadius: 16))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(authentication.isBusy)
-                                .accessibilityHint("Continues with this saved ChatGPT account")
-                            }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        ChatGPTSignInButton {
-                            Task { await authentication.signIn() }
-                        }
-                        .disabled(authentication.isBusy)
-                        .accessibilityIdentifier("continueWithChatGPT")
-
-                        if !authentication.accounts.isEmpty || authentication.message != nil {
-                        Button("Use another ChatGPT account") {
-                            Task { await authentication.signIn(startNewRegistration: true) }
-                        }
-                        .frame(minHeight: 44)
-                        .disabled(authentication.isBusy)
-                        .accessibilityHint("Starts a new connection so you can choose a different ChatGPT account")
-                        }
-
-                        Text("ChatGPT will ask whether you want to let Knowledge use your plan. You can sign in without granting that permission.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        if authentication.isBusy {
-                            ProgressView("Connecting to ChatGPT…")
-                                .font(.callout)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                        }
-
-                        AuthenticationMessage()
-
-                        if authentication.state == .recovery {
-                            Button("Try again") {
-                                Task { await authentication.retryRestoration() }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(authentication.isBusy)
-                        }
-                    }
-                }
-                .padding(24)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity)
-            }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }
@@ -182,7 +121,7 @@ struct ChatGPTAccountView: View {
                     }
                 }
 
-                Section("Accounts") {
+                Section("ChatGPT connections") {
                     ForEach(authentication.accounts) { account in
                         Button {
                             Task { await authentication.selectAccount(account.id) }
@@ -201,7 +140,7 @@ struct ChatGPTAccountView: View {
                         .buttonStyle(.plain)
                         .disabled(authentication.isBusy)
                     }
-                    Button("Add another ChatGPT account") {
+                    Button(authentication.accounts.isEmpty ? "Connect ChatGPT" : "Add another ChatGPT connection") {
                         Task { await authentication.signIn(startNewRegistration: true) }
                     }
                     .disabled(authentication.isBusy)
@@ -216,19 +155,21 @@ struct ChatGPTAccountView: View {
                     }
                 }
 
-                Section {
-                    Button("Sign out", role: .destructive) {
-                        Task {
-                            await authentication.signOut()
-                            dismiss()
+                if authentication.activeAccount != nil {
+                    Section {
+                        Button("Disconnect ChatGPT", role: .destructive) {
+                            Task {
+                                await authentication.signOut()
+                                dismiss()
+                            }
                         }
+                        .disabled(authentication.isBusy)
+                    } footer: {
+                        Text("Disconnecting ends this AI connection. Your Knowledge account and local library stay available.")
                     }
-                    .disabled(authentication.isBusy)
-                } footer: {
-                    Text("Signing out ends this account’s session in Knowledge. Your saved items stay on this device.")
                 }
             }
-            .navigationTitle("ChatGPT account")
+            .navigationTitle("ChatGPT connection")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

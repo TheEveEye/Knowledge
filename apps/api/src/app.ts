@@ -38,7 +38,7 @@ export function createApp(config: Config) {
     },
   });
   const { db, pool } = createDatabase(config);
-  const auth = createAuth(config, db);
+  const auth = createAuth(config, db, (emailId) => app.log.info({ emailId }, "Account email accepted"));
   let closing = false;
 
   // Idle pool failures are handled without logging connection strings or credentials.

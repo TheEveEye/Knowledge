@@ -9,6 +9,9 @@ knowledge_compose() {
   if [[ -s "$KNOWLEDGE_REMOTE_DIR/.secrets/cloudflared-token" ]]; then
     args+=(-f "$release_dir/infra/compose/tunnel.yaml")
   fi
+  if [[ -s "$KNOWLEDGE_REMOTE_DIR/.secrets/email-api-key" && -f "$release_dir/infra/compose/email.yaml" ]]; then
+    args+=(-f "$release_dir/infra/compose/email.yaml")
+  fi
   docker compose "${args[@]}" "$@"
 }
 

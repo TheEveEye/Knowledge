@@ -45,7 +45,7 @@ import SwiftData
 
 #Preview("Subject library") {
     let data = try! LibraryPreviewData()
-    ContentView().environment(data.authentication).environment(data.imports).modelContainer(data.container)
+    ContentView().environment(data.authentication).environment(data.imports).environment(KnowledgeAccountStore()).modelContainer(data.container)
 }
 
 #Preview("Import review") {

@@ -10,6 +10,17 @@
 - Keep `.git` and these project-wide instructions at the repository root.
 - Add future applications, shared packages, and infrastructure in their own directories as they are implemented.
 
+## Account architecture
+
+- Knowledge currently uses email/password accounts. Apple, Google, and other OAuth login methods are deferred; do not add provider setup, SDKs, entitlements, or endpoints until requested.
+- Keep the permanent Knowledge user UUID independent of login methods. Future provider identities must link to that user without changing ownership of library data, sessions, purchases, or AI usage.
+- Future identity linking must require authenticated, explicit proof of both accounts; never merge users solely because email addresses match.
+- AI-provider connections are separate from Knowledge account identity.
+
+## UI copy
+
+- Do not add taglines, promotional copy, or unsolicited explanatory text to suffix views, form footers, or other trailing UI anywhere in the app. Keep these areas free of filler; show necessary validation guidance only when it is relevant to the user's input.
+
 ## No tests
 
 - Do not write, add, or restore any tests in this project.

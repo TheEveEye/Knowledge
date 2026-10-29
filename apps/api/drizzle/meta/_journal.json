@@ -15,6 +15,13 @@
       "when": 1793270411364,
       "tag": "0001_account_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793271412924,
+      "tag": "0002_email_delivery_limits",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,16 @@
 # Knowledge for iOS
 
-An iOS 27 SwiftUI app that turns study notes into source-grounded concepts, individual facts, and explained connections using Sign in with ChatGPT. From the repository root, open `apps/ios/Knowledge.xcodeproj` in Xcode 27, select the shared `Knowledge` scheme, and run on an iPhone or iPad simulator or device. The library remains stored on the device through account switches and sign-out.
+An iOS 27 SwiftUI app that turns study notes into source-grounded concepts, individual facts, and explained connections. From the repository root, open `apps/ios/Knowledge.xcodeproj` in Xcode 27, select the shared `Knowledge` scheme, and run on an iPhone or iPad simulator or device. The library remains stored on the device through account switches and sign-out.
+
+## Knowledge accounts and AI connections
+
+A Knowledge account is required to use the app. The first screen offers email/password sign-in or account creation, and the library opens after authentication. Saved sessions are validated before opening the library on launch; connection failures offer retry or a different account. Signing out returns to the entry screen and pauses active AI work. The account flow uses the Knowledge API's password sign-in, email verification, and password recovery endpoints and stores the Knowledge session in a separate device-only Keychain service. Delivery must first be configured on the server; see [email sign-in](../../docs/Email-Sign-In.md). The native HTTP client uses ephemeral storage, signed bearer credentials, the explicit HTTPS origin, and rejects redirects. Session refresh preserves renewal headers; sign-out clears local credentials even when remote revocation fails and reports that failure.
+
+New accounts verify their email, then sign in automatically using the signup password held temporarily in memory. **Set or reset password** sends a recovery code and also adds a password to existing email-code accounts without changing their identity. Password fields support password-manager AutoFill; the app never persists passwords. Verification and recovery codes cannot be used as passwordless login.
+
+**Account → AI connections → ChatGPT** retains the existing ChatGPT plan connection for current AI features. Connecting, switching, or disconnecting that provider does not create or sign out a Knowledge account. OpenAI API-funded AI access will be added separately.
+
+The account screen explicitly labels the library as local to the device. Signing in does not claim or upload existing library content. Account-scoped storage and explicit library migration must be implemented before cloud sync. No existing SwiftData model or on-disk library schema changes in this milestone.
 
 This app is unreleased and supports only its current data schema and import checkpoint format. There are no upgrade paths for previous development builds; recreate local development data when the format changes.
 

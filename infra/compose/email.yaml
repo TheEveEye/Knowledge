@@ -1,0 +1,13 @@
+services:
+  api:
+    environment:
+      EMAIL_AUTH_ENABLED: "true"
+      EMAIL_FROM: ${EMAIL_FROM:-signin@auth.kiwiapps.dev}
+      EMAIL_DAILY_LIMIT: ${EMAIL_DAILY_LIMIT:-90}
+      EMAIL_API_KEY_FILE: /run/secrets/email_api_key
+    secrets:
+      - email_api_key
+
+secrets:
+  email_api_key:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/email-api-key

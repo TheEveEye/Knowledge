@@ -63,7 +63,7 @@ struct ContentView: View {
             .navigationTitle("Knowledge")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("ChatGPT account", systemImage: "person.crop.circle") { sheet = .account }
+                    Button("Account", systemImage: "person.crop.circle") { sheet = .account }
                 }
                 ToolbarItem(placement: .primaryAction) { Button("New subject", systemImage: "plus") { sheet = .subject } }
             }
@@ -139,7 +139,7 @@ struct ContentView: View {
         }
         .sheet(item: $sheet) { sheet in
             switch sheet {
-            case .account: ChatGPTAccountView()
+            case .account: KnowledgeAccountView()
             case .welcome: ChatGPTPlanWelcomeView()
             case .subject: NewSubjectView()
             case .subjectSettings(let id, let name):

@@ -60,6 +60,14 @@ export const rateLimit = knowledgeSchema.table("auth_rate_limits", {
   lastRequest: bigint("last_request", { mode: "number" }).notNull(),
 });
 
+// Dedicated delivery budgets must outlive Better Auth's short HTTP rate windows.
+export const emailDeliveryLimit = knowledgeSchema.table("email_delivery_limits", {
+  key: text("key").primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  nextAllowedAt: timestamp("next_allowed_at", { withTimezone: true }).notNull(),
+  count: integer("count").notNull(),
+});
+
 export const userRelations = relations(user, ({ many }) => ({ sessions: many(session), accounts: many(account) }));
 export const sessionRelations = relations(session, ({ one }) => ({
   user: one(user, { fields: [session.userId], references: [user.id] }),

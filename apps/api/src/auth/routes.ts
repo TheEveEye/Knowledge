@@ -35,6 +35,62 @@ function forwardHeaders(headers: Headers, reply: FastifyReply) {
 }
 
 export function registerAccountRoutes(app: FastifyInstance, auth: Authentication, config: Config) {
+  const handleAuth = async (request: FastifyRequest, reply: FastifyReply) => {
+    const response = await auth.handler(new Request(`${config.auth.baseURL}${request.url}`, {
+      method: request.method, headers: authHeaders(request, config),
+      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+    }));
+    forwardHeaders(response.headers, reply);
+    return reply.code(response.status).send(response.body ? await response.text() : null);
+  };
+
+  app.get("/api/auth/methods", async () => ({
+    emailPassword: true, emailOTP: false, emailVerification: config.email.enabled,
+    passwordReset: config.email.enabled, minPasswordLength: 15, maxPasswordLength: 128,
+    codeLength: 6, expiresIn: 300, resendAfter: 60,
+  }));
+
+  const emailBody = { type: "string", format: "email", maxLength: 254 } as const;
+  const passwordBody = { type: "string", minLength: 15, maxLength: 128 } as const;
+  const otpBody = { type: "string", pattern: "^[0-9]{6}$" } as const;
+  const operations = [
+    { path: "/sign-up/email", required: ["email", "password", "name"], properties: {
+      email: emailBody, password: passwordBody, name: { type: "string", minLength: 1, maxLength: 80 },
+    }, needsEmail: true },
+    { path: "/sign-in/email", required: ["email", "password"], properties: {
+      email: emailBody, password: { ...passwordBody, minLength: 1 },
+    }, needsEmail: false },
+    { path: "/email-otp/send-verification-otp", required: ["email", "type"], properties: {
+      email: emailBody, type: { type: "string", enum: ["email-verification"] },
+    }, needsEmail: true },
+    { path: "/email-otp/verify-email", required: ["email", "otp"], properties: {
+      email: emailBody, otp: otpBody,
+    }, needsEmail: false },
+    { path: "/email-otp/request-password-reset", required: ["email"], properties: {
+      email: emailBody,
+    }, needsEmail: true },
+    { path: "/email-otp/reset-password", required: ["email", "otp", "password"], properties: {
+      email: emailBody, otp: otpBody, password: passwordBody,
+    }, needsEmail: false },
+  ];
+  for (const operation of operations) {
+    app.post<{ Body: { email: string } }>(`/api/auth${operation.path}`, {
+      bodyLimit: 2048,
+      schema: { body: {
+        type: "object", additionalProperties: false,
+        required: operation.required, properties: operation.properties,
+      } },
+    }, async (request, reply) => {
+      if (operation.needsEmail && !config.email.enabled) return reply.code(503).send({ code: "EMAIL_UNAVAILABLE", message: "Account email delivery is unavailable." });
+      // Native clients also send this explicit origin; no CSRF protections are disabled.
+      if (typeof request.headers.origin !== "string" || !config.auth.trustedOrigins.includes(request.headers.origin)) {
+        return reply.code(403).send({ code: "INVALID_ORIGIN", message: "Account operation could not be started." });
+      }
+      request.body.email = request.body.email.toLowerCase();
+      return handleAuth(request, reply);
+    });
+  }
+
   app.route({
     method: ["GET", "POST"],
     url: "/api/auth/*",
@@ -42,13 +98,7 @@ export function registerAccountRoutes(app: FastifyInstance, auth: Authentication
     async handler(request, reply) {
       const path = request.url.split("?")[0] ?? "";
       if (authRoutes.get(path) !== request.method) return reply.code(404).send({ error: "Not found" });
-      const response = await auth.handler(new Request(`${config.auth.baseURL}${request.url}`, {
-        method: request.method,
-        headers: authHeaders(request, config),
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-      }));
-      forwardHeaders(response.headers, reply);
-      return reply.code(response.status).send(response.body ? await response.text() : null);
+      return handleAuth(request, reply);
     },
   });
 
