@@ -5,7 +5,7 @@ umask 077
 secret_dir=${1:?Usage: init-secrets.sh SECRETS_DIRECTORY}
 mkdir -p "$secret_dir"
 chmod 700 "$secret_dir"
-for secret in db-owner-password db-app-password; do
+for secret in db-owner-password db-app-password auth-secret; do
   destination="$secret_dir/$secret"
   if [[ ! -e "$destination" ]]; then
     temporary=$(mktemp "$secret_dir/.password.XXXXXX")

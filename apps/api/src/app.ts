@@ -4,6 +4,8 @@ import { sql } from "drizzle-orm";
 import type { Config } from "./config.js";
 import { createDatabase } from "./db/client.js";
 import { bundledMigrations } from "./db/migrations.js";
+import { createAuth } from "./auth/auth.js";
+import { registerAccountRoutes } from "./auth/routes.js";
 
 const statusSchema = {
   type: "object",
@@ -36,6 +38,7 @@ export function createApp(config: Config) {
     },
   });
   const { db, pool } = createDatabase(config);
+  const auth = createAuth(config, db);
   let closing = false;
 
   // Idle pool failures are handled without logging connection strings or credentials.
@@ -75,6 +78,8 @@ export function createApp(config: Config) {
       return reply.code(503).send({ status: "unavailable" });
     }
   });
+
+  registerAccountRoutes(app, auth, config);
 
   return app;
 }

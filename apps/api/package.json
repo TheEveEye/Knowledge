@@ -1,9 +1,11 @@
 {
   "name": "@knowledge/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -13,6 +15,8 @@
     "db:migrate": "node dist/db/migrate.js"
   },
   "dependencies": {
+    "@better-auth/drizzle-adapter": "1.7.14",
+    "better-auth": "1.7.14",
     "drizzle-orm": "0.45.4",
     "fastify": "5.12.7",
     "pg": "8.23.1"

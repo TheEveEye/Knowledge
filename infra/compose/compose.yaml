@@ -71,9 +71,14 @@ services:
       PORT: "3000"
       APP_REVISION: ${APP_REVISION:-development}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      AUTH_BASE_URL: ${AUTH_BASE_URL:-https://knowledge.kiwiapps.dev}
+      AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-}
+      AUTH_TRUST_CLOUDFLARE: ${AUTH_TRUST_CLOUDFLARE:-true}
+      AUTH_SECRET_FILE: /run/secrets/auth_secret
     secrets:
       - source: db_app_password
         target: db_password
+      - auth_secret
     depends_on:
       db:
         condition: service_healthy
@@ -106,6 +111,8 @@ secrets:
     file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/db-owner-password
   db_app_password:
     file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/db-app-password
+  auth_secret:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/auth-secret
 
 volumes:
   pgdata:

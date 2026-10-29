@@ -4,5 +4,8 @@ services:
     ports:
       - "127.0.0.1:5433:5432"
   api:
+    environment:
+      AUTH_BASE_URL: http://127.0.0.1:8088
+      AUTH_TRUST_CLOUDFLARE: "false"
     ports:
       - "127.0.0.1:3001:3000"

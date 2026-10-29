@@ -31,7 +31,7 @@ The script:
 1. Archives only backend and infrastructure source, excluding installed dependencies and generated output. No local credential files or iOS source are uploaded.
 2. Verifies the archive checksum on the Pi and creates a timestamped release under `/opt/knowledge/releases/`.
 3. Records its source checksum, base Git revision, and image tag in `.env.release`. Uncommitted source is explicitly marked `dirty` with a source checksum.
-4. Generates database passwords only if absent. Existing credentials are retained.
+4. Generates database passwords and the authentication secret only if absent. Existing credentials are retained.
 5. Creates a database backup before migrating an existing deployment, builds the image, and applies migrations.
 6. Starts the API and Caddy, waiting for the API's production readiness health check.
 7. Updates `/opt/knowledge/current` after successful startup and preserves the previous release for application rollback.
@@ -57,6 +57,8 @@ Backups default to `~/Backups/knowledge` on the Mac, include a SHA-256 sidecar, 
 Application rollback switches to the previous image and configuration; it does not reverse migrations or restore database contents. Automatic startup-failure recovery also retains migrations. Data restoration is a separate operation, with an explicit backup and recovery plan.
 
 Runtime credentials live under `/opt/knowledge/.secrets/`, whose directory permissions are `0700`. Individual mounted files are readable to their containers' different user IDs. Keep the containing directory private and include credentials in an appropriately protected disaster-recovery backup; a database dump alone does not preserve the application's external credentials.
+
+The API additionally mounts `auth-secret`, used for Knowledge session signatures and provider-token encryption. Its public authentication origin defaults to `https://knowledge.kiwiapps.dev`; trusted extra origins are explicitly configured with `AUTH_TRUSTED_ORIGINS`. The production Compose configuration trusts Cloudflare's client-IP header because API ports remain private behind the tunnel. See [user accounts](User-Accounts.md) for the endpoint contract and development settings. Never replace the authentication secret during routine deployment.
 
 Do not use `docker compose down --volumes` or prune named volumes. Compose definitions remain in Git and on disk; Portainer provides visibility into the externally managed stack.
 
@@ -100,7 +102,7 @@ The `knowledge` tunnel has already been created with ID `122e8f85-0262-4422-a3e4
 5. Allow Cloudflare to create the hostname's proxied DNS record. If manual creation is required, use a proxied CNAME from `knowledge` to `<TUNNEL_ID>.cfargotunnel.com`, with automatic TTL. Do not create an A record pointing to the Pi's private IP.
 6. The public endpoints will be `https://knowledge.kiwiapps.dev/api/status` and `https://knowledge.kiwiapps.dev/api/ready` once the connector is healthy and DNS and the edge certificate are active.
 
-No router port forwarding is required. Shrimp's tunnel, Portainer, and their DNS records do not need changing. Do not put an interactive Cloudflare Access login in front of the entire API if native clients are expected to connect; application authentication will be implemented separately.
+No router port forwarding is required. Shrimp's tunnel, Portainer, and their DNS records do not need changing. Do not put an interactive Cloudflare Access login in front of the entire API if native clients are expected to connect; Knowledge manages its own application sessions.
 
 The web page root can be published through the same hostname later, without another API hostname or a cross-origin browser configuration.
 

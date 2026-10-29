@@ -1,8 +1,9 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import type { Config } from "../config.js";
+import * as schema from "./schema.js";
 
-export function createDatabase(config: Config, migration = false) {
+export function createDatabase(config: Pick<Config, "database">, migration = false) {
   const pool = new pg.Pool({
     ...config.database,
     application_name: migration ? "knowledge-migrations" : "knowledge-api",
@@ -12,5 +13,7 @@ export function createDatabase(config: Config, migration = false) {
     statement_timeout: migration ? 30_000 : 2000,
     query_timeout: migration ? 30_000 : 2500,
   });
-  return { pool, db: drizzle(pool) };
+  return { pool, db: drizzle(pool, { schema }) };
 }
+
+export type Database = ReturnType<typeof createDatabase>["db"];

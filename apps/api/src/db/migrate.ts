@@ -1,9 +1,9 @@
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { loadConfig } from "../config.js";
+import { loadDatabaseConfig } from "../config.js";
 import { createDatabase } from "./client.js";
 import { migrationsFolder } from "./migrations.js";
 
-const { pool } = createDatabase(loadConfig(), true);
+const { pool } = createDatabase({ database: loadDatabaseConfig() }, true);
 try {
   // One session owns the lock until migration and connection shutdown finish.
   const client = await pool.connect();

@@ -4,7 +4,7 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
 RUN npm ci
 COPY apps/api ./apps/api
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev --omit=optional
 
 FROM node:24-bookworm-slim AS runtime
 ARG APP_REVISION=development
@@ -13,6 +13,7 @@ LABEL org.opencontainers.image.source="https://github.com/TheEveEye/Knowledge"
 LABEL org.opencontainers.image.revision=$APP_REVISION
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/drizzle ./apps/api/drizzle

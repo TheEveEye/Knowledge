@@ -18,6 +18,39 @@ function databasePassword(): string {
   return password;
 }
 
+export function loadDatabaseConfig() {
+  return {
+    host: process.env.DB_HOST ?? "127.0.0.1",
+    port: integer("DB_PORT", 5432, 65535),
+    database: process.env.DB_NAME ?? "knowledge",
+    user: process.env.DB_USER ?? "knowledge_api",
+    password: databasePassword(),
+  };
+}
+
+function origin(value: string, name: string): string {
+  const url = new URL(value);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+    || url.hostname.includes("*") || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error(`Invalid ${name}: use an HTTPS origin (HTTP is allowed only on loopback)`);
+  }
+  return url.origin;
+}
+
+function authenticationConfig() {
+  const filename = process.env.AUTH_SECRET_FILE;
+  const secret = filename ? readFileSync(filename, "utf8").trim() : process.env.AUTH_SECRET;
+  if (!secret || secret.length < 32) throw new Error("AUTH_SECRET_FILE or AUTH_SECRET must supply at least 32 characters");
+  const baseURL = origin(process.env.AUTH_BASE_URL ?? "https://knowledge.kiwiapps.dev", "AUTH_BASE_URL");
+  const trustedOrigins = [baseURL, ...(process.env.AUTH_TRUSTED_ORIGINS ?? "")
+    .split(",").map((value) => value.trim()).filter(Boolean)
+    .map((value) => origin(value, "AUTH_TRUSTED_ORIGINS"))];
+  const trustCloudflare = process.env.AUTH_TRUST_CLOUDFLARE ?? "false";
+  if (!["true", "false"].includes(trustCloudflare)) throw new Error("Invalid AUTH_TRUST_CLOUDFLARE");
+  return { secret, baseURL, trustedOrigins: [...new Set(trustedOrigins)], trustCloudflare: trustCloudflare === "true" };
+}
+
 export function loadConfig() {
   const logLevel = process.env.LOG_LEVEL ?? "info";
   if (!["fatal", "error", "warn", "info", "debug", "trace", "silent"].includes(logLevel)) {
@@ -28,14 +61,9 @@ export function loadConfig() {
     port: integer("PORT", 3000, 65535),
     logLevel,
     revision: process.env.APP_REVISION ?? "development",
-    version: "0.1.0",
-    database: {
-      host: process.env.DB_HOST ?? "127.0.0.1",
-      port: integer("DB_PORT", 5432, 65535),
-      database: process.env.DB_NAME ?? "knowledge",
-      user: process.env.DB_USER ?? "knowledge_api",
-      password: databasePassword(),
-    },
+    version: "0.2.0",
+    database: loadDatabaseConfig(),
+    auth: authenticationConfig(),
   };
 }
 

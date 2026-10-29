@@ -8,6 +8,13 @@
       "when": 1793226369944,
       "tag": "0000_initialize_database",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793270411364,
+      "tag": "0001_account_foundation",
+      "breakpoints": true
     }
   ]
 }

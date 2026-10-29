@@ -18,7 +18,7 @@ Future applications will use `apps/web/` and `apps/android/`. Shared API contrac
 
 ## Backend
 
-The Node.js 24 backend exposes `/api/status` and `/api/ready`. From the repository root, `npm run dev:up` builds and starts the local Docker stack. See the [API README](apps/api/README.md) and [Pi deployment and Cloudflare setup](docs/Backend-Deployment.md).
+The Node.js 24 backend exposes `/api/status`, `/api/ready`, and the Knowledge account foundation (`/api/me` and session endpoints under `/api/auth/`). From the repository root, `npm run dev:up` builds and starts the local Docker stack. See the [API README](apps/api/README.md), [user accounts](docs/User-Accounts.md), and [Pi deployment and Cloudflare setup](docs/Backend-Deployment.md).
 
 ## Open the iOS app
 
