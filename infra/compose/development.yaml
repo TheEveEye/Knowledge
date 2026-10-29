@@ -1,0 +1,8 @@
+# Only the local development stack exposes PostgreSQL to host tools.
+services:
+  db:
+    ports:
+      - "127.0.0.1:5433:5432"
+  api:
+    ports:
+      - "127.0.0.1:3001:3000"

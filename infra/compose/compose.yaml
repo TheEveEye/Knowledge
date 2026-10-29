@@ -1,0 +1,116 @@
+name: knowledge
+
+x-api-image: &api-image
+  image: ${KNOWLEDGE_API_IMAGE:-knowledge-api:development}
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+    args:
+      APP_REVISION: ${APP_REVISION:-development}
+
+x-database: &database
+  DB_HOST: db
+  DB_PORT: "5432"
+  DB_NAME: knowledge
+  DB_PASSWORD_FILE: /run/secrets/db_password
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: knowledge
+      POSTGRES_USER: knowledge_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets:
+      - db_owner_password
+      - db_app_password
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ${KNOWLEDGE_POSTGRES_INIT:-./infra/postgres/init-app-user.sh}:/docker-entrypoint-initdb.d/10-app-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowledge_owner -d knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging: *logging
+
+  migrate:
+    <<: *api-image
+    command: ["node", "dist/db/migrate.js"]
+    restart: "no"
+    environment:
+      <<: *database
+      DB_USER: knowledge_owner
+    secrets:
+      - source: db_owner_password
+        target: db_password
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    logging: *logging
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    environment:
+      <<: *database
+      DB_USER: knowledge_api
+      HOST: 0.0.0.0
+      PORT: "3000"
+      APP_REVISION: ${APP_REVISION:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    secrets:
+      - source: db_app_password
+        target: db_password
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KNOWLEDGE_HTTP_PORT:-8088}:80"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      default:
+        aliases: [knowledge-caddy]
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *logging
+
+secrets:
+  db_owner_password:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/db-owner-password
+  db_app_password:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/db-app-password
+
+volumes:
+  pgdata:
+    name: knowledge_pgdata
+  caddy_data:
+    name: knowledge_caddy_data
+  caddy_config:
+    name: knowledge_caddy_config

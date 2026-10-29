@@ -2,17 +2,23 @@
 
 Knowledge turns study notes into source-grounded concepts, facts, and explained connections, with Recall practice built from the saved material.
 
-This repository contains the Knowledge applications and shared documentation. The iOS app is currently implemented. The API, web app, and Android app will be added as separate applications in this repository.
+This repository contains the Knowledge applications and shared documentation. It currently includes the iOS app and the API foundation. The web and Android applications will be added separately.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `apps/ios/` | iOS app, Xcode project, app configuration, and detailed iOS documentation |
+| `apps/api/` | Fastify API, Drizzle migrations, and backend documentation |
+| `infra/` | Docker Compose, Caddy, PostgreSQL bootstrap, and deployment scripts |
 | `docs/` | Shared Recall design and grading contracts |
 | `AGENTS.md` | Project-wide instructions for AI development |
 
-Future components will use `apps/api/`, `apps/web/`, and `apps/android/`. Shared API contracts will live in `packages/contracts/`, and deployment configuration and scripts will live in `infra/`. These directories will be introduced with their implementations.
+Future applications will use `apps/web/` and `apps/android/`. Shared API contracts will live in `packages/contracts/` when client-facing endpoints are implemented.
+
+## Backend
+
+The Node.js 24 backend exposes `/api/status` and `/api/ready`. From the repository root, `npm run dev:up` builds and starts the local Docker stack. See the [API README](apps/api/README.md) and [Pi deployment and Cloudflare setup](docs/Backend-Deployment.md).
 
 ## Open the iOS app
 

@@ -1,0 +1,18 @@
+{
+    admin off
+    auto_https off
+}
+
+:80 {
+    header -Server
+
+    handle /api/* {
+        # Preserve /api; the Fastify routes include the prefix.
+        reverse_proxy api:3000
+    }
+
+    # The web application will be served here in a later milestone.
+    handle {
+        respond "Not found" 404
+    }
+}

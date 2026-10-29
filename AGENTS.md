@@ -4,6 +4,9 @@
 
 - The iOS app, Xcode project, and app configuration live together in `apps/ios/`.
 - Shared product documentation lives in `docs/`; detailed iOS documentation lives in `apps/ios/README.md`.
+- The Fastify API lives in `apps/api/`; backend deployment configuration and scripts live in `infra/`.
+- Use Node.js 24 for backend tooling. Build and typecheck commands do not run tests.
+- Keep credentials out of Git. Use the documented secret files and deployment scripts; preserve existing database volumes and immutable migrations.
 - Keep `.git` and these project-wide instructions at the repository root.
 - Add future applications, shared packages, and infrastructure in their own directories as they are implemented.
 
