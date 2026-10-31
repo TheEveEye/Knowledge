@@ -425,7 +425,7 @@ private struct RecallOverviewCards: View {
             }
             .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
             .padding(16)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+            .background(.background, in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(title), \(value.formatted()), \(detail)")
         }

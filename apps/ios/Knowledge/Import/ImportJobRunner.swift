@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import UIKit
 
 /// Owns the mutable processing state of exactly one import. All persistence stays on the main actor.
 @MainActor @Observable final class ImportJobRunner {
@@ -15,6 +14,7 @@ import UIKit
     @ObservationIgnored private let authentication: AuthenticationStore
     @ObservationIgnored private let client: any ChatGPTPlanRequesting
     @ObservationIgnored private let extractor: any ConceptExtractor
+    @ObservationIgnored private let isInBackground: @MainActor () -> Bool
     @ObservationIgnored private let onStopped: @MainActor (Bool) -> Void
     @ObservationIgnored private let onError: @MainActor (String) -> Void
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -26,9 +26,11 @@ import UIKit
 
     init(jobID: UUID, repository: KnowledgeRepository, authentication: AuthenticationStore,
          client: any ChatGPTPlanRequesting, extractor: any ConceptExtractor,
+         isInBackground: @escaping @MainActor () -> Bool,
          onStopped: @escaping @MainActor (Bool) -> Void, onError: @escaping @MainActor (String) -> Void) {
         self.jobID = jobID; self.repository = repository; self.authentication = authentication
         self.client = client; self.extractor = extractor; self.onStopped = onStopped; self.onError = onError
+        self.isInBackground = isInBackground
     }
 
     func sceneDidEnterBackground() {
@@ -58,13 +60,13 @@ import UIKit
             let run = UUID(); runID = run; isRunning = true; progress = initialProgress
             progressTask?.cancel(); progressTask = nil; pendingProgress = nil; lastProgressEmission = .distantPast
             backgroundNotice = nil
-            backgroundExecution.begin(title: job.title, progress: initialProgress, onExpiration: { [weak self] in
+            backgroundExecution.begin(title: job.title, progress: initialProgress, isInBackground: isInBackground(), onExpiration: { [weak self] in
                 guard let self, self.runID == run else { return }
                 self.pause(message: "Background processing ended or was canceled. Completed work was kept. Resume to continue.")
             }, onUnavailable: { [weak self] in
                 guard let self, self.runID == run else { return }
                 self.backgroundNotice = "Background processing is unavailable right now. Keep Knowledge open to finish this import."
-                if UIApplication.shared.applicationState == .background {
+                if self.isInBackground() {
                     self.pause(message: "Background processing is unavailable. Completed work was kept. Open Knowledge and resume to continue.")
                 }
             })

@@ -1,6 +1,7 @@
+import AuthenticationServices
 import Foundation
 import Observation
-import UIKit
+import SwiftUI
 
 nonisolated enum AuthenticationState: Equatable {
     case restoring, signedOut, signingIn, signedIn(String), recovery
@@ -41,8 +42,8 @@ final class AuthenticationStore {
     var activeAccount: StoredChatGPTAccount? { accounts.first { $0.clientID == activeID } }
     var isBusy: Bool { state == .restoring || state == .signingIn || signingOut || operationInProgress }
 
-    func setPresentationAnchor(_ window: UIWindow) {
-        (browser as? OAuthBrowserSession)?.presentationAnchor = window
+    func setWebAuthenticationSession(_ session: WebAuthenticationSession) {
+        (browser as? OAuthBrowserSession)?.webAuthenticationSession = session
     }
 
     func restore() async {

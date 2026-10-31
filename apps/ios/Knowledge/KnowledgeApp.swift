@@ -10,6 +10,7 @@ import SwiftData
 
 @main
 struct KnowledgeApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var authentication: AuthenticationStore
     @State private var account = KnowledgeAccountStore()
     @State private var imports: ImportCoordinator
@@ -32,6 +33,9 @@ struct KnowledgeApp: App {
             authenticatedContent
         }
         .modelContainer(sharedModelContainer)
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            imports.setApplicationBackgroundState(phase == .background)
+        }
     }
 
     private var authenticatedContent: some View {

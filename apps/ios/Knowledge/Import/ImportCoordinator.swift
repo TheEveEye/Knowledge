@@ -29,6 +29,7 @@ import UIKit
     @ObservationIgnored private var chats: [UUID: ChatSession] = [:]
     @ObservationIgnored private var subjectChats: [UUID: ChatSession] = [:]
     private(set) var isForeground = true
+    private(set) var isApplicationInBackground = false
 
     init(authentication: AuthenticationStore, container: ModelContainer,
          client: (any ChatGPTPlanRequesting)? = nil, extractor: (any ConceptExtractor)? = nil,
@@ -304,6 +305,7 @@ import UIKit
             else {
                 runner = ImportJobRunner(jobID: jobID, repository: repository, authentication: authentication,
                     client: client, extractor: extractor,
+                    isInBackground: { [weak self] in self?.isApplicationInBackground ?? true },
                     onStopped: { [weak self] succeeded in
                         guard let self else { return }
                         if succeeded { self.runners[jobID] = nil }
@@ -368,6 +370,10 @@ import UIKit
         pauseAll(message: ImportError.accountChanged.localizedDescription)
         catalogRunID = UUID(); isLoadingModels = false
         useDefaultModels = true; models = []; selectedModel = ""; defaultImportModel = ""; defaultChatModel = ""; defaultRecallModel = ""; defaultRecallPreparationModel = ""; recallPreparationReasoning = .automatic; recallAssessmentReasoning = .medium; modelError = nil
+    }
+
+    func setApplicationBackgroundState(_ isInBackground: Bool) {
+        isApplicationInBackground = isInBackground
     }
 
     func sceneDidEnterBackground() {

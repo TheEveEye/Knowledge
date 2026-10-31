@@ -2,7 +2,7 @@ import SwiftUI
 
 enum RecallProficiencyColor {
     static func color(for value: Double) -> Color {
-        let red = Color(uiColor: .systemRed).mix(with: .black, by: 0.3)
+        let red = Color.red.mix(with: .black, by: 0.3)
         let stops: [(Double, Color)] = [(0, red), (0.35, .orange), (0.55, .yellow), (0.75, .green), (1, .accentColor)]
         for index in 1..<stops.count where value <= stops[index].0 {
             let start = stops[index - 1], end = stops[index]
@@ -21,7 +21,7 @@ struct ProficiencyRowBackground: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            Color(uiColor: .secondarySystemGroupedBackground)
+            Rectangle().fill(.background)
             if let value {
                 let fraction = min(1, max(0, value))
                 GeometryReader { geometry in

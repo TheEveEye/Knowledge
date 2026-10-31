@@ -77,8 +77,7 @@ private struct LearningMethodGrid: View {
                     }
                     .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
                     .padding(16)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground),
-                                in: cardShape)
+                    .background(.background, in: cardShape)
                     .contentShape(cardShape)
                 }
                 .buttonStyle(.plain)
@@ -138,7 +137,7 @@ private struct LearningMethodView: View {
             if destination.method == .recall {
                 RecallHomeView(scope: .init(subjectID: destination.subjectID, topicID: destination.topicID))
             } else {
-                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+                Rectangle().fill(.background.secondary).ignoresSafeArea()
             }
         }
         .navigationTitle(destination.method.rawValue)

@@ -14,12 +14,12 @@ import UIKit
 
     var isRequested: Bool { identifier != nil }
 
-    func begin(title: String, progress: ExtractionProgress,
+    func begin(title: String, progress: ExtractionProgress, isInBackground: Bool,
                onExpiration: @escaping @MainActor () -> Void,
                onUnavailable: @escaping @MainActor () -> Void) {
         finish(success: false)
         self.title = String(title.prefix(100))
-        guard UIApplication.shared.applicationState != .background else {
+        guard !isInBackground else {
             onUnavailable()
             return
         }

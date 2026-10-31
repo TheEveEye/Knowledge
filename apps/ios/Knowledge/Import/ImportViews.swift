@@ -1,6 +1,6 @@
 import SwiftUI
 import SwiftData
-import UIKit
+import Observation
 import UniformTypeIdentifiers
 
 struct ImportModelPicker: View {
@@ -41,11 +41,12 @@ struct NewImportView: View {
     let subject: KnowledgeSubject
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.undoManager) private var undoManager
     @State private var useFile = true
     @State private var selectedFile: URL?
     @State private var showFiles = false
-    @State private var title = ""
-    @State private var text = ""
+    @State private var titleInput = ImportTextInput()
+    @State private var notesInput = ImportTextInput()
     @State private var createdJobID: UUID?
     @State private var error: String?
     @State private var isPreparing = false
@@ -53,6 +54,8 @@ struct NewImportView: View {
     @State private var pasteButtonFrame: CGRect = .zero
     @FocusState private var focusedField: InputField?
     var body: some View {
+        @Bindable var titleInput = titleInput
+        @Bindable var notesInput = notesInput
         NavigationStack {
             Form {
                 Section {
@@ -65,12 +68,12 @@ struct NewImportView: View {
                         Text("Uses selectable PDF text. Scans, images, and Office documents are coming later.")
                             .font(.callout).foregroundStyle(.secondary)
                     } else {
-                        TextField("Title (optional)", text: $title)
+                        TextField("Title (optional)", text: $titleInput.text, selection: $titleInput.selection)
                             .focused($focusedField, equals: .title)
                             .onGeometryChange(for: CGRect.self) { proxy in
                                 proxy.frame(in: .global)
                             } action: { inputFrames[.title] = $0 }
-                        TextField("Notes to import", text: $text, axis: .vertical)
+                        TextField("Notes to import", text: $notesInput.text, selection: $notesInput.selection, axis: .vertical)
                             .focused($focusedField, equals: .notes)
                             .lineLimit(nil)
                             .fixedSize(horizontal: false, vertical: true)
@@ -99,10 +102,10 @@ struct NewImportView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if focusedField != nil {
                     HStack {
-                        Button("Paste", systemImage: "doc.on.clipboard") {
-                            UIApplication.shared.sendAction(
-                                #selector(UIResponder.paste(_:)), to: nil, from: nil, for: nil
-                            )
+                        PasteButton(payloadType: String.self) { values in
+                            guard let focusedField else { return }
+                            let input = focusedField == .title ? titleInput : notesInput
+                            input.paste(values.joined(separator: "\n"), undoManager: undoManager)
                         }
                             .labelStyle(.iconOnly)
                             .buttonStyle(.glass)
@@ -129,7 +132,7 @@ struct NewImportView: View {
                         .labelStyle(.iconOnly)
                         .buttonStyle(.borderedProminent)
                         .disabled(isPreparing || imports.selectedModel.isEmpty
-                                  || (useFile ? selectedFile == nil : text.trimmed.isEmpty))
+                                  || (useFile ? selectedFile == nil : notesInput.text.trimmed.isEmpty))
                 }
             }
             .fileImporter(isPresented: $showFiles, allowedContentTypes: [.pdf, .plainText, .text]) { result in
@@ -146,11 +149,13 @@ struct NewImportView: View {
         .modifier(ImportChatHost())
         .interactiveDismissDisabled(isPreparing)
         .onAppear { imports.useDefaultImportModel() }
-        .gesture(ImportKeyboardDismissGesture(isEnabled: focusedField != nil) { location in
-            guard !pasteButtonFrame.contains(location),
-                  !inputFrames.values.contains(where: { $0.contains(location) }) else { return }
-            focusedField = nil
-        })
+        .simultaneousGesture(
+            SpatialTapGesture(coordinateSpace: .global).onEnded { value in
+                guard focusedField != nil, !pasteButtonFrame.contains(value.location),
+                      !inputFrames.values.contains(where: { $0.contains(value.location) }) else { return }
+                focusedField = nil
+            }
+        )
     }
     private func prepare() {
         guard !isPreparing else { return }
@@ -162,46 +167,42 @@ struct NewImportView: View {
             do {
                 let id: UUID
                 if useFile, let selectedFile { id = try await imports.prepare(subjectID: subject.id, file: selectedFile) }
-                else { id = try await imports.prepare(subjectID: subject.id, title: title, text: text) }
+                else { id = try await imports.prepare(subjectID: subject.id, title: titleInput.text, text: notesInput.text) }
                 createdJobID = id; imports.start(jobID: id)
             } catch { self.error = error.localizedDescription }
         }
     }
 }
 
-private struct ImportKeyboardDismissGesture: UIGestureRecognizerRepresentable {
-    let isEnabled: Bool
-    let onTap: (CGPoint) -> Void
+@MainActor @Observable private final class ImportTextInput {
+    var text = ""
+    var selection: TextSelection?
 
-    func makeUIGestureRecognizer(context: Context) -> UITapGestureRecognizer {
-        let recognizer = UITapGestureRecognizer()
-        // Observe outside taps without canceling or delaying the form's controls.
-        recognizer.cancelsTouchesInView = false
-        recognizer.delaysTouchesBegan = false
-        recognizer.delaysTouchesEnded = false
-        recognizer.delegate = context.coordinator
-        recognizer.isEnabled = isEnabled
-        return recognizer
-    }
-
-    func updateUIGestureRecognizer(_ recognizer: UITapGestureRecognizer, context: Context) {
-        recognizer.isEnabled = isEnabled
-    }
-
-    func handleUIGestureRecognizerAction(_ recognizer: UITapGestureRecognizer, context: Context) {
-        guard recognizer.state == .ended else { return }
-        onTap(context.converter.location(in: .global))
-    }
-
-    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            true
+    func paste(_ value: String, undoManager: UndoManager?) {
+        guard !value.isEmpty else { return }
+        let range: Range<String.Index>
+        if let selection, case .selection(let selectedRange) = selection.indices {
+            range = selectedRange
+        } else {
+            range = text.endIndex..<text.endIndex
         }
+        // Keep the insertion offset before replacing text invalidates its indices.
+        let offset = range.lowerBound.utf16Offset(in: text)
+        var updated = text
+        updated.replaceSubrange(range, with: value)
+        let cursor = String.Index(utf16Offset: offset + value.utf16.count, in: updated)
+        replace(with: updated, selection: TextSelection(insertionPoint: cursor), undoManager: undoManager)
+        undoManager?.setActionName("Paste")
+    }
+
+    private func replace(with value: String, selection newSelection: TextSelection?, undoManager: UndoManager?) {
+        let previousText = text
+        let previousSelection = selection
+        undoManager?.registerUndo(withTarget: self) { [weak undoManager] target in
+            target.replace(with: previousText, selection: previousSelection, undoManager: undoManager)
+        }
+        text = value
+        selection = newSelection
     }
 }
 

@@ -1,18 +1,19 @@
+import CoreText
 import MathJaxSwift
 import SwiftDraw
 import SwiftUI
-import UIKit
 
 /// Keeps Markdown in native selectable text, including literal math inside code.
 struct ChatMathText: View {
     let source: String
     @Environment(\.displayScale) private var displayScale
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.fontResolutionContext) private var fontResolutionContext
     @State private var images: [String: RenderedEquation] = [:]
-    @State private var imageSize: DynamicTypeSize?
+    @State private var imageFont: Font.Resolved?
     @State private var imageScale: CGFloat?
 
     var body: some View {
+        let font = Font.body.resolve(in: fontResolutionContext)
         let document = MathDocument(source)
         let citations = citationNumbers(in: document)
         VStack(alignment: .leading, spacing: 8) {
@@ -25,28 +26,32 @@ struct ChatMathText: View {
                 }
             }
         }
-        .task(id: RenderKey(source: source, size: dynamicTypeSize, scale: displayScale)) {
+        .task(id: RenderKey(source: source, font: font, scale: displayScale)) {
             // A new streamed fragment cancels obsolete work. Completed equations
             // remain cached locally, so only newly closed formulas need rendering.
-            let xHeight = UIFont.preferredFont(
-                forTextStyle: .body,
-                compatibleWith: UITraitCollection(preferredContentSizeCategory: .init(dynamicTypeSize))
-            ).xHeight
+            let xHeight = CTFontGetXHeight(font.ctFont)
             var updated: [String: RenderedEquation] = [:]
             for equation in document.allEquations {
                 guard !Task.isCancelled else { return }
-                if imageSize == dynamicTypeSize, imageScale == displayScale, let image = images[equation] {
+                if imageFont == font, imageScale == displayScale, let image = images[equation] {
                     updated[equation] = image
                     continue
                 }
                 let rendered = await ChatMathRenderer.shared.render(equation, xHeight: xHeight, scale: displayScale)
                 guard !Task.isCancelled else { return }
-                if let rendered, let image = UIImage(data: rendered.data, scale: displayScale) {
-                    updated[equation] = RenderedEquation(image: image, baseline: rendered.baseline)
+                if let rendered {
+                    let renderer = ImageRenderer(content: SVGView(svg: rendered.svg))
+                    renderer.scale = displayScale
+                    if let image = renderer.cgImage {
+                        updated[equation] = RenderedEquation(
+                            image: Image(decorative: image, scale: displayScale),
+                            height: CGFloat(image.height) / displayScale, baseline: rendered.baseline
+                        )
+                    }
                 }
             }
             images = updated
-            imageSize = dynamicTypeSize
+            imageFont = font
             imageScale = displayScale
         }
     }
@@ -57,14 +62,14 @@ struct ChatMathText: View {
             // width; only equations wider than that width need to scroll.
             GeometryReader { geometry in
                 ScrollView(.horizontal) {
-                    Image(uiImage: rendered.image)
+                    rendered.image
                         .renderingMode(.template)
                         .frame(minWidth: geometry.size.width)
                         .accessibilityLabel(equation)
                 }
                 .scrollBounceBehavior(.basedOnSize)
             }
-            .frame(height: rendered.image.size.height)
+            .frame(height: rendered.height)
         } else {
             Text(equation)
         }
@@ -121,7 +126,7 @@ struct ChatMathText: View {
                 let prefix = Text(AttributedString(attributed[attributed.startIndex..<equation.range.lowerBound]))
                 result = Text("\(result)\(prefix)")
                 if let rendered = images[equation.equation] {
-                    let formula = Text(Image(uiImage: rendered.image).renderingMode(.template))
+                    let formula = Text(rendered.image.renderingMode(.template))
                         .baselineOffset(rendered.baseline)
                         .accessibilityLabel(equation.equation)
                     result = Text("\(result)\(formula)")
@@ -139,24 +144,25 @@ struct ChatMathText: View {
 
     private struct RenderKey: Hashable {
         let source: String
-        let size: DynamicTypeSize
+        let font: Font.Resolved
         let scale: CGFloat
     }
 
     private struct RenderedEquation {
-        let image: UIImage
+        let image: Image
+        let height: CGFloat
         let baseline: CGFloat
     }
 }
 
-/// Owns the JavaScript engine outside the main actor. Only encoded images cross
-/// into SwiftUI; malformed formulas keep their original, selectable source.
+/// Owns the JavaScript engine outside the main actor. Parsed SVGs pass to
+/// SwiftUI for rendering; malformed formulas keep their original, selectable source.
 private actor ChatMathRenderer {
     static let shared = ChatMathRenderer()
     private var mathJax: MathJax?
 
     struct Result: Sendable {
-        let data: Data
+        let svg: SVG
         let baseline: CGFloat
     }
 
@@ -194,12 +200,11 @@ private actor ChatMathRenderer {
             guard !Task.isCancelled, let svg = SVG(data: Data(sized.utf8)),
                   svg.size.width > 0, svg.size.height > 0,
                   svg.size.width * scale <= 8192, svg.size.height * scale <= 8192 else { return nil }
-            guard let data = svg.rasterize(scale: scale).pngData() else { return nil }
             let alignment = try NSRegularExpression(pattern: #"vertical-align:\s*(-?[0-9.]+)ex"#)
             let match = alignment.firstMatch(in: markup, range: NSRange(markup.startIndex..., in: markup))
             let baseline = match.flatMap { Range($0.range(at: 1), in: markup) }
                 .flatMap { Double(markup[$0]) } ?? 0
-            return Result(data: data, baseline: baseline * xHeight)
+            return Result(svg: svg, baseline: baseline * xHeight)
         } catch {
             return nil
         }

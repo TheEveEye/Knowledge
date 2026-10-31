@@ -1,11 +1,12 @@
+import AuthenticationServices
 import SwiftUI
-import UIKit
 
 struct AuthenticationRootView: View {
     @Environment(KnowledgeAccountStore.self) private var account
     @Environment(AuthenticationStore.self) private var authentication
     @Environment(ImportCoordinator.self) private var imports
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
 
     private var modelCatalogSessionID: String? {
         guard !account.isRestoring, let user = account.user,
@@ -36,12 +37,6 @@ struct AuthenticationRootView: View {
                 KnowledgeWelcomeView()
             }
         }
-        .background {
-            AuthenticationWindowReader { window in
-                authentication.setPresentationAnchor(window)
-            }
-            .frame(width: 0, height: 0)
-        }
         .safeAreaInset(edge: .bottom) {
             if account.user != nil, case .signedIn = authentication.state, let message = authentication.message {
                 HStack(alignment: .top, spacing: 16) {
@@ -57,6 +52,7 @@ struct AuthenticationRootView: View {
             }
         }
         .task {
+            authentication.setWebAuthenticationSession(webAuthenticationSession)
             await authentication.restore()
         }
         .task { await account.restore() }
@@ -97,7 +93,7 @@ struct KnowledgeWelcomeView: View {
             welcomeContent
             ScrollView { welcomeContent }
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(.background)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
                 Button {
@@ -122,7 +118,7 @@ struct KnowledgeWelcomeView: View {
             .padding(.top, 16)
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity)
-            .background(Color(uiColor: .systemBackground))
+            .background(.background)
         }
         .sheet(isPresented: $showingAccountSheet) {
             KnowledgeAuthenticationSheet()
@@ -404,28 +400,4 @@ private struct ChatGPTDefaultModelsSection: View {
 
 enum ChatGPTAccountLinks {
     static let usage = URL(string: "https://chatgpt.com/settings/usage")!
-}
-
-private struct AuthenticationWindowReader: UIViewRepresentable {
-    let onWindow: (UIWindow) -> Void
-
-    func makeUIView(context: Context) -> WindowReadingView {
-        let view = WindowReadingView()
-        view.onWindow = onWindow
-        return view
-    }
-
-    func updateUIView(_ view: WindowReadingView, context: Context) {
-        view.onWindow = onWindow
-        if let window = view.window { onWindow(window) }
-    }
-
-    final class WindowReadingView: UIView {
-        var onWindow: ((UIWindow) -> Void)?
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            if let window { onWindow?(window) }
-        }
-    }
 }

@@ -1,13 +1,12 @@
 import AuthenticationServices
 import Foundation
-import UIKit
+import SwiftUI
 
-@MainActor final class OAuthBrowserSession: NSObject, ChatGPTBrowserAuthenticating, ASWebAuthenticationPresentationContextProviding {
-    weak var presentationAnchor: UIWindow?
+@MainActor final class OAuthBrowserSession: ChatGPTBrowserAuthenticating {
+    var webAuthenticationSession: WebAuthenticationSession?
     private var continuation: CheckedContinuation<OAuthAuthorization, any Error>?
     private var listener: LoopbackCallbackListener?
-    private var session: ASWebAuthenticationSession?
-    private var sessionAnchor: UIWindow?
+    private var browserTask: Task<Void, Never>?
     private var startupTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
     private let authorizationURLBuilder: @MainActor (OAuthBrowserRequest, OAuthAttempt, URL) throws -> URL
@@ -16,7 +15,6 @@ import UIKit
         try OAuthProtocol.authorizationURL(request: $0, attempt: $1, redirectURI: $2)
     }) {
         self.authorizationURLBuilder = authorizationURLBuilder
-        super.init()
     }
 
     func authorize(_ request: OAuthBrowserRequest) async throws -> OAuthAuthorization {
@@ -60,29 +58,24 @@ import UIKit
 
     func cancel() { finish(.failure(AuthenticationError.canceled)) }
 
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        guard let anchor = sessionAnchor ?? presentationAnchor else {
-            preconditionFailure("A foreground presentation anchor is required before starting authentication.")
-        }
-        return anchor
-    }
-
     private func openBrowser(url: URL, attempt: OAuthAttempt, redirectURI: URL) {
-        guard let anchor = presentationAnchor, anchor.windowScene?.activationState == .foregroundActive else {
+        guard let session = webAuthenticationSession else {
             finish(.failure(AuthenticationError.browserUnavailable))
             return
         }
-        sessionAnchor = anchor
-        let session = ASWebAuthenticationSession(url: url, callback: .customScheme(ChatGPTConfiguration.callbackScheme)) { @Sendable [weak self] callback, error in
-            let target = self
-            Task { @MainActor in
-                target?.browserCompleted(callback, error: error, attempt: attempt, redirectURI: redirectURI)
+        browserTask = Task { [weak self] in
+            do {
+                let callback = try await session.authenticate(
+                    using: url, callback: .customScheme(ChatGPTConfiguration.callbackScheme),
+                    preferredBrowserSession: .shared, additionalHeaderFields: [:]
+                )
+                guard !Task.isCancelled else { return }
+                self?.browserCompleted(callback, error: nil, attempt: attempt, redirectURI: redirectURI)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.browserCompleted(nil, error: error, attempt: attempt, redirectURI: redirectURI)
             }
         }
-        session.presentationContextProvider = self
-        session.prefersEphemeralWebBrowserSession = false
-        self.session = session
-        guard session.start() else { finish(.failure(AuthenticationError.browserUnavailable)); return }
     }
 
     private func browserCompleted(_ callbackURL: URL?, error: (any Error)?, attempt: OAuthAttempt, redirectURI: URL) {
@@ -112,10 +105,8 @@ import UIKit
         startupTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
-        let session = self.session
-        self.session = nil
-        session?.cancel()
-        sessionAnchor = nil
+        browserTask?.cancel()
+        browserTask = nil
         listener?.cancel()
         listener = nil
         continuation.resume(with: result)
