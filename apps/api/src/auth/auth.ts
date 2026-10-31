@@ -34,7 +34,7 @@ export function createAuth(config: Config, db: Database, onEmailSent?: (id: stri
     database: drizzleAdapter(db, { provider: "pg", schema, transaction: true }),
     emailAndPassword: {
       enabled: true, requireEmailVerification: true, autoSignIn: false,
-      minPasswordLength: 15, maxPasswordLength: 128,
+      minPasswordLength: 10, maxPasswordLength: 128,
       revokeSessionsOnPasswordReset: true,
     },
     // Clients explicitly request a code after signup, so all sends pass through

@@ -64,7 +64,7 @@ struct KnowledgeEmailSignInView: View {
     private var isSignUp: Bool { account.flow == .signUp }
     private var validEmail: Bool { email.contains("@") && email.utf8.count <= 254 }
     private var validNewPassword: Bool {
-        password.unicodeScalars.count >= 15 && password.utf16.count <= 128 && password == confirmation
+        password.unicodeScalars.count >= 10 && password.utf16.count <= 128 && password == confirmation
     }
     private var title: String {
         switch account.flow {

@@ -9,7 +9,7 @@ Knowledge uses Better Auth email/password authentication. Creating an account re
 - **Set or reset password:** request a recovery code, then submit that code and a new password. This also adds a credential identity to an existing email-code account, preserving the permanent user UUID. Recovery proves email ownership, marks the email verified, revokes all previous sessions, and requires password sign-in afterwards.
 - Existing sessions remain valid until revoked or expired. No data or schema migration is needed: the existing accounts table already has a password-hash field. Never invent passwords or replace user identities during migration.
 
-Passwords must be 15–128 characters, may contain spaces, and have no forced composition rules. Better Auth uses its built-in salted scrypt hashing. The app sends passwords only over the configured HTTPS origin and never persists them in Keychain, preferences, logs, or the library. It stores signed session credentials in the existing device-only Keychain service. Password fields use native password-manager content types.
+Passwords must be 10–128 characters, may contain spaces, and have no forced composition rules. Better Auth uses its built-in salted scrypt hashing. The app sends passwords only over the configured HTTPS origin and never persists them in Keychain, preferences, logs, or the library. It stores signed session credentials in the existing device-only Keychain service. Password fields use native password-manager content types.
 
 ## Delivery configuration
 

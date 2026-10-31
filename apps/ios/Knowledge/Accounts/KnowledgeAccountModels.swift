@@ -26,7 +26,7 @@ nonisolated enum KnowledgeAccountError: Error, LocalizedError {
         case .unavailable: "Account services are temporarily unavailable. Please try again later."
         case .invalidCredentials: "The email or password is incorrect. If your account used email codes, choose Set or reset password first."
         case .emailNotVerified: "Verify your email before signing in."
-        case .passwordRequirements: "Choose a password between 15 and 128 characters."
+        case .passwordRequirements: "Choose a password between 10 and 128 characters."
         case .invalidCode: "That code could not be verified. Enter the newest code from your email."
         case .expiredCode: "Your code has expired. Request a new one."
         case .unauthorized: "Your Knowledge session has ended. Sign in again."

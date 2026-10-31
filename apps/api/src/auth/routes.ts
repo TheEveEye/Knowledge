@@ -46,12 +46,12 @@ export function registerAccountRoutes(app: FastifyInstance, auth: Authentication
 
   app.get("/api/auth/methods", async () => ({
     emailPassword: true, emailOTP: false, emailVerification: config.email.enabled,
-    passwordReset: config.email.enabled, minPasswordLength: 15, maxPasswordLength: 128,
+    passwordReset: config.email.enabled, minPasswordLength: 10, maxPasswordLength: 128,
     codeLength: 6, expiresIn: 300, resendAfter: 60,
   }));
 
   const emailBody = { type: "string", format: "email", maxLength: 254 } as const;
-  const passwordBody = { type: "string", minLength: 15, maxLength: 128 } as const;
+  const passwordBody = { type: "string", minLength: 10, maxLength: 128 } as const;
   const otpBody = { type: "string", pattern: "^[0-9]{6}$" } as const;
   const operations = [
     { path: "/sign-up/email", required: ["email", "password", "name"], properties: {
