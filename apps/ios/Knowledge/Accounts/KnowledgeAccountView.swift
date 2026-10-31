@@ -5,6 +5,7 @@ struct KnowledgeAccountView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showChatGPT = false
     @State private var confirmSignOut = false
+    @State private var showSignIn = false
 
     var body: some View {
         NavigationStack {
@@ -17,7 +18,7 @@ struct KnowledgeAccountView: View {
                         Button("Refresh session") { Task { await account.refresh() } }
                         Button("Sign out of Knowledge", role: .destructive) { confirmSignOut = true }
                     } else {
-                        NavigationLink("Sign in with email") { KnowledgeEmailSignInView() }
+                        Button("Log in or sign up") { showSignIn = true }
                     }
                 }
                 .disabled(account.isBusy)
@@ -44,6 +45,7 @@ struct KnowledgeAccountView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $showChatGPT) { ChatGPTAccountView() }
+            .sheet(isPresented: $showSignIn) { KnowledgeAuthenticationSheet() }
             .confirmationDialog("Sign out of Knowledge?", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { Task { await account.signOut() } }
                 Button("Cancel", role: .cancel) { }
@@ -68,10 +70,10 @@ struct KnowledgeEmailSignInView: View {
     }
     private var title: String {
         switch account.flow {
-        case .signIn: "Welcome back"
+        case .signIn: "Log in"
         case .signUp: "Create your account"
         case .verifyEmail: "Verify your email"
-        case .recovery: "Set or reset your password"
+        case .recovery: "Reset your password"
         case .resetPassword: "Choose a new password"
         }
     }
@@ -79,7 +81,7 @@ struct KnowledgeEmailSignInView: View {
         switch account.flow {
         case .signIn, .signUp: nil
         case .verifyEmail(let email): "Enter the six-digit verification code sent to \(email)."
-        case .recovery: "We’ll email you a recovery code. Use this if you forgot your password or previously signed in with email codes."
+        case .recovery: "Enter your email address to receive a recovery code."
         case .resetPassword(let email): "If an account exists for \(email), we’ve sent a recovery code. Enter it below with your new password."
         }
     }
@@ -87,89 +89,48 @@ struct KnowledgeEmailSignInView: View {
     var body: some View {
         Form {
             Section {
-                VStack(alignment: .leading, spacing: 12) {
-                    Image(systemName: "books.vertical.fill")
-                        .font(.largeTitle)
-                        .foregroundStyle(.tint)
+                VStack(spacing: 16) {
+                    Image("KnowledgeMark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 64, height: 64)
                         .accessibilityHidden(true)
-                    Text(title).font(.title2.bold())
+                    Text(title)
+                        .font(.largeTitle.bold())
+                        .accessibilityAddTraits(.isHeader)
                     if let introduction {
                         Text(introduction).foregroundStyle(.secondary)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
             }
             .listRowBackground(Color.clear)
 
             switch account.flow {
             case .signIn, .signUp:
                 Section {
-                    Picker("Account access", selection: Binding(
-                        get: { isSignUp },
-                        set: { account.selectFlow($0 ? .signUp : .signIn) }
-                    )) {
-                        Text("Sign in").tag(false)
-                        Text("Sign up").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(account.isBusy)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-
-                Section {
-                    if isSignUp {
-                        TextField("Name", text: $name)
-                            .textContentType(.name)
-                            .onChange(of: name) { _, value in name = String(value.prefix(80)) }
-                    }
-                    emailField
-                    SecureField("Password", text: $password)
-                        .textContentType(isSignUp ? .newPassword : .password)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if isSignUp { confirmationField }
+                    credentialFields
                 } footer: {
-                    if !isSignUp {
-                        Button("Reset password") { account.selectFlow(.recovery) }
-                            .font(.caption)
-                            .foregroundStyle(.tint)
-                            .buttonStyle(.plain)
+                    if isSignUp {
+                        passwordGuidance
+                    } else {
+                        Button("Forgot password?") { account.selectFlow(.recovery) }
+                            .frame(maxWidth: .infinity, minHeight: 44)
                             .disabled(account.isBusy)
                     }
                 }
                 .disabled(account.isBusy)
 
-                Section {
-                    attemptButton(isSignUp ? "Sign up" : "Sign in", disabled: !validEmail ||
-                                  (isSignUp ? (!validNewPassword || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) : password.isEmpty), fullWidth: true) {
-                        if isSignUp { await account.signUp(email: email, name: name, password: password) }
-                        else { await account.signIn(email: email, password: password) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-
             case .recovery:
-                Section { emailField }
-                    .disabled(account.isBusy)
-                primaryActionSection {
-                    resendButton("Send recovery code", email: email, reset: true, disabled: !validEmail)
-                }
+                Section { emailField }.disabled(account.isBusy)
 
             case .verifyEmail(let requested):
-                Section { codeField }
-                    .disabled(account.isBusy)
-                primaryActionSection {
-                    attemptButton("Verify email", disabled: code.count != 6, fullWidth: true) {
-                        await account.verifyEmail(email: requested, code: code)
-                    }
-                }
-                primaryActionSection {
+                Section { codeField } footer: {
                     resendButton("Resend verification code", email: requested, reset: false)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
+                .disabled(account.isBusy)
 
             case .resetPassword(let requested):
                 Section {
@@ -179,30 +140,44 @@ struct KnowledgeEmailSignInView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     confirmationField
+                } footer: {
+                    passwordGuidance
+                    resendButton("Resend recovery code", email: requested, reset: true)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .disabled(account.isBusy)
-                primaryActionSection {
-                    attemptButton("Reset password", disabled: code.count != 6 || !validNewPassword, fullWidth: true) {
-                        await account.resetPassword(email: requested, code: code, password: password)
-                    }
-                }
-                primaryActionSection {
-                    resendButton("Resend recovery code", email: requested, reset: true)
-                }
             }
-            if account.isBusy { ProgressView("Connecting…") }
+
             if let message = account.message {
-                Section { Text(message).foregroundStyle(.secondary) }
+                Section {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("knowledgeAccountMessage")
+                }
+                .listRowBackground(Color.clear)
             }
         }
-        .navigationTitle("Knowledge")
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 12) {
+                if account.isBusy { ProgressView("Connecting…") }
+                primaryAction
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(account.isBusy)
+            }
+            .padding()
+            .frame(maxWidth: 440)
+            .frame(maxWidth: .infinity)
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if account.flow != .signIn && account.flow != .signUp {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Sign in", systemImage: "chevron.left") { account.selectFlow(.signIn) }
+                    Button("Log in", systemImage: "chevron.left") { account.selectFlow(.signIn) }
                         .disabled(account.isBusy)
-                        .accessibilityLabel("Back to sign in")
+                        .accessibilityLabel("Back to log in")
                 }
             }
         }
@@ -215,6 +190,57 @@ struct KnowledgeEmailSignInView: View {
         .onDisappear {
             password = ""; confirmation = ""; code = ""
             account.discardPendingPassword()
+        }
+    }
+
+    @ViewBuilder private var primaryAction: some View {
+        switch account.flow {
+        case .signIn, .signUp:
+            attemptButton("Continue", disabled: !validEmail ||
+                          (isSignUp ? (!validNewPassword || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) : password.isEmpty)) {
+                if isSignUp { await account.signUp(email: email, name: name, password: password) }
+                else { await account.signIn(email: email, password: password) }
+            }
+        case .recovery:
+            resendButton("Continue", email: email, reset: true, disabled: !validEmail)
+        case .verifyEmail(let requested):
+            attemptButton("Continue", disabled: code.count != 6) {
+                await account.verifyEmail(email: requested, code: code)
+            }
+        case .resetPassword(let requested):
+            attemptButton("Reset password", disabled: code.count != 6 || !validNewPassword) {
+                await account.resetPassword(email: requested, code: code, password: password)
+            }
+        }
+    }
+
+    @ViewBuilder private var credentialFields: some View {
+        if isSignUp {
+            TextField("Name", text: $name)
+                .textContentType(.name)
+                .onChange(of: name) { _, value in name = String(value.prefix(80)) }
+        }
+        emailField
+        SecureField("Password", text: $password)
+            .textContentType(isSignUp ? .newPassword : .password)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        if isSignUp {
+            confirmationField
+        }
+    }
+
+    @ViewBuilder private var passwordGuidance: some View {
+        if !password.isEmpty && (password.unicodeScalars.count < 10 || password.utf16.count > 128) {
+            Text("Use 10–128 characters for your password.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !confirmation.isEmpty && password != confirmation {
+            Text("Passwords don’t match.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -238,23 +264,14 @@ struct KnowledgeEmailSignInView: View {
             .focused($codeFocused)
             .onChange(of: code) { _, value in code = String(value.filter { $0.isASCII && $0.isNumber }.prefix(6)) }
     }
-    private func primaryActionSection<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        Section {
-            content()
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-        }
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets())
-    }
-    private func attemptButton(_ title: String, disabled: Bool, fullWidth: Bool = false, action: @escaping () async -> Void) -> some View {
+    private func attemptButton(_ title: String, disabled: Bool, action: @escaping () async -> Void) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let delay = max(0, Int(ceil(account.nextAttempt.timeIntervalSince(context.date))))
             Button { Task { await action() } } label: {
                 Text(delay > 0 ? "Try again in \(delay)s" : title)
-                    .frame(maxWidth: fullWidth ? .infinity : nil)
+                    .frame(maxWidth: .infinity)
             }
-                .disabled(disabled || account.isBusy || delay > 0)
+            .disabled(disabled || account.isBusy || delay > 0)
         }
     }
     private func resendButton(_ title: String, email: String, reset: Bool, disabled: Bool = false) -> some View {

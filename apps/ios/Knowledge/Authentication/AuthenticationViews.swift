@@ -33,7 +33,7 @@ struct AuthenticationRootView: View {
                 }
                 .disabled(account.isBusy)
             } else {
-                NavigationStack { KnowledgeEmailSignInView() }
+                KnowledgeWelcomeView()
             }
         }
         .background {
@@ -84,6 +84,88 @@ struct AuthenticationRootView: View {
                 authentication.sceneDidEnterBackground()
             }
         }
+    }
+}
+
+struct KnowledgeWelcomeView: View {
+    @Environment(KnowledgeAccountStore.self) private var account
+    @State private var showingAccountSheet = false
+    @ScaledMetric(relativeTo: .largeTitle) private var markSize: CGFloat = 88
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            welcomeContent
+            ScrollView { welcomeContent }
+        }
+        .background(Color(uiColor: .systemBackground))
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 12) {
+                Button {
+                    account.selectFlow(.signIn)
+                    showingAccountSheet = true
+                } label: {
+                    Text("Log in").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                Button {
+                    account.selectFlow(.signUp)
+                    showingAccountSheet = true
+                } label: {
+                    Text("Sign up").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            .disabled(account.isBusy)
+            .controlSize(.large)
+            .frame(maxWidth: 440)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity)
+            .background(Color(uiColor: .systemBackground))
+        }
+        .sheet(isPresented: $showingAccountSheet) {
+            KnowledgeAuthenticationSheet()
+        }
+    }
+
+    private var welcomeContent: some View {
+        VStack(spacing: 28) {
+            Spacer(minLength: 48)
+            Image("KnowledgeMark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: markSize, height: markSize)
+                .accessibilityHidden(true)
+            Text("Knowledge")
+                .font(.largeTitle.bold())
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 48)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct KnowledgeAuthenticationSheet: View {
+    @Environment(KnowledgeAccountStore.self) private var account
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            KnowledgeEmailSignInView()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close", systemImage: "xmark") { dismiss() }
+                            .labelStyle(.iconOnly)
+                            .disabled(account.isBusy)
+                    }
+                }
+        }
+        .presentationDetents([.large])
+        .presentationSizing(.form)
+        .presentationDragIndicator(.visible)
+        .interactiveDismissDisabled(account.isBusy)
     }
 }
 

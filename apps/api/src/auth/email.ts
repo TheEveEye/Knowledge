@@ -45,10 +45,10 @@ export async function sendAccountCode(config: Config, email: string, otp: string
   const idempotencyKey = `knowledge-${purpose}/${randomUUID()}`;
   const deadline = Date.now() + 18_000;
   if (!/^[0-9]{6}$/.test(otp)) throw new Error("Invalid account code");
-  const title = purpose === "email-verification" ? "Verify your Knowledge email" : "Set or reset your Knowledge password";
+  const title = purpose === "email-verification" ? "Verify your Knowledge email" : "Reset your Knowledge password";
   const instruction = purpose === "email-verification"
     ? "Enter this code in Knowledge to verify your email address."
-    : "Enter this code in Knowledge to set or reset your password. Never share this code.";
+    : "Enter this code in Knowledge to reset your password. Never share this code.";
   const expiry = "This code expires in five minutes. If you did not request it, you can ignore this email.";
   const payload = {
     from: `Knowledge <${config.email.from}>`, to: [email], subject: title,
