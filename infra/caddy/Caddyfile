@@ -6,6 +6,12 @@
 :80 {
     header -Server
 
+    handle /.well-known/apple-app-site-association {
+        header Content-Type application/json
+        header Cache-Control "public, max-age=3600"
+        respond `{"webcredentials":{"apps":["5KP38NQP6R.dev.kiwiapps.Knowledge"]}}` 200
+    }
+
     handle /api/* {
         # Preserve /api; the Fastify routes include the prefix.
         reverse_proxy api:3000

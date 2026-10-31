@@ -14,6 +14,7 @@ final class KnowledgeAccountStore {
     private(set) var nextCodeRequest = Date.distantPast
     private(set) var nextAttempt = Date.distantPast
     private(set) var message: String?
+    private(set) var lastError: KnowledgeAccountError?
     @ObservationIgnored private var credentials: KnowledgeCredentials?
     @ObservationIgnored private let client = KnowledgeAccountClient()
     @ObservationIgnored private let keychain = KnowledgeSessionKeychain()
@@ -45,7 +46,7 @@ final class KnowledgeAccountStore {
             try keychain.save(updated)
             self.credentials = updated
             user = updated.user
-            message = nil
+            dismissMessage()
         } catch KnowledgeAccountError.unauthorized {
             self.credentials = nil
             user = nil
@@ -59,12 +60,12 @@ final class KnowledgeAccountStore {
         guard !isBusy else { return }
         pendingPassword = nil
         self.flow = flow
-        message = nil
+        dismissMessage()
     }
 
     func signUp(email: String, name: String, password: String) async {
         guard !isBusy, Date() >= nextAttempt else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         let email = normalized(email)
         pendingPassword = nil
@@ -79,7 +80,7 @@ final class KnowledgeAccountStore {
 
     func signIn(email: String, password: String) async {
         guard !isBusy, Date() >= nextAttempt else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         let email = normalized(email)
         do {
@@ -95,7 +96,7 @@ final class KnowledgeAccountStore {
 
     func requestCode(email: String, reset: Bool) async {
         guard !isBusy, Date() >= nextCodeRequest else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         let email = normalized(email)
         if reset { pendingPassword = nil }
@@ -123,7 +124,7 @@ final class KnowledgeAccountStore {
 
     func verifyEmail(email: String, code: String) async {
         guard !isBusy, Date() >= nextAttempt else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         do {
             try await client.verifyEmail(email: email, code: code)
@@ -136,6 +137,7 @@ final class KnowledgeAccountStore {
                     // sign-in rather than asking the user to verify the same code again.
                     flow = .signIn
                     show(error)
+                    message = "Your email is verified. " + (message ?? "Log in to continue.")
                 }
             } else {
                 pendingPassword = nil
@@ -148,12 +150,12 @@ final class KnowledgeAccountStore {
 
     func resetPassword(email: String, code: String, password: String) async {
         guard !isBusy, Date() >= nextAttempt else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         do {
             try await client.resetPassword(email: email, code: code, password: password)
             flow = .signIn
-            message = "Password saved. Sign in with your new password. Previous sessions have been signed out."
+            message = "Password updated. Sign in with your new password. Previous sessions have been signed out."
         } catch is CancellationError { }
         catch { show(error) }
     }
@@ -179,7 +181,7 @@ final class KnowledgeAccountStore {
 
     func signOut() async {
         guard !isBusy else { return }
-        isBusy = true; message = nil
+        isBusy = true; dismissMessage()
         defer { isBusy = false }
         pendingPassword = nil
         let previous = credentials
@@ -193,13 +195,15 @@ final class KnowledgeAccountStore {
         }
     }
 
-    func dismissMessage() { message = nil }
+    func dismissMessage() { message = nil; lastError = nil }
 
     private func show(_ error: any Error, requestingCode: Bool = false) {
         if case let KnowledgeAccountError.rateLimited(seconds) = error {
             if requestingCode { nextCodeRequest = Date().addingTimeInterval(Double(seconds)) }
             else { nextAttempt = Date().addingTimeInterval(Double(seconds)) }
         }
-        message = (error as? KnowledgeAccountError)?.localizedDescription ?? KnowledgeAccountError.connection.localizedDescription
+        let accountError = error as? KnowledgeAccountError ?? .connection
+        lastError = accountError
+        message = accountError.localizedDescription
     }
 }

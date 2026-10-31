@@ -4,12 +4,18 @@ Knowledge uses Better Auth email/password authentication. Creating an account re
 
 ## Account flows
 
-- **Create account:** submit name/email/password, then explicitly request an email-verification code. Enter the code; the iOS app then signs in automatically using the password entered during signup. The password is retained only in memory during this flow and discarded on completion or exit. Signup and verification endpoints do not themselves create sessions; automatic sign-in still requires the correct password. Duplicate signup responses are generic and never overwrite an existing password; use recovery for an existing account.
+- **Create account:** submit name/email/password, then request an email-verification code only if registration succeeds. Enter the code; the iOS app then signs in automatically using the password entered during signup. The password is retained only in memory during this flow and discarded on completion or exit. Signup and verification endpoints do not themselves create sessions; automatic sign-in still requires the correct password. Duplicate signup returns `409 EMAIL_ALREADY_REGISTERED`, keeps the signup form visible, and offers Log in and Forgot password? actions. No verification code is requested, and the existing account and password are unchanged.
 - **Sign in:** submit email/password. A successful response issues the existing signed native bearer header and browser cookie. Unverified users are directed to email verification.
 - **Set or reset password:** request a recovery code, then submit that code and a new password. This also adds a credential identity to an existing email-code account, preserving the permanent user UUID. Recovery proves email ownership, marks the email verified, revokes all previous sessions, and requires password sign-in afterwards.
 - Existing sessions remain valid until revoked or expired. No data or schema migration is needed: the existing accounts table already has a password-hash field. Never invent passwords or replace user identities during migration.
 
-Passwords must be 10–128 characters, may contain spaces, and have no forced composition rules. Better Auth uses its built-in salted scrypt hashing. The app sends passwords only over the configured HTTPS origin and never persists them in Keychain, preferences, logs, or the library. It stores signed session credentials in the existing device-only Keychain service. Password fields use native password-manager content types.
+Passwords must be 10–128 characters, may contain spaces, and have no forced composition rules. Better Auth uses its built-in salted scrypt hashing. The app sends passwords only over the configured HTTPS origin and never persists them in Keychain, preferences, logs, or the library. The app stores signed session credentials in the existing device-only Keychain service. Password fields use native password-manager content types.
+
+Login uses `.username` with the email keyboard and a separate `.password` secure field. Signup and reset use `.newPassword` for both password fields. The system Passwords picker can be used without Associated Domains. Apple documents automatic app-specific credential suggestions through associated domains; correct field content types alone do not establish that association. No authorization request is added to force a password suggestion.
+
+Draft objects are replaced on flow transitions rather than clearing bindings belonging to fields still being removed, so outgoing credential fields keep their original values through teardown. The app does not provide reveal/copy controls or a manual password-saving step and does not claim to save passwords automatically.
+
+Personal Team builds do not support the Associated Domains capability. `Configuration/Knowledge.entitlements` therefore remains empty, and the target does not enable that capability. Caddy already publishes `/.well-known/apple-app-site-association` as JSON for `5KP38NQP6R.dev.kiwiapps.Knowledge`; this file alone does not associate the app. If paid developer membership is enabled later, add `webcredentials:knowledge.kiwiapps.dev` to the entitlement and ensure the signed provisioning profile includes Associated Domains. Keep the hostname, signing team, and bundle identifier aligned with the association file.
 
 ## Delivery configuration
 
@@ -28,7 +34,7 @@ The default sender is `Knowledge <signin@auth.kiwiapps.dev>`. `EMAIL_FROM` and `
 | Endpoint | JSON body | Result |
 | --- | --- | --- |
 | `GET /api/auth/methods` | None | `emailPassword: true`, `emailOTP: false`, delivery availability, password bounds, code timing |
-| `POST /api/auth/sign-up/email` | `{ email, name, password }` | Unverified account or generic duplicate response; no session |
+| `POST /api/auth/sign-up/email` | `{ email, name, password }` | New unverified account, or `409 EMAIL_ALREADY_REGISTERED`; no session |
 | `POST /api/auth/sign-in/email` | `{ email, password }` | Verified user and session cookie/signed bearer header |
 | `POST /api/auth/email-otp/send-verification-otp` | `{ email, type: "email-verification" }` | Generic success for unknown email; provider acceptance for an eligible account |
 | `POST /api/auth/email-otp/verify-email` | `{ email, otp }` | Email verified; no session |

@@ -92,11 +92,18 @@ final class KnowledgeAccountClient {
             }
             if code == "EMAIL_NOT_VERIFIED" { throw KnowledgeAccountError.emailNotVerified }
             if code == "INVALID_EMAIL_OR_PASSWORD" { throw KnowledgeAccountError.invalidCredentials }
+            if ["EMAIL_ALREADY_REGISTERED", "USER_ALREADY_EXISTS", "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL"].contains(code ?? "") {
+                throw KnowledgeAccountError.emailAlreadyRegistered
+            }
+            if code == "INVALID_EMAIL" { throw KnowledgeAccountError.invalidEmail }
+            if code == "FAILED_TO_CREATE_USER" { throw KnowledgeAccountError.registrationFailed }
             if ["PASSWORD_TOO_SHORT", "PASSWORD_TOO_LONG"].contains(code ?? "") { throw KnowledgeAccountError.passwordRequirements }
             if response.statusCode == 401 { throw KnowledgeAccountError.unauthorized }
             if code == "OTP_EXPIRED" { throw KnowledgeAccountError.expiredCode }
-            if ["INVALID_OTP", "TOO_MANY_ATTEMPTS"].contains(code ?? "") { throw KnowledgeAccountError.invalidCode }
+            if code == "INVALID_OTP" { throw KnowledgeAccountError.invalidCode }
+            if code == "TOO_MANY_ATTEMPTS" { throw KnowledgeAccountError.codeAttemptsExceeded }
             if response.statusCode == 503 || response.statusCode >= 500 { throw KnowledgeAccountError.unavailable }
+            if response.statusCode == 400 || response.statusCode == 422 { throw KnowledgeAccountError.invalidInput }
             throw KnowledgeAccountError.invalidResponse
         }
         return (data, response)

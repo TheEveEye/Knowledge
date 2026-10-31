@@ -2,7 +2,7 @@ import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins/bearer";
 import { emailOTP } from "better-auth/plugins/email-otp";
 import { createHmac, randomInt } from "node:crypto";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import type { Config } from "../config.js";
 import type { Database } from "../db/client.js";
@@ -30,6 +30,26 @@ export function createAuth(config: Config, db: Database, onEmailSent?: (id: stri
         }, { "Retry-After": String(error.retryAfter) });
         throw error;
       }
+    }), after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-up/email") return;
+      const duplicateEmail = () => Response.json({
+        code: "EMAIL_ALREADY_REGISTERED", message: "An account with this email address already exists.",
+      }, { status: 409 });
+      const result = ctx.context.returned;
+      if (isAPIError(result)) {
+        // Concurrent registrations can reach the unique email constraint together.
+        if (result.body?.code === "FAILED_TO_CREATE_USER" && typeof ctx.body?.email === "string"
+          && await ctx.context.internalAdapter.findUserByEmail(ctx.body.email.toLowerCase())) {
+          return duplicateEmail();
+        }
+        return;
+      }
+      if (!result || typeof result !== "object" || !("user" in result)) return;
+      const user = result.user;
+      if (!user || typeof user !== "object" || !("id" in user) || typeof user.id !== "string") return;
+      // Better Auth returns a synthetic user for duplicates while verification is
+      // required. Only an actual newly persisted user may proceed to code delivery.
+      if (!await ctx.context.internalAdapter.findUserById(user.id)) return duplicateEmail();
     }) },
     database: drizzleAdapter(db, { provider: "pg", schema, transaction: true }),
     emailAndPassword: {

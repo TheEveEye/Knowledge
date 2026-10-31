@@ -9,7 +9,7 @@ The Knowledge backend runs independently of Shrimp and Portainer on the Raspberr
 | `db` | PostgreSQL 18; persistent `knowledge_pgdata` volume |
 | `migrate` | One-shot Drizzle migration process using the database owner credential |
 | `api` | Fastify API using the non-administrative application role |
-| `caddy` | Forwards `/api/*` to Fastify without stripping the prefix |
+| `caddy` | Forwards `/api/*` to Fastify without stripping the prefix and serves the Password AutoFill association file |
 | `cloudflared` | Optional dedicated Knowledge tunnel, enabled after its token is installed |
 
 Email sign-in uses Resend's HTTPS API rather than a separate mail container. The `email.yaml` overlay is included only after the private sending key is installed. See [email sign-in](Email-Sign-In.md) for domain verification and the activation command; the API remains ready while email delivery is disabled.

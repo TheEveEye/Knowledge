@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 struct KnowledgeAccountView: View {
@@ -5,20 +6,19 @@ struct KnowledgeAccountView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showChatGPT = false
     @State private var confirmSignOut = false
-    @State private var showSignIn = false
+    @State private var signingOutUser: KnowledgeUser?
+
+    // Preserve account details while the signed-in screen and its sheet disappear.
+    private var displayedUser: KnowledgeUser? { account.user ?? signingOutUser }
+    private var isUpdating: Bool { account.isBusy || signingOutUser != nil }
 
     var body: some View {
         NavigationStack {
             List {
                 Section("Knowledge account") {
-                    if account.isRestoring { ProgressView("Restoring your session…") }
-                    else if let user = account.user {
+                    if let user = displayedUser {
                         LabeledContent("Name", value: user.displayName)
                         LabeledContent("Email", value: user.email)
-                        Button("Refresh session") { Task { await account.refresh() } }
-                        Button("Sign out of Knowledge", role: .destructive) { confirmSignOut = true }
-                    } else {
-                        Button("Log in or sign up") { showSignIn = true }
                     }
                 }
                 .disabled(account.isBusy)
@@ -39,34 +39,63 @@ struct KnowledgeAccountView: View {
                     Text("Your saved items stay on this device. Account sync is not enabled yet, and signing in does not upload or transfer your library.")
                         .foregroundStyle(.secondary)
                 }
-                if account.isBusy { ProgressView("Updating your account…") }
+                if account.isBusy, signingOutUser == nil {
+                    ProgressView("Updating your account…")
+                }
+                if displayedUser != nil {
+                    Section {
+                        if signingOutUser != nil {
+                            HStack(spacing: 12) {
+                                ProgressView()
+                                Text("Signing out…")
+                            }
+                        } else {
+                            Button("Sign out of Knowledge", role: .destructive) { confirmSignOut = true }
+                        }
+                    }
+                    .disabled(account.isBusy)
+                }
             }
+            .disabled(isUpdating)
             .navigationTitle("Account")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.disabled(isUpdating)
+                }
+            }
             .sheet(isPresented: $showChatGPT) { ChatGPTAccountView() }
-            .sheet(isPresented: $showSignIn) { KnowledgeAuthenticationSheet() }
-            .confirmationDialog("Sign out of Knowledge?", isPresented: $confirmSignOut, titleVisibility: .visible) {
-                Button("Sign out", role: .destructive) { Task { await account.signOut() } }
+            .alert("Sign out of Knowledge as \(displayedUser?.email ?? "")?", isPresented: $confirmSignOut) {
                 Button("Cancel", role: .cancel) { }
-            } message: { Text("You’ll need to sign in again to use Knowledge. Your local library and AI connection stay on this device.") }
+                Button("Sign out", role: .destructive) {
+                    guard !isUpdating, let user = account.user else { return }
+                    signingOutUser = user
+                    Task {
+                        await account.signOut()
+                        if account.user != nil { signingOutUser = nil }
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled(isUpdating)
+        .onChange(of: account.user?.id) { _, current in
+            if current == nil, signingOutUser != nil { dismiss() }
         }
     }
 }
 
 struct KnowledgeEmailSignInView: View {
     @Environment(KnowledgeAccountStore.self) private var account
-    @State private var email = ""
-    @State private var name = ""
-    @State private var password = ""
-    @State private var confirmation = ""
+    @State private var draft = KnowledgeCredentialDraft()
     @State private var code = ""
     @FocusState private var codeFocused: Bool
 
+    // Keep the form busy while a successful sign-in transitions to the main screen.
+    private var isSubmitting: Bool { account.isBusy || account.user != nil }
     private var isSignUp: Bool { account.flow == .signUp }
-    private var validEmail: Bool { email.contains("@") && email.utf8.count <= 254 }
+    private var validEmail: Bool { draft.email.contains("@") && draft.email.utf8.count <= 254 }
     private var validNewPassword: Bool {
-        password.unicodeScalars.count >= 10 && password.utf16.count <= 128 && password == confirmation
+        draft.password.unicodeScalars.count >= 10 && draft.password.utf16.count <= 128 && draft.password == draft.confirmation
     }
     private var title: String {
         switch account.flow {
@@ -117,35 +146,32 @@ struct KnowledgeEmailSignInView: View {
                     } else {
                         Button("Forgot password?") { account.selectFlow(.recovery) }
                             .frame(maxWidth: .infinity, minHeight: 44)
-                            .disabled(account.isBusy)
+                            .disabled(isSubmitting)
                     }
                 }
-                .disabled(account.isBusy)
+                .disabled(isSubmitting)
 
             case .recovery:
-                Section { emailField }.disabled(account.isBusy)
+                Section { emailField }.disabled(isSubmitting)
 
             case .verifyEmail(let requested):
                 Section { codeField } footer: {
                     resendButton("Resend verification code", email: requested, reset: false)
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .disabled(account.isBusy)
+                .disabled(isSubmitting)
 
             case .resetPassword(let requested):
                 Section {
                     codeField
-                    SecureField("New password", text: $password)
-                        .textContentType(.newPassword)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    newPasswordField
                     confirmationField
                 } footer: {
                     passwordGuidance
                     resendButton("Resend recovery code", email: requested, reset: true)
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .disabled(account.isBusy)
+                .disabled(isSubmitting)
             }
 
             if let message = account.message {
@@ -154,18 +180,23 @@ struct KnowledgeEmailSignInView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("knowledgeAccountMessage")
+                    if account.lastError == .emailAlreadyRegistered {
+                        Button("Log in") { account.selectFlow(.signIn) }
+                        Button("Forgot password?") { account.selectFlow(.recovery) }
+                    }
                 }
+                .disabled(isSubmitting)
                 .listRowBackground(Color.clear)
             }
         }
         .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 12) {
-                if account.isBusy { ProgressView("Connecting…") }
+                if isSubmitting { ProgressView("Connecting…") }
                 primaryAction
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(account.isBusy)
+                    .disabled(isSubmitting)
             }
             .padding()
             .frame(maxWidth: 440)
@@ -176,19 +207,22 @@ struct KnowledgeEmailSignInView: View {
             if account.flow != .signIn && account.flow != .signUp {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Log in", systemImage: "chevron.left") { account.selectFlow(.signIn) }
-                        .disabled(account.isBusy)
+                        .disabled(isSubmitting)
                         .accessibilityLabel("Back to log in")
                 }
             }
         }
         .onChange(of: account.flow) { _, flow in
-            password = ""; confirmation = ""; code = ""
-            if case .verifyEmail(let requested) = flow { email = requested; codeFocused = true }
-            else if case .resetPassword(let requested) = flow { email = requested; codeFocused = true }
+            // Old fields keep their original draft until SwiftUI removes them.
+            // Replacing the draft avoids emptying credentials still in the view hierarchy.
+            let next = KnowledgeCredentialDraft(email: draft.email, name: draft.name)
+            draft = next
+            code = ""
+            if case .verifyEmail(let requested) = flow { next.email = requested; codeFocused = true }
+            else if case .resetPassword(let requested) = flow { next.email = requested; codeFocused = true }
             else { codeFocused = false }
         }
         .onDisappear {
-            password = ""; confirmation = ""; code = ""
             account.discardPendingPassword()
         }
     }
@@ -197,46 +231,50 @@ struct KnowledgeEmailSignInView: View {
         switch account.flow {
         case .signIn, .signUp:
             attemptButton("Continue", disabled: !validEmail ||
-                          (isSignUp ? (!validNewPassword || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) : password.isEmpty)) {
-                if isSignUp { await account.signUp(email: email, name: name, password: password) }
-                else { await account.signIn(email: email, password: password) }
+                          (isSignUp ? (!validNewPassword || draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) : draft.password.isEmpty)) {
+                if isSignUp {
+                    await account.signUp(email: draft.email, name: draft.name, password: draft.password)
+                } else { await account.signIn(email: draft.email, password: draft.password) }
             }
         case .recovery:
-            resendButton("Continue", email: email, reset: true, disabled: !validEmail)
+            resendButton("Continue", email: draft.email, reset: true, disabled: !validEmail)
         case .verifyEmail(let requested):
             attemptButton("Continue", disabled: code.count != 6) {
                 await account.verifyEmail(email: requested, code: code)
             }
         case .resetPassword(let requested):
             attemptButton("Reset password", disabled: code.count != 6 || !validNewPassword) {
-                await account.resetPassword(email: requested, code: code, password: password)
+                await account.resetPassword(email: requested, code: code, password: draft.password)
             }
         }
     }
 
     @ViewBuilder private var credentialFields: some View {
+        @Bindable var draft = draft
         if isSignUp {
-            TextField("Name", text: $name)
+            TextField("Name", text: $draft.name)
                 .textContentType(.name)
-                .onChange(of: name) { _, value in name = String(value.prefix(80)) }
+                .onChange(of: draft.name) { _, value in draft.name = String(value.prefix(80)) }
         }
         emailField
-        SecureField("Password", text: $password)
-            .textContentType(isSignUp ? .newPassword : .password)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
         if isSignUp {
+            newPasswordField
             confirmationField
+        } else {
+            SecureField("Password", text: $draft.password)
+                .textContentType(.password)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
         }
     }
 
     @ViewBuilder private var passwordGuidance: some View {
-        if !password.isEmpty && (password.unicodeScalars.count < 10 || password.utf16.count > 128) {
+        if !draft.password.isEmpty && (draft.password.unicodeScalars.count < 10 || draft.password.utf16.count > 128) {
             Text("Use 10–128 characters for your password.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if !confirmation.isEmpty && password != confirmation {
+        } else if !draft.confirmation.isEmpty && draft.password != draft.confirmation {
             Text("Passwords don’t match.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -245,14 +283,23 @@ struct KnowledgeEmailSignInView: View {
     }
 
     private var emailField: some View {
-        TextField("Email address", text: $email)
+        @Bindable var draft = draft
+        return TextField("Email address", text: $draft.email)
             .textContentType(.username)
             .keyboardType(.emailAddress)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
     }
+    private var newPasswordField: some View {
+        @Bindable var draft = draft
+        return SecureField(isSignUp ? "Password" : "New password", text: $draft.password)
+            .textContentType(.newPassword)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+    }
     private var confirmationField: some View {
-        SecureField("Confirm password", text: $confirmation)
+        @Bindable var draft = draft
+        return SecureField("Confirm password", text: $draft.confirmation)
             .textContentType(.newPassword)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
@@ -271,7 +318,7 @@ struct KnowledgeEmailSignInView: View {
                 Text(delay > 0 ? "Try again in \(delay)s" : title)
                     .frame(maxWidth: .infinity)
             }
-            .disabled(disabled || account.isBusy || delay > 0)
+            .disabled(disabled || isSubmitting || delay > 0)
         }
     }
     private func resendButton(_ title: String, email: String, reset: Bool, disabled: Bool = false) -> some View {
@@ -283,7 +330,19 @@ struct KnowledgeEmailSignInView: View {
                 Text(delay > 0 ? "Send code in \(delay)s" : title)
                     .frame(maxWidth: .infinity)
             }
-            .disabled(disabled || account.isBusy || delay > 0)
+            .disabled(disabled || isSubmitting || delay > 0)
         }
+    }
+}
+
+@MainActor @Observable private final class KnowledgeCredentialDraft {
+    var email: String
+    var name: String
+    var password = ""
+    var confirmation = ""
+
+    init(email: String = "", name: String = "") {
+        self.email = email
+        self.name = name
     }
 }

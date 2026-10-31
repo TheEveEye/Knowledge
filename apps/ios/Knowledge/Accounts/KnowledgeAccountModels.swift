@@ -16,15 +16,21 @@ nonisolated struct KnowledgeCredentials: Codable, Sendable {
     var user: KnowledgeUser
 }
 
-nonisolated enum KnowledgeAccountError: Error, LocalizedError {
+nonisolated enum KnowledgeAccountError: Error, LocalizedError, Equatable {
     case unavailable, invalidCode, expiredCode, unauthorized, invalidResponse, connection, storage
     case invalidCredentials, emailNotVerified, passwordRequirements
+    case emailAlreadyRegistered, invalidEmail, invalidInput, registrationFailed, codeAttemptsExceeded
     case rateLimited(Int)
 
     var errorDescription: String? {
         switch self {
         case .unavailable: "Account services are temporarily unavailable. Please try again later."
-        case .invalidCredentials: "The email or password is incorrect. If your account used email codes, choose Set or reset password first."
+        case .invalidCredentials: "The email or password is incorrect."
+        case .emailAlreadyRegistered: "An account with this email address already exists. Log in or choose Forgot password? to reset your password."
+        case .invalidEmail: "Enter a valid email address."
+        case .invalidInput: "Check the information you entered and try again."
+        case .registrationFailed: "Your account could not be created. Please try again."
+        case .codeAttemptsExceeded: "Too many incorrect attempts. Request a new code."
         case .emailNotVerified: "Verify your email before signing in."
         case .passwordRequirements: "Choose a password between 10 and 128 characters."
         case .invalidCode: "That code could not be verified. Enter the newest code from your email."

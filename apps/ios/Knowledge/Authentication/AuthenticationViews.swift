@@ -111,7 +111,7 @@ struct KnowledgeWelcomeView: View {
                 }
                 .buttonStyle(.bordered)
             }
-            .disabled(account.isBusy)
+            .disabled(account.isBusy || account.user != nil)
             .controlSize(.large)
             .frame(maxWidth: 440)
             .padding(.horizontal, 24)
@@ -136,6 +136,16 @@ struct KnowledgeWelcomeView: View {
             Text("Knowledge")
                 .font(.largeTitle.bold())
                 .accessibilityAddTraits(.isHeader)
+            if let message = account.message {
+                VStack(spacing: 12) {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Dismiss message") { account.dismissMessage() }
+                }
+                .frame(maxWidth: 440)
+            }
             Spacer(minLength: 48)
         }
         .padding(24)
@@ -147,6 +157,8 @@ struct KnowledgeAuthenticationSheet: View {
     @Environment(KnowledgeAccountStore.self) private var account
     @Environment(\.dismiss) private var dismiss
 
+    private var isSubmitting: Bool { account.isBusy || account.user != nil }
+
     var body: some View {
         NavigationStack {
             KnowledgeEmailSignInView()
@@ -154,14 +166,14 @@ struct KnowledgeAuthenticationSheet: View {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Close", systemImage: "xmark") { dismiss() }
                             .labelStyle(.iconOnly)
-                            .disabled(account.isBusy)
+                            .disabled(isSubmitting)
                     }
                 }
         }
         .presentationDetents([.large])
         .presentationSizing(.form)
         .presentationDragIndicator(.visible)
-        .interactiveDismissDisabled(account.isBusy)
+        .interactiveDismissDisabled(isSubmitting)
     }
 }
 

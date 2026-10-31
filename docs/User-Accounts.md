@@ -24,7 +24,7 @@ Email/password registration and sign-in are implemented. New accounts must verif
 | --- | --- | --- |
 | `/api/me` | GET | Current Knowledge profile, or 401 `{"error":"Unauthorized"}` |
 | `/api/auth/methods` | GET | Available login methods, password policy, and verification-code timing |
-| `/api/auth/sign-up/email` | POST | Create an unverified email/password account; no session |
+| `/api/auth/sign-up/email` | POST | Create an unverified email/password account; duplicate email returns `409 EMAIL_ALREADY_REGISTERED`; no session |
 | `/api/auth/sign-in/email` | POST | Authenticate with email/password; verified email required |
 | `/api/auth/email-otp/send-verification-otp` | POST | Send an email-verification code when delivery is enabled |
 | `/api/auth/email-otp/verify-email` | POST | Verify ownership; no automatic session |
