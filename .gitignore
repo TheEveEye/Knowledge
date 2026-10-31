@@ -20,3 +20,6 @@ local.properties
 **/.secrets/
 **/backups/
 *.dump
+
+# Private Recall refinement corpus, logs, prompt candidates and checkpoints
+.recall-lab

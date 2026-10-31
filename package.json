@@ -1,10 +1,17 @@
 {
   "name": "knowledge",
   "private": true,
-  "workspaces": ["apps/api"],
-  "engines": { "node": ">=24 <25" },
+  "workspaces": [
+    "apps/api",
+    "apps/recall-lab"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
   "overrides": {
-    "@esbuild-kit/core-utils": { "esbuild": "0.25.12" }
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.25.12"
+    }
   },
   "scripts": {
     "build": "npm run build --workspace @knowledge/api",
@@ -13,6 +20,7 @@
     "db:generate": "npm run db:generate --workspace @knowledge/api --",
     "dev:up": "bash infra/scripts/dev.sh up",
     "dev:down": "bash infra/scripts/dev.sh down",
-    "dev:logs": "bash infra/scripts/dev.sh logs"
+    "dev:logs": "bash infra/scripts/dev.sh logs",
+    "recall:lab": "node apps/recall-lab/src/cli.mjs"
   }
 }
