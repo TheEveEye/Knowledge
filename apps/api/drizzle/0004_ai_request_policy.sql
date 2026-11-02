@@ -1,0 +1,2 @@
+ALTER TABLE "knowledge"."ai_requests" ADD COLUMN "reasoning" text DEFAULT 'automatic' NOT NULL;--> statement-breakpoint
+ALTER TABLE "knowledge"."ai_requests" ADD COLUMN "policy_hash" text DEFAULT 'legacy' NOT NULL;

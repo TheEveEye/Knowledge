@@ -2,37 +2,24 @@ import Foundation
 import JWTKit
 
 @MainActor
-protocol ChatGPTHTTPTransport {
-    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
-}
-
-@MainActor
-final class ChatGPTAPIClient: ChatGPTAuthenticating {
-    private let transport: any ChatGPTHTTPTransport
-    private let now: () -> Date
-    private let sleep: (Duration) async throws -> Void
+final class ChatGPTAPIClient {
+    private let session: URLSession
     private var discoveryCache: Discovery?
     private var keyCache: KeyCache?
 
-    init(session: URLSession? = nil, now: @escaping () -> Date = Date.init,
-         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
-        self.transport = SessionTransport(session: session)
-        self.now = now
-        self.sleep = sleep
-    }
-
-    init(transport: any ChatGPTHTTPTransport, now: @escaping () -> Date = Date.init,
-         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
-        self.transport = transport
-        self.now = now
-        self.sleep = sleep
+    init() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        session = URLSession(configuration: configuration, delegate: AuthenticationRedirectDelegate(), delegateQueue: nil)
     }
 
     func authorizationEndpoint() async throws -> URL {
         try await discovery().authorizationEndpoint
     }
 
-    func exchange(_ authorization: OAuthAuthorization) async throws -> OAuthTokenResponse {
+    func exchange(_ authorization: OAuthAuthorization) async throws -> ChatGPTCredentials {
         guard validClientID(authorization.clientID), !authorization.code.isEmpty,
               !authorization.verifier.isEmpty else { throw AuthenticationError.incompleteRegistration }
         let data = try await postForm(to: discovery().tokenEndpoint, fields: [
@@ -46,7 +33,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
         return try tokenResponse(data, previous: nil, requireIdentity: true)
     }
 
-    func refresh(_ account: StoredChatGPTAccount) async throws -> OAuthTokenResponse {
+    func refresh(_ account: StoredChatGPTAccount) async throws -> ChatGPTCredentials {
         guard validClientID(account.clientID), let previous = account.credentials,
               let token = previous.refreshToken, !token.isEmpty else { throw AuthenticationError.sessionExpired }
         let data = try await postForm(to: discovery().tokenEndpoint, fields: [
@@ -72,7 +59,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
             } catch let error as AuthenticationError {
                 guard attempt < 2, case .http(let status, _) = error,
                       status == 0 || (500...599).contains(status) else { throw error }
-                do { try await sleep(.seconds(attempt + 1)) }
+                do { try await Task.sleep(for: .seconds(attempt + 1)) }
                 catch { throw AuthenticationError.canceled }
             }
         }
@@ -85,7 +72,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
     func verifyRefreshedIdentity(idToken: String, clientID: String, receivedAt: Date?) async throws -> ChatGPTIdentity {
         if let receivedAt {
             let timestamp = receivedAt.timeIntervalSince1970
-            guard timestamp.isFinite, timestamp > 0, receivedAt <= now() else { throw AuthenticationError.invalidIdentity }
+            guard timestamp.isFinite, timestamp > 0, receivedAt <= .now else { throw AuthenticationError.invalidIdentity }
         }
         return try await verifiedIdentity(idToken: idToken, clientID: clientID, nonce: nil, receivedAt: receivedAt)
     }
@@ -97,7 +84,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
               let kid = header.kid, !kid.isEmpty else { throw AuthenticationError.invalidIdentity }
         let provider = try await discovery()
         var keys: KeyCache
-        if let cached = keyCache, cached.expiresAt > now() {
+        if let cached = keyCache, cached.expiresAt > .now {
             keys = cached
             if !keys.identifiers.contains(kid) { keys = try await loadKeys(from: provider.jwksURI) }
         } else {
@@ -112,7 +99,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
             throw AuthenticationError.invalidIdentity
         }
         try Task.checkCancellation()
-        let timestamp = (receivedAt ?? now()).timeIntervalSince1970
+        let timestamp = (receivedAt ?? .now).timeIntervalSince1970
         guard payload.iss == provider.issuer,
               payload.aud.values.contains(clientID), !payload.sub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               payload.exp.isFinite, payload.iat.isFinite,
@@ -164,7 +151,7 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
             }.first ?? 3600
         let cacheAge = maxAge.isFinite ? max(0, min(maxAge, 3600)) : 3600
         let cached = KeyCache(collection: collection, identifiers: identifiers,
-                              expiresAt: now().addingTimeInterval(cacheAge))
+                              expiresAt: Date.now.addingTimeInterval(cacheAge))
         keyCache = cached
         return cached
     }
@@ -184,24 +171,23 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
         value.timeoutInterval = 30
         value.cachePolicy = .reloadIgnoringLocalCacheData
         value.setValue("application/json", forHTTPHeaderField: "Accept")
-        let result: (Data, HTTPURLResponse)
+        let result: (Data, URLResponse)
         do {
             try Task.checkCancellation()
-            result = try await transport.data(for: value)
+            result = try await session.data(for: value)
             try Task.checkCancellation()
         } catch is CancellationError { throw AuthenticationError.canceled }
         catch let error as URLError where error.code == .cancelled { throw AuthenticationError.canceled }
-        catch let error as AuthenticationError { throw error }
         catch { throw AuthenticationError.http(0, nil) }
-        guard result.1.url == endpoint else { throw AuthenticationError.invalidResponse }
-        guard (200..<300).contains(result.1.statusCode) else {
-            throw AuthenticationError.http(result.1.statusCode, safeErrorCode(result.0))
+        guard let response = result.1 as? HTTPURLResponse, response.url == endpoint else { throw AuthenticationError.invalidResponse }
+        guard (200..<300).contains(response.statusCode) else {
+            throw AuthenticationError.http(response.statusCode, safeErrorCode(result.0))
         }
         guard result.0.count <= 1_048_576 else { throw AuthenticationError.invalidResponse }
-        return result
+        return (result.0, response)
     }
 
-    private func tokenResponse(_ data: Data, previous: ChatGPTCredentials?, requireIdentity: Bool) throws -> OAuthTokenResponse {
+    private func tokenResponse(_ data: Data, previous: ChatGPTCredentials?, requireIdentity: Bool) throws -> ChatGPTCredentials {
         guard let response = try? JSONDecoder().decode(TokenFields.self, from: data),
               let scope = response.scope ?? previous?.scopes.joined(separator: " ") else {
             throw AuthenticationError.invalidResponse
@@ -218,12 +204,11 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
                   (!scopes.contains("offline_access") && previous == nil) || response.refreshToken?.isEmpty == false else {
                 throw AuthenticationError.invalidResponse
             }
-            expiry = now().addingTimeInterval(expires)
+            expiry = Date.now.addingTimeInterval(expires)
         } else if requiresAccess || access != nil { throw AuthenticationError.invalidResponse }
-        let credentials = ChatGPTCredentials(idToken: response.idToken, accessToken: access,
+        return ChatGPTCredentials(idToken: response.idToken, accessToken: access,
             refreshToken: response.refreshToken, expiresAt: expiry, scopes: scopes,
-            earliestRefreshAt: response.earliestRefreshAt?.string, receivedAt: now())
-        return OAuthTokenResponse(credentials: credentials)
+            receivedAt: .now)
     }
 
     private func safeErrorCode(_ data: Data) -> String? {
@@ -264,28 +249,6 @@ final class ChatGPTAPIClient: ChatGPTAuthenticating {
         guard value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { return nil }
         let encoded = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         return Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4))
-    }
-}
-
-@MainActor
-private final class SessionTransport: ChatGPTHTTPTransport {
-    private let session: URLSession
-    private let redirectDelegate = AuthenticationRedirectDelegate()
-    init(session: URLSession?) {
-        if let session { self.session = session }
-        else {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.urlCache = nil
-            configuration.httpCookieStorage = nil
-            configuration.httpShouldSetCookies = false
-            self.session = URLSession(configuration: configuration, delegate: AuthenticationRedirectDelegate(), delegateQueue: nil)
-        }
-    }
-    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        // Per-task delegate also protects an injected session that would otherwise follow redirects.
-        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
-        guard let response = response as? HTTPURLResponse else { throw AuthenticationError.invalidResponse }
-        return (data, response)
     }
 }
 
@@ -356,24 +319,8 @@ nonisolated private enum Audience: Codable, Sendable {
 nonisolated private struct TokenFields: Decodable {
     let idToken: String?, accessToken: String?, refreshToken: String?, tokenType: String?, scope: String?
     let expiresIn: Double?
-    let earliestRefreshAt: RefreshDate?
     enum CodingKeys: String, CodingKey {
         case idToken = "id_token", accessToken = "access_token", refreshToken = "refresh_token", tokenType = "token_type"
-        case scope, expiresIn = "expires_in", earliestRefreshAt = "earliest_refresh_at"
-    }
-}
-
-nonisolated private enum RefreshDate: Decodable {
-    case text(String), timestamp(Double)
-    init(from decoder: any Decoder) throws {
-        let value = try decoder.singleValueContainer()
-        if let string = try? value.decode(String.self) { self = .text(string) }
-        else { self = .timestamp(try value.decode(Double.self)) }
-    }
-    var string: String {
-        switch self {
-        case .text(let value): value
-        case .timestamp(let value): ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: value))
-        }
+        case scope, expiresIn = "expires_in"
     }
 }

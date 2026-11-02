@@ -1,0 +1,12 @@
+services:
+  api:
+    environment:
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets: [openai_api_key]
+  worker:
+    environment:
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets: [openai_api_key]
+secrets:
+  openai_api_key:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/openai-api-key

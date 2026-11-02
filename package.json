@@ -3,7 +3,10 @@
   "private": true,
   "workspaces": [
     "apps/api",
-    "apps/recall-lab"
+    "apps/recall-lab",
+    "apps/worker",
+    "packages/contracts",
+    "packages/backend"
   ],
   "engines": {
     "node": ">=24 <25"
@@ -14,8 +17,8 @@
     }
   },
   "scripts": {
-    "build": "npm run build --workspace @knowledge/api",
-    "typecheck": "npm run typecheck --workspace @knowledge/api",
+    "build": "npm run build --workspace @knowledge/contracts && npm run build --workspace @knowledge/backend && npm run build --workspace @knowledge/api && npm run build --workspace @knowledge/worker",
+    "typecheck": "npm run build --workspace @knowledge/contracts && npm run build --workspace @knowledge/backend && npm run typecheck --workspace @knowledge/api && npm run typecheck --workspace @knowledge/worker",
     "dev": "npm run dev --workspace @knowledge/api",
     "db:generate": "npm run db:generate --workspace @knowledge/api --",
     "dev:up": "bash infra/scripts/dev.sh up",

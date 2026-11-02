@@ -75,10 +75,21 @@ services:
       AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-}
       AUTH_TRUST_CLOUDFLARE: ${AUTH_TRUST_CLOUDFLARE:-true}
       AUTH_SECRET_FILE: /run/secrets/auth_secret
+      SOURCE_DIRECTORY: /var/lib/knowledge/sources
+      SOURCE_DISK_RESERVE_BYTES: ${SOURCE_DISK_RESERVE_BYTES:-536870912}
+      AI_ENCRYPTION_KEY_FILE: /run/secrets/ai_encryption_key
+      CHATGPT_SELF_HOSTED_ENABLED: ${CHATGPT_SELF_HOSTED_ENABLED:-true}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      AI_API_DAILY_REQUEST_LIMIT: ${AI_API_DAILY_REQUEST_LIMIT:-0}
     secrets:
       - source: db_app_password
         target: db_password
       - auth_secret
+      - ai_encryption_key
+    volumes:
+      - source_files:/var/lib/knowledge/sources
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     depends_on:
       db:
         condition: service_healthy
@@ -87,6 +98,65 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    logging: *logging
+
+  worker:
+    <<: *api-image
+    command: ["node", "/app/apps/worker/dist/main.js"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    environment:
+      <<: *database
+      DB_USER: knowledge_api
+      APP_REVISION: ${APP_REVISION:-development}
+      SOURCE_DIRECTORY: /var/lib/knowledge/sources
+      AI_ENCRYPTION_KEY_FILE: /run/secrets/ai_encryption_key
+      CHATGPT_SELF_HOSTED_ENABLED: ${CHATGPT_SELF_HOSTED_ENABLED:-true}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      AI_API_DAILY_REQUEST_LIMIT: ${AI_API_DAILY_REQUEST_LIMIT:-0}
+    secrets:
+      - source: db_app_password
+        target: db_password
+      - ai_encryption_key
+    volumes:
+      - source_files:/var/lib/knowledge/sources
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "node", "/app/packages/backend/dist/worker-health.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+
+  backup:
+    image: postgres:18
+    profiles: [operations]
+    entrypoint: ["/bin/sh", "/opt/knowledge/backup-entrypoint.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: knowledge_owner
+      PGDATABASE: knowledge
+    secrets:
+      - source: db_owner_password
+        target: db_password
+    volumes:
+      - source_files:/var/lib/knowledge/sources:ro
+      - ./infra/scripts/backup-entrypoint.sh:/opt/knowledge/backup-entrypoint.sh:ro
+      - ./infra/scripts/backup-archive.sh:/opt/knowledge/backup-archive.sh:ro
+    tmpfs:
+      - /tmp
+    read_only: true
     logging: *logging
 
   caddy:
@@ -113,10 +183,14 @@ secrets:
     file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/db-app-password
   auth_secret:
     file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/auth-secret
+  ai_encryption_key:
+    file: ${KNOWLEDGE_SECRETS_DIR:-./.secrets}/ai-encryption-key
 
 volumes:
   pgdata:
     name: knowledge_pgdata
+  source_files:
+    name: knowledge_source_files
   caddy_data:
     name: knowledge_caddy_data
   caddy_config:

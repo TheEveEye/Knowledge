@@ -2,9 +2,15 @@ FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
+COPY apps/worker/package.json ./apps/worker/package.json
+COPY apps/recall-lab/package.json ./apps/recall-lab/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/backend/package.json ./packages/backend/package.json
 RUN npm ci
 COPY apps/api ./apps/api
-RUN npm run build && npm prune --omit=dev --omit=optional
+COPY apps/worker ./apps/worker
+COPY packages ./packages
+RUN npm run build && npm prune --omit=dev
 
 FROM node:24-bookworm-slim AS runtime
 ARG APP_REVISION=development
@@ -17,6 +23,9 @@ COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/drizzle ./apps/api/drizzle
+COPY --from=build /app/apps/worker ./apps/worker
+COPY --from=build /app/packages ./packages
+RUN mkdir -p /var/lib/knowledge/sources && chown -R node:node /var/lib/knowledge
 USER node
 WORKDIR /app/apps/api
 EXPOSE 3000

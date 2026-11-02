@@ -10,7 +10,6 @@
 		A11000000000000000000001 /* JWTKit in Frameworks */ = {isa = PBXBuildFile; productRef = A11000000000000000000002 /* JWTKit */; };
 		A12000000000000000000003 /* MathJaxSwift in Frameworks */ = {isa = PBXBuildFile; productRef = A12000000000000000000004 /* MathJaxSwift */; };
 		A12000000000000000000005 /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = A12000000000000000000006 /* SwiftDraw */; };
-		A13000000000000000000001 /* FSRS in Frameworks */ = {isa = PBXBuildFile; productRef = A13000000000000000000002 /* FSRS */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,7 +28,6 @@
 		75FDB43A30740D3400463F99 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
-				A13000000000000000000001 /* FSRS in Frameworks */,
 				A11000000000000000000001 /* JWTKit in Frameworks */,
 				A12000000000000000000003 /* MathJaxSwift in Frameworks */,
 				A12000000000000000000005 /* SwiftDraw in Frameworks */,
@@ -72,7 +70,6 @@
 			);
 			name = Knowledge;
 			packageProductDependencies = (
-				A13000000000000000000002 /* FSRS */,
 				A11000000000000000000002 /* JWTKit */,
 				A12000000000000000000004 /* MathJaxSwift */,
 				A12000000000000000000006 /* SwiftDraw */,
@@ -106,7 +103,6 @@
 			mainGroup = 75FDB43430740D3400463F99;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A13000000000000000000003 /* XCRemoteSwiftPackageReference "swift-fsrs" */,
 				A1100000000000000000000C /* XCRemoteSwiftPackageReference "jwt-kit" */,
 				A1200000000000000000000D /* XCRemoteSwiftPackageReference "MathJaxSwift" */,
 				A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */,
@@ -375,14 +371,6 @@
 				minimumVersion = 0.29.0;
 			};
 		};
-		A13000000000000000000003 /* XCRemoteSwiftPackageReference "swift-fsrs" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/open-spaced-repetition/swift-fsrs.git";
-			requirement = {
-				kind = revision;
-				revision = 4fbaf20184d62f82a9f44f343337c61a2c5483e9;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -400,11 +388,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1200000000000000000000E /* XCRemoteSwiftPackageReference "SwiftDraw" */;
 			productName = SwiftDraw;
-		};
-		A13000000000000000000002 /* FSRS */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A13000000000000000000003 /* XCRemoteSwiftPackageReference "swift-fsrs" */;
-			productName = FSRS;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -18,6 +18,7 @@ local.properties
 !.env.example
 !.env.*.example
 **/.secrets/
+**/.data/
 **/backups/
 *.dump
 

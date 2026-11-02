@@ -4,7 +4,7 @@ import Observation
 import SwiftUI
 
 nonisolated enum AuthenticationState: Equatable {
-    case restoring, signedOut, signingIn, signedIn(String), recovery
+    case restoring, signedOut, signingIn, signedIn, recovery
 }
 
 @MainActor @Observable
@@ -15,10 +15,9 @@ final class AuthenticationStore {
     private(set) var planWelcomeAccountID: String?
     private var operationInProgress = false
 
-    @ObservationIgnored private let storage: any ChatGPTCredentialStorage
-    @ObservationIgnored private let client: any ChatGPTAuthenticating
-    @ObservationIgnored private let browser: any ChatGPTBrowserAuthenticating
-    @ObservationIgnored private let now: @MainActor () -> Date
+    @ObservationIgnored private let storage = KeychainCredentialStore()
+    @ObservationIgnored private let client = ChatGPTAPIClient()
+    @ObservationIgnored private let browser = OAuthBrowserSession()
     @ObservationIgnored private var operationID = UUID()
     @ObservationIgnored private var operationTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTasks: [String: Task<StoredChatGPTAccount, Error>] = [:]
@@ -29,21 +28,29 @@ final class AuthenticationStore {
     @ObservationIgnored private var pendingSignOutID: String?
     @ObservationIgnored private var pendingSignOutAccount: StoredChatGPTAccount?
 
-    init(storage: (any ChatGPTCredentialStorage)? = nil,
-         client: (any ChatGPTAuthenticating)? = nil,
-         browser: (any ChatGPTBrowserAuthenticating)? = nil,
-         now: @escaping @MainActor () -> Date = { Date() }) {
-        self.storage = storage ?? KeychainCredentialStore()
-        self.client = client ?? ChatGPTAPIClient()
-        self.browser = browser ?? OAuthBrowserSession()
-        self.now = now
-    }
-
     var activeAccount: StoredChatGPTAccount? { accounts.first { $0.clientID == activeID } }
     var isBusy: Bool { state == .restoring || state == .signingIn || signingOut || operationInProgress }
 
     func setWebAuthenticationSession(_ session: WebAuthenticationSession) {
-        (browser as? OAuthBrowserSession)?.webAuthenticationSession = session
+        browser.webAuthenticationSession = session
+    }
+
+    /// Cloud connections perform a new local authorization; old device grants are never uploaded.
+    func prepareCloudConnection() {
+        guard !operationInProgress else { return }
+        state = .signedOut
+        activeID = nil
+    }
+
+    /// The server owns rotation after a successful authenticated handoff. Do not revoke this grant.
+    func relinquishCloudConnection(_ clientID: String) throws {
+        for task in refreshTasks.values { task.cancel() }
+        refreshTasks = [:]; refreshGenerations = [:]
+        guard var saved = accounts.first(where: { $0.clientID == clientID }) else { return }
+        saved.credentials = nil; saved.pendingRefresh = nil
+        try storage.saveAccount(saved)
+        try storage.setActiveAccountID(nil)
+        upsert(saved); activeID = nil; state = .signedOut; message = nil
     }
 
     func restore() async {
@@ -73,15 +80,6 @@ final class AuthenticationStore {
         }
     }
 
-    func retryRestoration() async {
-        guard !isBusy else { return }
-        if pendingSignOutID != nil { await signOut(); return }
-        didRestore = false
-        state = .restoring
-        message = nil
-        await restore()
-    }
-
     func signIn(accountID: String? = nil, requestConsent: Bool = false, startNewRegistration: Bool = false) async {
         if pendingSignOutID != nil { await signOut(); guard pendingSignOutID == nil else { return } }
         guard !isBusy else { return }
@@ -109,7 +107,7 @@ final class AuthenticationStore {
                 try Task.checkCancellation()
                 if selected == nil { try storage.setPendingRegistrationClientID(authorization.clientID) }
                 let response = try await client.exchange(authorization)
-                guard let token = response.credentials.idToken else { throw AuthenticationError.invalidResponse }
+                guard let token = response.idToken else { throw AuthenticationError.invalidResponse }
                 let identity = try await client.verifyIdentity(idToken: token, clientID: authorization.clientID, nonce: authorization.nonce)
                 if let selected, selected.identity.issuer != identity.issuer || selected.identity.subject != identity.subject {
                     throw AuthenticationError.invalidIdentity
@@ -121,7 +119,7 @@ final class AuthenticationStore {
                     throw AuthenticationError.invalidIdentity
                 }
                 let label = existing?.label ?? "Account \((accounts.compactMap { Int($0.label.dropFirst(8)) }.max() ?? 0) + 1)"
-                let account = StoredChatGPTAccount(clientID: authorization.clientID, identity: identity, label: label, credentials: response.credentials)
+                let account = StoredChatGPTAccount(clientID: authorization.clientID, identity: identity, label: label, credentials: response)
                 refreshGenerations[account.clientID] = UUID()
                 try storage.saveAccount(account)
                 if selected == nil { try storage.setPendingRegistrationClientID(nil) }
@@ -194,7 +192,7 @@ final class AuthenticationStore {
 
     private func resumedAccount(_ account: StoredChatGPTAccount) async throws -> StoredChatGPTAccount {
         if account.pendingRefresh == nil,
-           account.credentials?.accessToken == nil || (account.credentials?.expiresAt ?? .distantPast) > now().addingTimeInterval(60) {
+           account.credentials?.accessToken == nil || (account.credentials?.expiresAt ?? .distantPast) > Date.now.addingTimeInterval(60) {
             return account
         }
         if let task = refreshTasks[account.clientID] { return try await task.value }
@@ -211,7 +209,7 @@ final class AuthenticationStore {
                 if let pending = account.pendingRefresh {
                     response = pending
                 } else {
-                    response = try await client.refresh(account).credentials
+                    response = try await client.refresh(account)
                     // A consumed rotating grant must be checkpointed before JWKS retrieval.
                     guard refreshGenerations[account.clientID] == generation else { throw CancellationError() }
                 }
@@ -307,7 +305,7 @@ final class AuthenticationStore {
         operationTask = nil
         operationInProgress = false
         browser.cancel()
-        state = activeID.map(AuthenticationState.signedIn) ?? .signedOut
+        state = activeID == nil ? .signedOut : .signedIn
         message = AuthenticationError.backgrounded.localizedDescription
     }
 
@@ -324,7 +322,7 @@ final class AuthenticationStore {
     private func activate(_ account: StoredChatGPTAccount) throws {
         try storage.setActiveAccountID(account.clientID)
         activeID = account.clientID
-        state = .signedIn(account.clientID)
+        state = .signedIn
     }
 
     private func upsert(_ account: StoredChatGPTAccount) {
@@ -353,7 +351,7 @@ final class AuthenticationStore {
 
     private func restorePreviousAccount(_ clientID: String?) {
         activeID = clientID.flatMap { id in accounts.contains { $0.clientID == id && $0.credentials?.idToken != nil } ? id : nil }
-        state = activeID.map(AuthenticationState.signedIn) ?? .signedOut
+        state = activeID == nil ? .signedOut : .signedIn
     }
 
     private func safeMessage(_ error: any Error) -> String {

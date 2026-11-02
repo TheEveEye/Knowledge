@@ -1,6 +1,6 @@
 # Knowledge account foundation
 
-Knowledge owns each user's identity. A permanent `knowledge.users.id` UUID will own library data, sync state, purchases, and AI usage. Email/password is the current login method. Apple, Google, and other identity providers are deferred and can later become additional ways to sign in to that same user. AI-provider access is a separate permission and never determines ownership of application data.
+Knowledge owns each user's identity. A permanent `knowledge.users.id` UUID owns study data and AI usage independently of login methods. Email/password is the current login method. Apple, Google, and other identity providers are deferred and can later become additional ways to sign in to that same user. AI-provider access is a separate permission and never determines ownership of application data.
 
 ## Implemented scope
 
@@ -16,7 +16,7 @@ Better Auth 1.7.14 runs inside Fastify at `/api/auth/`, using the Drizzle Postgr
 
 The adapter's model names (`user`, `account`, `session`, `verification`, `rateLimit`) map to these Drizzle tables. PostgreSQL generates UUID defaults, including for adapter-created verification and rate-limit records. Foreign keys cascade sessions and linked identities when a user is deleted. Only the migration owner can change the schema; existing default grants give the API data access.
 
-Email/password registration and sign-in are implemented. New accounts must verify their email before signing in. Email codes are restricted to email verification and password recovery; passwordless sign-in is disabled. Existing email-code accounts keep their UUID and use password recovery to add a password. No database migration or forced session invalidation is required. There are no seeded users or developer login bypasses. Social sign-in, account deletion, and identity linking endpoints remain disabled. The iOS app separates Knowledge sessions from the optional ChatGPT connection; its library remains device-local pending explicit migration. See [email sign-in setup](Email-Sign-In.md). `/api/me` returns 401 to unauthenticated clients.
+Email/password registration and sign-in are implemented. New accounts must verify their email before signing in. Email codes are restricted to email verification and password recovery; passwordless sign-in is disabled. Existing email-code accounts keep their UUID and use password recovery to add a password. No database migration or forced session invalidation is required. There are no seeded users or developer login bypasses. Social sign-in, account deletion, and identity linking endpoints remain disabled. The iOS app separates Knowledge sessions from the optional ChatGPT connection; its library is server-owned and account-scoped; existing device-local development libraries are not opened or migrated. See [email sign-in setup](Email-Sign-In.md). `/api/me` returns 401 to unauthenticated clients.
 
 ## HTTP contract
 
@@ -70,7 +70,6 @@ Keep `auth-secret` in the protected configuration backup together with the datab
 
 1. Email delivery is configured with the verified Resend domain and a private sending key. Existing email-code users select Reset password before using password sign-in.
 2. Implement account deletion before releasing account creation to App Store users. Apple/Google OAuth is deferred: add provider configuration, token verification, native/web client integration, and explicit identity linking together when that work resumes. No provider SDKs, credentials, entitlements, or social-login endpoints are configured currently.
-3. Migrate the existing local library through explicit import into the selected Knowledge account. Partition local data and pending operations by user UUID before enabling account switching and cloud sync.
-4. Introduce server-held OpenAI API credentials, per-user allowances, and usage accounting independently of login methods. A ChatGPT plan connection remains an optional AI connection if retained.
+3. Maintain the account-owned storage and AI-funding boundaries documented in [cloud library](Cloud-Library.md). Existing accounts and database volumes remain intact. There is no legacy library migration.
 
 References: [Fastify integration](https://better-auth.com/docs/integrations/fastify), [Drizzle adapter](https://better-auth.com/docs/adapters/drizzle), [sessions](https://better-auth.com/docs/concepts/session-management), [account linking](https://better-auth.com/docs/concepts/users-accounts), [bearer tokens](https://better-auth.com/docs/plugins/bearer), [rate limits](https://better-auth.com/docs/concepts/rate-limit).

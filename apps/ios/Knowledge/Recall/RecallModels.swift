@@ -1,106 +1,8 @@
 import Foundation
-import SwiftData
-
-/// Learning records deliberately live outside library revisions and ChatGPT accounts.
-@Model final class RecallPreparation {
-    @Attribute(.unique) var subjectID: UUID
-    var status: String
-    var message: String?
-    var usageLimited: Bool
-    var updatedAt: Date
-    init(subjectID: UUID) {
-        self.subjectID = subjectID; status = "pending"; usageLimited = false; updatedAt = .now
-    }
-}
-
-@Model final class RecallMaterial {
-    @Attribute(.unique) var id: String
-    var subjectID: UUID
-    var conceptID: UUID
-    var signature: String
-    var validatedRevisionID: UUID? = nil
-    var snapshotData: Data
-    var status: String
-    var issue: String?
-    init(id: String, subjectID: UUID, conceptID: UUID, signature: String, snapshotData: Data) {
-        self.id = id; self.subjectID = subjectID; self.conceptID = conceptID
-        self.signature = signature; self.snapshotData = snapshotData; status = "pending"
-    }
-}
-
-@Model final class RecallTarget {
-    @Attribute(.unique) var id: UUID
-    var subjectID: UUID
-    var conceptID: UUID
-    var materialID: String
-    var materialSignature: String
-    var questionData: Data
-    var memoryData: Data?
-    var dueAt: Date?
-    var assessedAt: Date?
-    var exposedAt: Date?
-    var isRetired: Bool
-    var isExcluded: Bool
-    var issue: String?
-    var createdAt: Date
-    init(subjectID: UUID, conceptID: UUID, materialID: String, signature: String, questionData: Data) {
-        id = UUID(); self.subjectID = subjectID; self.conceptID = conceptID
-        self.materialID = materialID; materialSignature = signature; self.questionData = questionData
-        isRetired = false; isExcluded = false; createdAt = .now
-    }
-    func question() throws -> RecallQuestion { try RecallCoding.decode(RecallQuestion.self, questionData) }
-}
-
-@Model final class RecallSessionRecord {
-    @Attribute(.unique) var id: UUID
-    var subjectID: UUID
-    var topicID: UUID?
-    var stateData: Data
-    var isFinished: Bool
-    var updatedAt: Date
-    init(id: UUID, subjectID: UUID, topicID: UUID?, stateData: Data) {
-        self.id = id; self.subjectID = subjectID; self.topicID = topicID
-        self.stateData = stateData; isFinished = false; updatedAt = .now
-    }
-}
-
-/// Append-only observations. Undo/disputes reference earlier events instead of rewriting them.
-@Model final class LearningEvent {
-    @Attribute(.unique) var id: UUID
-    var subjectID: UUID
-    var sessionID: UUID?
-    var targetID: UUID
-    var method: String
-    var kind: String
-    var relatedEventID: UUID?
-    var payloadData: Data
-    var createdAt: Date
-    init(id: UUID = UUID(), subjectID: UUID, sessionID: UUID?, targetID: UUID, kind: String, method: String = "recall",
-         relatedEventID: UUID? = nil, payloadData: Data) {
-        self.id = id; self.subjectID = subjectID; self.sessionID = sessionID; self.targetID = targetID
-        self.method = method; self.kind = kind; self.relatedEventID = relatedEventID
-        self.payloadData = payloadData; createdAt = .now
-    }
-}
-
-nonisolated enum RecallCoding {
-    static func encode<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(value)
-    }
-    static func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
-        try JSONDecoder().decode(type, from: data)
-    }
-}
 
 nonisolated enum RecallError: LocalizedError {
     case invalid(String)
     var errorDescription: String? { switch self { case .invalid(let message): message } }
-}
-
-nonisolated struct RecallScope: Hashable, Sendable {
-    let subjectID: UUID
-    var topicID: UUID? = nil
 }
 
 nonisolated struct RecallMaterialSnapshot: Codable, Sendable, Equatable {
@@ -182,41 +84,14 @@ nonisolated enum RecallPromptKind: String, Codable, Sendable {
     case initial, clarification, furtherAssessment, hint
 }
 
-nonisolated struct RecallTerminologyContext: Encodable, Sendable {
-    let term: String
-    let aliases: [String]
-    let definition: String
-    let sourceQuotes: [String]
-}
-
 nonisolated enum RecallReconsiderationScope: String, Codable, Sendable, CaseIterable {
     case initial, conversation
     var label: String { self == .initial ? "Initial answer" : "Whole conversation" }
 }
 
-nonisolated struct RecallDisputeRecord: Codable, Sendable {
-    let reason: String
-    let scope: RecallReconsiderationScope
-}
-
 nonisolated struct RecallCreditRetraction: Codable, Sendable, Equatable {
     let criterionID: String
     let reason: String
-}
-
-nonisolated struct RecallAdditionalCandidate: Encodable, Sendable {
-    let targetID: UUID
-    let materialSignature: String
-    let prompt: String
-    let expectedAnswer: String
-    let criteria: [RecallCriterion]
-    let acceptableWording: String
-    let boundary: String
-    let claim: String
-    // The signature is used locally for commit validation, not by the grader.
-    enum CodingKeys: String, CodingKey {
-        case targetID, prompt, expectedAnswer, criteria, acceptableWording, boundary, claim
-    }
 }
 
 nonisolated struct RecallAdditionalCredit: Codable, Sendable, Equatable, Identifiable {
@@ -303,15 +178,12 @@ nonisolated struct RecallEpisode: Codable, Sendable, Equatable {
     var feedbackAssessment: RecallAssessment? {
         reconsiderationScope == .conversation || initialCreditReconciled == true ? lastAssessment : (initialOverride ?? lastAssessment)
     }
-    var hasAssistance: Bool { (sourceRevealedDuringAnswer ?? sourceRevealed) || turns.contains { $0.kind == .hint || $0.input?.isRecognition == true } }
     var canAdjustReviewEffort: Bool {
         phase == "feedback" && !disputed && !isRelearning && !initialSourceRevealed
             && initialAssessment?.outcome == .correct && initialAssessment?.sourceConcern == nil
             && turns.first?.input?.isRecognition != true
     }
-    var followUpCount: Int { max(0, turns.count - 1) }
     var nextPrompt: String { lastAssessment?.followUp ?? question.prompt }
-    var nextKind: RecallPromptKind { lastAssessment?.followUpKind ?? .initial }
 }
 
 nonisolated struct RecallQueueItem: Codable, Sendable, Equatable {
@@ -334,18 +206,6 @@ nonisolated struct RecallSessionState: Codable, Sendable, Equatable {
     var additionalRecalled: Int? = nil
     var lastReviewEventID: UUID? = nil
     var lastSessionSnapshot: Data? = nil
-    var isSummary: Bool { episode == nil && queue.isEmpty }
-}
-
-nonisolated struct RecallReviewPayload: Codable, Sendable {
-    let episode: RecallEpisode
-    let rating: Int?
-    let beforeMemory: Data?
-    let afterMemory: Data?
-    let reviewedAt: Date
-    let schedulerVersion: String
-    let assessmentPolicyVersion: String
-    let rubricVersion: String
 }
 
 nonisolated enum RecallOverviewCategory: String, Identifiable {
@@ -356,14 +216,6 @@ nonisolated enum RecallOverviewCategory: String, Identifiable {
         case .due: "Due for review"
         case .new: "New targets"
         case .assessed: "Assessed targets"
-        }
-    }
-
-    @MainActor func includes(_ target: RecallTarget, now: Date) -> Bool {
-        switch self {
-        case .due: target.dueAt.map { $0 <= now } == true && RecallScheduler.availableAt(target) <= now
-        case .new: target.assessedAt == nil && RecallScheduler.availableAt(target) <= now
-        case .assessed: target.assessedAt != nil
         }
     }
 }

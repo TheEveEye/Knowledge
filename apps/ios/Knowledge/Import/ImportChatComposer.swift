@@ -1,15 +1,5 @@
 import SwiftUI
 
-struct ImportChatComposer: View {
-    let jobID: UUID
-    @Binding var isExpanded: Bool
-    @Environment(ImportCoordinator.self) private var imports
-
-    var body: some View {
-        ChatOverlay(session: imports.chat(for: jobID), isExpanded: $isExpanded, showsHeader: true)
-    }
-}
-
 struct ImportChatPlacement {
     let jobID: UUID
     let bounds: Anchor<CGRect>
@@ -33,6 +23,7 @@ struct ImportChatJobKey: PreferenceKey {
 /// changing the import screen's title, safe area, or scroll position.
 struct ImportChatHost: ViewModifier {
     @State private var isExpanded = false
+    @Environment(CloudLibraryStore.self) private var library: CloudLibraryStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -46,7 +37,11 @@ struct ImportChatHost: ViewModifier {
                 if let placement {
                     GeometryReader { geometry in
                         let column = geometry[placement.bounds]
-                        ImportChatComposer(jobID: placement.jobID, isExpanded: $isExpanded)
+                        Group {
+                            if let subjectID = library.activeSubjectID {
+                                CloudSubjectChatOverlay(subjectID: subjectID, importID: placement.jobID.uuidString.lowercased(), isExpanded: $isExpanded)
+                            }
+                        }
                             .id(placement.jobID)
                             .frame(width: column.width, height: geometry.size.height)
                             .position(x: column.midX, y: geometry.size.height / 2)

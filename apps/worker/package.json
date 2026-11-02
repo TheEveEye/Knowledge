@@ -1,0 +1,9 @@
+{
+  "name": "@knowledge/worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "start": "node dist/main.js" },
+  "dependencies": { "@knowledge/backend": "1.0.0" }
+}

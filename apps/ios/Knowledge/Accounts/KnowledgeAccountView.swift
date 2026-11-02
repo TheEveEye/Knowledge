@@ -3,6 +3,7 @@ import SwiftUI
 
 struct KnowledgeAccountView: View {
     @Environment(KnowledgeAccountStore.self) private var account
+    @Environment(CloudLibraryStore.self) private var library: CloudLibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var showChatGPT = false
     @State private var confirmSignOut = false
@@ -32,15 +33,6 @@ struct KnowledgeAccountView: View {
                     Button("ChatGPT") { showChatGPT = true }
                 } header: {
                     Text("AI connections")
-                } footer: {
-                    Text("Connect a ChatGPT plan to use the current AI features. Your Knowledge account is separate.")
-                }
-                Section("Library on this device") {
-                    Text("Your saved items stay on this device. Account sync is not enabled yet, and signing in does not upload or transfer your library.")
-                        .foregroundStyle(.secondary)
-                }
-                if account.isBusy, signingOutUser == nil {
-                    ProgressView("Updating your account…")
                 }
                 if displayedUser != nil {
                     Section {
@@ -64,13 +56,16 @@ struct KnowledgeAccountView: View {
                     Button("Done") { dismiss() }.disabled(isUpdating)
                 }
             }
-            .sheet(isPresented: $showChatGPT) { ChatGPTAccountView() }
+            .sheet(isPresented: $showChatGPT) {
+                CloudChatGPTAccountView()
+            }
             .alert("Sign out of Knowledge as \(displayedUser?.email ?? "")?", isPresented: $confirmSignOut) {
                 Button("Cancel", role: .cancel) { }
                 Button("Sign out", role: .destructive) {
                     guard !isUpdating, let user = account.user else { return }
                     signingOutUser = user
                     Task {
+                        library.close()
                         await account.signOut()
                         if account.user != nil { signingOutUser = nil }
                     }
@@ -164,6 +159,13 @@ struct KnowledgeEmailSignInView: View {
             case .resetPassword(let requested):
                 Section {
                     codeField
+                    // AutoFill needs the account username alongside the new password.
+                    TextField("Email address", text: .constant(requested))
+                        .textContentType(.username)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .allowsHitTesting(false)
                     newPasswordField
                     confirmationField
                 } footer: {

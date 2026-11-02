@@ -24,6 +24,25 @@ final class KnowledgeAccountStore {
 
     var needsSessionValidation: Bool { credentials != nil && user == nil }
 
+    func cloudCredentials() throws -> KnowledgeCredentials {
+        guard let credentials, user?.id == credentials.user.id else { throw KnowledgeAccountError.unauthorized }
+        return credentials
+    }
+
+    func acceptCloudRenewal(_ token: String?, userID: UUID) throws {
+        guard var credentials, user?.id == userID, credentials.user.id == userID else { throw CancellationError() }
+        guard let token, !token.isEmpty, token.count <= 4096 else { return }
+        credentials.token = token
+        try keychain.save(credentials)
+        self.credentials = credentials
+    }
+
+    func cloudSessionEnded(userID: UUID) {
+        guard user?.id == userID else { return }
+        user = nil; credentials = nil
+        do { try keychain.clear() } catch { show(error) }
+    }
+
     func restore() async {
         guard !restored else { return }
         restored = true

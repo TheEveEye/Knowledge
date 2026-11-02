@@ -1,46 +1,6 @@
 import Foundation
 import SwiftData
 
-/// Browsing headings are separate from the source-grounded knowledge graph.
-@Model final class KnowledgeTopic {
-    @Attribute(.unique) var id: UUID
-    var subjectID: UUID
-    var parentTopicID: UUID?
-    var name: String
-    var sortOrder: Int
-    var isUserEdited: Bool
-    var manualFields: [String]
-    var isRetired: Bool
-    var redirectID: UUID? = nil
-
-    init(subjectID: UUID, record: TopicRecord) {
-        id = record.id; self.subjectID = subjectID; parentTopicID = record.parentTopicID
-        name = record.name; sortOrder = record.sortOrder; isUserEdited = record.isUserEdited
-        manualFields = record.isUserEdited ? ["name", "parentID"] : []
-        isRetired = false
-    }
-    var record: TopicRecord {
-        .init(id: id, parentTopicID: parentTopicID, name: name, sortOrder: sortOrder, isUserEdited: isUserEdited)
-    }
-}
-
-/// A nil topic keeps an uncertain concept visible under Unsorted.
-@Model final class KnowledgeConceptPlacement {
-    @Attribute(.unique) var conceptID: UUID
-    var subjectID: UUID
-    var topicID: UUID?
-    var isLocked: Bool
-    var reason: String?
-
-    init(subjectID: UUID, record: ConceptPlacementRecord) {
-        conceptID = record.conceptID; self.subjectID = subjectID; topicID = record.topicID
-        isLocked = record.isLocked; reason = record.reason
-    }
-    var record: ConceptPlacementRecord {
-        .init(conceptID: conceptID, topicID: topicID, isLocked: isLocked, reason: reason)
-    }
-}
-
 nonisolated struct TopicRecord: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     let parentTopicID: UUID?
@@ -56,64 +16,10 @@ nonisolated struct ConceptPlacementRecord: Codable, Sendable, Equatable {
     var reason: String?
 }
 
-nonisolated struct OrganizableConcept: Codable, Sendable, Equatable, Identifiable {
-    let id: UUID
-    let name: String
-    let aliases: [String]
-    let explanation: String
-    let sourceHeadings: [String]
-}
-
-nonisolated struct TopicOrganizationSnapshot: Sendable, Equatable {
-    let subjectID: UUID
-    let subjectName: String
-    let concepts: [OrganizableConcept]
-    let topics: [TopicRecord]
-    let placements: [ConceptPlacementRecord]
-
-    var candidates: [OrganizableConcept] {
-        let placed = Dictionary(uniqueKeysWithValues: placements.map { ($0.conceptID, $0) })
-        return concepts.filter { concept in
-            guard let placement = placed[concept.id] else { return true }
-            return placement.topicID == nil && !placement.isLocked
-        }
-    }
-}
-
 nonisolated struct TopicOrganizationPlan: Codable, Sendable {
     let addedTopics: [TopicRecord]
     let placements: [ConceptPlacementRecord]
     var updates: [LibraryContentProposal] = []
-}
-
-/// A resolved outline and validated assignments that are durable before progress is displayed.
-/// A placement with no suitable topic is still a completed assignment.
-nonisolated struct TopicOrganizationCheckpoint: Codable, Sendable {
-    let subjectID: UUID
-    let candidateIDs: [UUID]
-    var plan: TopicOrganizationPlan
-
-    func validate(for snapshot: TopicOrganizationSnapshot) throws {
-        let candidates = Set(snapshot.candidates.map(\.id))
-        let placed = plan.placements.map(\.conceptID)
-        let topics = snapshot.topics + plan.addedTopics
-        let allowed = Set(topics.map(\.id))
-        guard subjectID == snapshot.subjectID,
-              candidateIDs.count == candidates.count, Set(candidateIDs) == candidates,
-              plan.addedTopics.count <= 60,
-              Set(placed).count == placed.count, Set(placed).isSubset(of: candidates),
-              plan.placements.allSatisfy({ !$0.isLocked && ($0.topicID == nil || allowed.contains($0.topicID!)) }) else {
-            throw TopicOrganizationError.invalid("The saved organization does not match this import.")
-        }
-        try TopicTree.validate(topics)
-    }
-}
-
-nonisolated struct TopicOrganizationProgress: Sendable {
-    let label: String
-    var topics: [TopicRecord] = []
-    var placements: [ConceptPlacementRecord] = []
-    var isComplete = false
 }
 
 nonisolated enum TopicOrganizationError: LocalizedError, Equatable {

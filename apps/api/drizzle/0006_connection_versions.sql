@@ -1,0 +1,1 @@
+ALTER TABLE "knowledge"."ai_connections" ADD COLUMN "version" integer DEFAULT 1 NOT NULL;

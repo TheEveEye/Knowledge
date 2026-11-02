@@ -12,11 +12,16 @@ knowledge_compose() {
   if [[ -s "$KNOWLEDGE_REMOTE_DIR/.secrets/email-api-key" && -f "$release_dir/infra/compose/email.yaml" ]]; then
     args+=(-f "$release_dir/infra/compose/email.yaml")
   fi
+  if [[ -s "$KNOWLEDGE_REMOTE_DIR/.secrets/openai-api-key" && -f "$release_dir/infra/compose/ai-api.yaml" ]]; then
+    args+=(-f "$release_dir/infra/compose/ai-api.yaml")
+  fi
   docker compose "${args[@]}" "$@"
 }
 
 knowledge_front_services() {
+  local release_dir=${1:-}
   FRONT_SERVICES=(api caddy)
+  if [[ -n "$release_dir" && -f "$release_dir/apps/worker/package.json" ]]; then FRONT_SERVICES+=(worker); fi
   if [[ -s "$KNOWLEDGE_REMOTE_DIR/.secrets/cloudflared-token" ]]; then
     FRONT_SERVICES+=(cloudflared)
   fi

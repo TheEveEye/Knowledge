@@ -2,20 +2,13 @@ import AuthenticationServices
 import Foundation
 import SwiftUI
 
-@MainActor final class OAuthBrowserSession: ChatGPTBrowserAuthenticating {
+@MainActor final class OAuthBrowserSession {
     var webAuthenticationSession: WebAuthenticationSession?
     private var continuation: CheckedContinuation<OAuthAuthorization, any Error>?
     private var listener: LoopbackCallbackListener?
     private var browserTask: Task<Void, Never>?
     private var startupTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
-    private let authorizationURLBuilder: @MainActor (OAuthBrowserRequest, OAuthAttempt, URL) throws -> URL
-
-    init(authorizationURLBuilder: @escaping @MainActor (OAuthBrowserRequest, OAuthAttempt, URL) throws -> URL = {
-        try OAuthProtocol.authorizationURL(request: $0, attempt: $1, redirectURI: $2)
-    }) {
-        self.authorizationURLBuilder = authorizationURLBuilder
-    }
 
     func authorize(_ request: OAuthBrowserRequest) async throws -> OAuthAuthorization {
         guard continuation == nil else { throw AuthenticationError.browserUnavailable }
@@ -39,7 +32,7 @@ import SwiftUI
                             guard self.listener === listener, self.continuation != nil else { return }
                             let redirectURI = try await listener.start()
                             guard self.listener === listener, self.continuation != nil else { return }
-                            let url = try self.authorizationURLBuilder(request, attempt, redirectURI)
+                            let url = try OAuthProtocol.authorizationURL(request: request, attempt: attempt, redirectURI: redirectURI)
                             self.openBrowser(url: url, attempt: attempt, redirectURI: redirectURI)
                         } catch {
                             guard self.listener === listener else { return }
@@ -70,21 +63,18 @@ import SwiftUI
                     preferredBrowserSession: .shared, additionalHeaderFields: [:]
                 )
                 guard !Task.isCancelled else { return }
-                self?.browserCompleted(callback, error: nil, attempt: attempt, redirectURI: redirectURI)
+                self?.browserCompleted(callback, attempt: attempt, redirectURI: redirectURI)
             } catch {
-                guard !Task.isCancelled else { return }
-                self?.browserCompleted(nil, error: error, attempt: attempt, redirectURI: redirectURI)
+                guard !Task.isCancelled, let self, continuation != nil,
+                      listener?.attempt.bridgeID == attempt.bridgeID else { return }
+                let code = (error as NSError).code
+                finish(.failure(code == ASWebAuthenticationSessionError.canceledLogin.rawValue ? AuthenticationError.canceled : .browserUnavailable))
             }
         }
     }
 
-    private func browserCompleted(_ callbackURL: URL?, error: (any Error)?, attempt: OAuthAttempt, redirectURI: URL) {
+    private func browserCompleted(_ callbackURL: URL, attempt: OAuthAttempt, redirectURI: URL) {
         guard continuation != nil, listener?.attempt.bridgeID == attempt.bridgeID else { return }
-        guard error == nil, let callbackURL else {
-            let code = (error as NSError?)?.code
-            finish(.failure(code == ASWebAuthenticationSessionError.canceledLogin.rawValue ? AuthenticationError.canceled : .browserUnavailable))
-            return
-        }
         do {
             guard let listener else { throw AuthenticationError.invalidCallback }
             switch try listener.consumeCallback(bridgeURL: callbackURL) {

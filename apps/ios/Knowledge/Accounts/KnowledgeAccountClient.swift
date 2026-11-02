@@ -111,7 +111,7 @@ final class KnowledgeAccountClient {
 }
 
 // Credentials are sent only to the configured HTTPS origin, never through redirects.
-nonisolated private final class KnowledgeRedirectPolicy: NSObject, URLSessionTaskDelegate {
+nonisolated final class KnowledgeRedirectPolicy: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)

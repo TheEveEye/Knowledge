@@ -1,0 +1,100 @@
+# Account-owned cloud library
+
+PostgreSQL is authoritative for persistent study data. Original source files live in the private `knowledge_source_files` volume on the Pi. Fastify serves authenticated `/api/v1` commands and interactive AI; `apps/worker` performs durable extraction, imports, commit/undo preparation, and Recall generation/verification. Shared implementation lives in `packages/backend`, with public JSON contracts in `packages/contracts` and matching native DTOs in `apps/ios/Knowledge/Cloud`.
+
+This is a development cutover, without legacy study-data migration. Existing Knowledge users, sessions, database volumes, and migrations `0000`–`0002` remain intact. New migrations add cloud tables and metadata. The iOS app creates a new display cache after authentication and never opens or uploads the old shared library. React and Android clients are deferred. Subject/import conversations remain session-only; device diagnostics and presentation preferences remain local.
+
+## Ownership and contracts
+
+Native presentation is shared with the original iOS screens. Cloud adapters provide account-scoped chat, import editing, and Recall controllers rather than replacing the established sheets, floating composers, source previews, and study controls. Imports retain field editing, source rechecks, passage acknowledgements, and saved-suggestion undo through versioned, deduplicated server commands. Interactive Recall supports self-reported unknown answers, withdrawal of a pending answer, explanations, and question reports; AI calls remain outside transactions and completion is fenced by the request lease and session version.
+
+Every persistent account-owned record references `knowledge.users.id`. AI-provider subject IDs and AI-connection UUIDs have distinct meanings; neither can establish Knowledge ownership. Application methods receive ownership from a database-validated Knowledge session. Request bodies cannot select an owner. Composite foreign keys constrain subject/source/import, graph endpoints, Recall targets/materials/sessions, revision ancestry, and related learning events to the same owner and subject.
+
+The public contract uses lowercase UUID strings, ISO 8601 dates, plain JSON discriminators, explicit evidence references, and `/api/v1` versioning. It does not expose SwiftData models, device bookmark data, Swift-encoded enums, storage paths, or renewable provider credentials. Entity `fields` use the bounded server domain vocabulary, and manual edits accept only the appropriate kind's editable fields.
+
+Collections of subjects, entries, sources/passages, imports, jobs, history, Recall sessions, and question banks use cursors. Source bytes are fetched separately through authenticated download routes. Model catalogs are provider-returned catalogs; operational summaries and bounded connection/usage lists are account-filtered.
+
+iOS loads the subject list and account resources concurrently, then prefetches subject entries, source metadata, imports, jobs, decisions, and Recall summaries without waiting for every subject before opening the library. Each subject's independent collections load concurrently, with one speculative subject at a time. Navigation reuses account-scoped, server-confirmed snapshots while refreshing in place; overlapping reads join the same request, and reads completed within two seconds are reused for immediate navigation. Original files, history, and Recall question banks load on demand. Subject versions and invalidation epochs fence late results; sign-out purges the snapshots and cancels reads. Foregrounding and reconnection still require a successful server refresh, and connection failures gate library access.
+
+| Area | Routes under `/api/v1` |
+| --- | --- |
+| Subjects/library | `/subjects`, `/subjects/:subjectID`, `/subjects/:subjectID/entries`, `/subjects/:subjectID/entries/:entityID`, `/subjects/:subjectID/placements/:conceptID` |
+| Sources | `/subjects/:subjectID/sources`, `/sources/:sourceID`, `/sources/:sourceID/passages`, `/sources/:sourceID/download` |
+| Import drafts | `/subjects/:subjectID/imports`, `/imports/:importID`, `/imports/:importID/save`, `/imports/:importID/changes`, `/imports/:importID/changes/:changeID/undo`, `/imports/:importID/chat` |
+| History | `/subjects/:subjectID/history`, `/subjects/:subjectID/history/:revisionID`, `/subjects/:subjectID/history/:revisionID/undo`, `/subjects/:subjectID/decisions` |
+| Processing | `/subjects/:subjectID/jobs`, `/jobs/:jobID`, `/jobs/:jobID/control` |
+| Recall | `/subjects/:subjectID/recall`, `/subjects/:subjectID/recall/materials`, `/subjects/:subjectID/recall/prepare`, `/subjects/:subjectID/recall/reset`, `/subjects/:subjectID/recall/sessions`, `/recall/sessions/:sessionID` and its `/answer`, `/assess`, `/advance`, `/undo`, `/finish` commands; target exclusion and exposure routes |
+| Interactive AI/settings | `/subjects/:subjectID/chat`, `/ai/connections`, `/ai/connections/handoff`, `/ai/connections/:connectionID`, `/ai/host`, `/ai/models`, `/ai/usage`, `/preferences` |
+| Recovery/operations | `/operations/:operationID`, `/operations/status`, `/events` |
+
+Existing `/api/auth/*`, `/api/me`, `/api/status`, and `/api/ready` remain available. Mutating application requests require a trusted Origin as well as authentication. Library errors use `{code,message,requestID}` without internal database details.
+
+## Transactions, versions, and recovery
+
+Retryable commands carry a UUID `operationID`. A per-user operation lock serializes the command; its input fingerprint and confirmed result are stored in the same transaction as its effect. Repeating the operation returns the saved result. Interactive assessments reserve a durable, heartbeating operation lease before AI admission, so concurrent retries do not start another paid assessment; expired reservations can be retried after interruption. Reusing an ID for different input is rejected. The iOS client retains account-scoped operation metadata for uncertain network outcomes without storing an offline command queue.
+
+Edits carry `expectedVersion`; stale input receives `409 VERSION_CONFLICT`. Import conflict choices additionally bind to the reviewed subject version. Undo choices bind to the subject version that produced their review. The client keeps unsent form input and its starting version across server refreshes.
+
+Import commit materializes entities and graph links, immutable content versions, contributions, the revision manifest/history, import completion, invalidation, and Recall-preparation enqueueing in one transaction. Reconciliation AI runs before that transaction, followed by a subject-head check. Protected edits and newer field changes require explicit merge decisions. Exact facts/topics/connections normalize without an AI request. When the subject changed, bounded semantic batches compare incoming entries with relevant changed material; decisions preserve parent concepts, relationship types, qualifications, and source distinctions. Accepted comparisons are checkpointed. Library edits preserve provenance and original source wording.
+
+Undo preparation runs as a worker job. It preserves later changes and returns persisted pending decisions for conflicting fields. Its final revision and job completion share the lease-fenced transaction. Revision history is cursor-paginated, including timestamp ties.
+
+Recall answers and assessments are durably appended before review. Learning events, all participating target schedules, optional independently verified extra credit, and session advancement commit together. Objective controls use the verified server answer key, including numerical tolerances; AI cannot override that key. Source evidence has stable identifiers, and adding evidence to unchanged knowledge preserves its memory state. Related reviews form one undo group. Undo restores memory only if no later participating target version changed. Changed or excluded material can end a session through an explicit Finish command while retaining saved answers. Progress reset clears current memory/exposure state and ends sessions while preserving append-only records and prepared banks.
+
+Interactive assessment also supports an SSE result stream with heartbeats while reasoning, without exposing unfinished feedback. API request timeouts allow bounded large-file uploads and provider work. SSE update events are invalidation notifications. They contain resource IDs and versions, with periodic session checks. Every connection begins with a full invalidation, and the client refetches after reconnecting. Persisted job/status endpoints provide recovery independently of the stream.
+
+## Durable processing and files
+
+Workers claim PostgreSQL jobs with `FOR UPDATE SKIP LOCKED` under a short admission lock. Defaults allow two active jobs across queue consumers, with 60-second leases and 15-second heartbeats. Checkpoints and completion recheck the current lease under the subject lock; expired or disconnected workers cannot overwrite a newer owner. Subject deletion serializes against results and removes its jobs. Shutdown aborts work and returns owned leases to the queue; a killed process recovers through expiry.
+
+Infrastructure failures use bounded backoff and five attempts. Capacity waits do not consume processing attempts. Authentication, disconnected funding, allowance, validation, and infrastructure failures remain distinct. Explicit Pause/Resume/Retry/Cancel controls operate on the server; signing out or closing iOS does not pause jobs. Accepted extraction chunks, reconciliation batches, source review decisions, topic assignments, and verified Recall banks remain checkpointed.
+
+Source preparation preserves individual nonempty lines, headings, and bullets, splitting long lines at word boundaries up to 1,800 characters. Extraction uses the native 4,000-character/24-passage budget including preceding context. The ordered required-passage plan is persisted when an import is created, before provider admission. Each batch publishes its active state, throttled streamed previews, validation state, and accepted counts through lease-fenced job progress. Previews are display-only; only validated results enter checkpoints. Later stages retain extraction totals and source sections. Existing accepted batches retain their original passage plan. Coarse development uploads can be re-extracted only if no saved entries, accepted checkpoints, or running import references them; repairing a paused draft leaves it paused and makes no AI request.
+
+Uploads are finalized with file/directory synchronization before being referenced by usable records. The worker extracts PDF.js page text or UTF-8/UTF-16 text, preserves page references, and creates stable passage IDs. Supported sources are PDF, TXT, Markdown, and pasted text, limited to 25 MiB and 300,000 characters. Locked/unreadable PDFs and pages requiring OCR produce actionable errors.
+
+Opaque storage keys never become public paths. Caddy does not mount or expose the source directory. Deleting a subject removes its immutable versions and redacts content-bearing deduplication receipts, while retaining opaque operation tombstones to prevent replay from recreating deleted data. It commits reference removal and a delayed cleanup record first; physical deletion rechecks references after the retention window. Abandoned finalized uploads are queued for cleanup, and old partial uploads are removed. A configurable disk reserve rejects uploads before they consume the final server capacity.
+
+Backups take an exclusive PostgreSQL advisory lock shared with file cleanup and archive `database.dump` plus `sources/`. The backup command separately saves protected configuration and credentials. Restore both archives together; the database/source archive alone cannot decrypt provider grants. Existing database volumes must never be recreated or pruned as a migration shortcut.
+
+## AI funding and credentials
+
+Each job/session captures funding, AI connection, model, and reasoning. Each admitted request additionally records a hash of its instruction policy. There is no automatic funding fallback. Resume retains captured settings; a separately labeled retry action can explicitly select a different configured connection/funding source for the next phase while retaining checkpoints. An API-funded import does not implicitly authorize API-funded Recall preparation when that role has no configured funding. Server API credentials are optional, mounted from a private file. API admission enforces a configured per-user UTC-day request allowance; its default is zero. Usage records include funding/model/status/token counts without prompts or answers in routine logs.
+
+There is no application-imposed global or per-user AI request concurrency cap and no reserved-slot restriction on background requests. Independent pending extraction batches start together. Their accepted checkpoint writes are serialized so out-of-order completions cannot discard results; reconciliation starts after extraction settles. Healthy batches can finish and save if another batch fails. Authentication, allowance, disconnection, pause, and lease loss cancel affected work. Provider rate limits and explicitly configured API spending allowances still apply. PostgreSQL request leases track in-flight work across processes.
+
+Fresh ChatGPT credentials can serve concurrent requests without taking the refresh lock. Expired grants share one refresh per process and remain serialized across API/worker through the database; waiting for another refresh releases the pool connection. Admission rechecks connection ownership/status under a shared row lock so a concurrent disconnect cannot admit new work after cancellation. Reconciliation validates complete, unique batch-concept coverage inside the existing three-attempt repair loop and supplies missing/unexpected IDs as repair feedback.
+
+Import reconciliation and save preparation validate merge targets against the current subject's live concepts and all selected draft concepts, including concepts in the same reconciliation batch. Unknown, excluded, retired, self-referential, or cyclic targets receive repair feedback before decisions are accepted. User-locked merge decisions remain locked. All incoming records are normalized before merge materialization so a later canonical draft target retains edited wordings and provenance regardless of source order.
+
+Naming suggestions are optional during save; concepts without a suggestion retain their wording provenance normally. Pause/Resume controls fetch current job status/version before issuing a versioned command and inspect again on a status race. An already running retry is a no-op; edits and explicit funding/model changes retain their conflict-review requirements.
+
+Discarding a draft checks source references under the subject lock in the same transaction. A source is removed only when no remaining draft, saved/retired entity, immutable version/history, Recall state, learning event, pending decision, or other processing checkpoint uses it. Its passages and extraction jobs are removed and operation receipts are tombstoned. Original bytes enter the existing 24-hour, backup-coordinated cleanup queue after the deletion commits. Sources still referenced elsewhere are retained.
+
+For personal self-hosting, ChatGPT authorization occurs locally followed by an explicit authenticated handoff. The Pi has its own stable host UUID, encrypts grants with AES-256-GCM bound to the Knowledge user and connection, and becomes the sole refresh owner after confirmed handoff. Refresh and disconnection share a PostgreSQL advisory lock across API and worker. Refresh-token rotation is persisted before use. Disconnect immediately blocks associated jobs and cancels request admission; remote revocation is attempted outside the transaction. Failed remote revocation retains only the encrypted inactive grant and exposes an explicit Retry revocation action. Versioned operation results make uncertain disconnect outcomes recoverable.
+
+The ChatGPT adapter uses streamed, non-stored Responses requests and the connected account's model catalog. Broader hosted ChatGPT access stays disabled unless the appropriate provider arrangement exists. See the provider's [self-hosted transfer flow](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms), [integration overview](https://developers.openai.com/siwc/token-sharing-open-source), and [request restrictions](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
+## Deployment configuration
+
+| Setting/secret | Default or location |
+| --- | --- |
+| Runtime | Node.js 24 for contracts, backend, API, worker |
+| `SOURCE_DIRECTORY` | `/var/lib/knowledge/sources` in containers |
+| `SOURCE_DISK_RESERVE_BYTES` | `536870912` (512 MiB) |
+| `WORKER_CONCURRENCY` | `2` |
+| `AI_API_DAILY_REQUEST_LIMIT` | `0`; configure explicitly to admit API-funded requests |
+| `CHATGPT_SELF_HOSTED_ENABLED` | `false` in code, `true` in personal self-hosted Compose |
+| AI encryption key | `.secrets/ai-encryption-key`, 32 random bytes encoded as 64 hex characters; mounted into API and worker |
+| Optional server API key | `.secrets/openai-api-key`; enables the `ai-api.yaml` mount overlay |
+| Knowledge authentication secret | Existing `.secrets/auth-secret`; unchanged and mounted only into API |
+
+`init-secrets.sh` creates missing secrets once; deployment archives exclude them. Release packaging builds shared packages before applications and includes the worker. Readiness requires the release's migrations, and Compose separately waits for a fresh worker heartbeat. SIGTERM/SIGINT use bounded graceful shutdown. Application rollback keeps applied migrations and both named data volumes; rolling back to a preceding account-only release also stops the worker.
+
+Authenticated `/operations/status` reports account-filtered queue counts/oldest timestamps, failed/expired lease counts, usage, configured limits, worker heartbeat, and source-volume capacity. Routine logs exclude source content, learner answers, and credentials. Jobs expose their own actionable status through authenticated APIs.
+
+## Verification boundary
+
+Follow the repository's no-tests policy. Permitted verification is TypeScript build/typecheck, an iOS build, shell syntax/Compose configuration validation, and static review of migrations, JSON contracts, ownership predicates, transaction boundaries, leases, funding, and deployment packaging. Do not add/run tests, fixtures, harnesses, provider requests, or manual app/API testing as part of that verification.
+
+Compilation and static review do not establish live multi-account isolation, reinstall recovery, runtime job interruption, or provider interoperability. No migration application, Pi deployment, credential installation, or live provider call is implied by implementing this change. The prior device pipelines remain unreachable source references while backend behavior is reviewed; the app never falls back to device execution.

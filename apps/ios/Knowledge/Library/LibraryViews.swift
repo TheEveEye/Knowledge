@@ -1,12 +1,4 @@
 import SwiftUI
-import SwiftData
-import QuickLook
-
-nonisolated enum LibraryDestination: Hashable {
-    case concept(UUID)
-    case source(UUID)
-    case importJob(UUID)
-}
 
 nonisolated enum LearningMethod: String, CaseIterable, Hashable {
     case recall = "Recall"
@@ -38,7 +30,7 @@ private enum TopicPracticeLayout {
     static let inset: CGFloat = 16
 }
 
-private struct LearningMethodGrid: View {
+struct LearningMethodGrid: View {
     var sheetCornerRadius: CGFloat? = nil
     let onSelect: (LearningMethod) -> Void
     private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
@@ -89,7 +81,7 @@ private struct LearningMethodGrid: View {
     }
 }
 
-private struct TopicPracticePicker: View {
+struct TopicPracticePicker: View {
     let topic: TopicRecord
     let onSelect: (LearningMethod) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -129,22 +121,6 @@ nonisolated struct PracticeDestination: Hashable {
     let topicID: UUID?
 }
 
-private struct LearningMethodView: View {
-    let destination: PracticeDestination
-
-    var body: some View {
-        Group {
-            if destination.method == .recall {
-                RecallHomeView(scope: .init(subjectID: destination.subjectID, topicID: destination.topicID))
-            } else {
-                Rectangle().fill(.background.secondary).ignoresSafeArea()
-            }
-        }
-        .navigationTitle(destination.method.rawValue)
-        .navigationBarTitleDisplayMode(.large)
-    }
-}
-
 /// Reports the detail column to the app-level overlay, above split-view chrome.
 struct SubjectChatPlacement {
     let bounds: Anchor<CGRect>
@@ -159,165 +135,29 @@ struct SubjectChatBoundsKey: PreferenceKey {
     }
 }
 
-struct SubjectDetailView: View {
-    let subject: KnowledgeSubject
-    @Binding var search: String
-    let onShowSettings: () -> Void
-    @State private var path = NavigationPath()
-
-    var body: some View {
-        NavigationStack(path: $path) {
-            SubjectLibraryView(subject: subject, search: $search, onShowSettings: onShowSettings,
-                               onStartPractice: { path.append($0) })
-        }
-        .anchorPreference(key: SubjectChatBoundsKey.self, value: .bounds) {
-            // Keep the stack's stationary frame available while the controls fade during navigation.
-            SubjectChatPlacement(bounds: $0, isSubjectRoot: path.isEmpty)
-        }
-    }
-}
-
-struct SubjectLibraryView: View {
-    let subject: KnowledgeSubject
-    let onShowSettings: () -> Void
-    let onStartPractice: (PracticeDestination) -> Void
-    @Environment(ImportCoordinator.self) private var imports
-    @Query private var concepts: [KnowledgeConcept]
-    @Query private var sources: [KnowledgeSource]
-    @Query private var jobs: [KnowledgeImportJob]
-    @State private var showImport = false
-    @Binding private var search: String
-    @State private var topicActions = TopicLibraryActions()
-    @State private var pendingPractice: PracticeDestination?
-    init(subject: KnowledgeSubject, search: Binding<String>, onShowSettings: @escaping () -> Void,
-         onStartPractice: @escaping (PracticeDestination) -> Void) {
-        self.subject = subject
-        self.onShowSettings = onShowSettings
-        self.onStartPractice = onStartPractice
-        _search = search
-        let id = subject.id
-        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == id && !$0.isRetired }, sort: \KnowledgeConcept.name)
-        _sources = Query(filter: #Predicate<KnowledgeSource> { $0.subjectID == id && !$0.isArchived }, sort: \KnowledgeSource.importedAt, order: .reverse)
-        _jobs = Query(filter: #Predicate<KnowledgeImportJob> { $0.subjectID == id }, sort: \KnowledgeImportJob.updatedAt, order: .reverse)
-    }
-    private var libraryContent: some View {
-        List {
-            if !concepts.isEmpty {
-                Section("Practice") {
-                    LearningMethodGrid { method in
-                        onStartPractice(PracticeDestination(method: method, subjectID: subject.id, topicID: nil))
-                    }
-                }
-            }
-            SubjectRecallPreparationSection(subjectID: subject.id)
-            let drafts = jobs.filter { $0.status != .saved }
-            if !drafts.isEmpty {
-                Section("Draft imports") {
-                    ForEach(drafts) { job in
-                        NavigationLink(value: LibraryDestination.importJob(job.id)) { ImportJobLabel(job: job) }
-                            .draftImportDeletion(for: job)
-                    }
-                }
-            }
-            if concepts.isEmpty {
-                Section("Concepts") {
-                    ContentUnavailableView("Add your first notes", systemImage: "doc.badge.plus",
-                        description: Text("Import a searchable PDF or text, then review the concepts before saving."))
-                    Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
-                }
-            }
-            ConceptHierarchySection(subject: subject, concepts: concepts, search: search, actions: topicActions)
-            if !sources.isEmpty {
-                Section("Sources") {
-                    ForEach(sources) { source in
-                        NavigationLink(value: LibraryDestination.source(source.id)) { Label(source.title, systemImage: "doc.text") }
-                    }
-                }
-            }
-        }
-        .contentMargins(.bottom, 68, for: .scrollContent)
-        .scrollDismissesKeyboard(.interactively)
-        // Keep notes behind the keyboard while the sibling composer follows it.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
-    }
-
-    var body: some View {
-        libraryContent
-        .navigationTitle(subject.name)
-        .navigationBarTitleDisplayMode(.large)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                SubjectOptionsMenu(subjectID: subject.id, onShowSettings: onShowSettings)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Import notes", systemImage: "square.and.arrow.down") { showImport = true }
-                    .labelStyle(.iconOnly)
-            }
-        }
-        .sheet(item: $topicActions.movingConcept) { MoveConceptTopicView(concept: $0) }
-        .sheet(item: $topicActions.practicingTopic, onDismiss: {
-            if let pendingPractice {
-                onStartPractice(pendingPractice)
-                self.pendingPractice = nil
-            }
-        }) { topic in
-            TopicPracticePicker(topic: topic) { method in
-                pendingPractice = PracticeDestination(method: method, subjectID: subject.id, topicID: topic.id)
-                topicActions.practicingTopic = nil
-            }
-        }
-        .alert("Rename topic", isPresented: Binding(get: { topicActions.renamingTopic != nil },
-            set: { if !$0 { topicActions.renamingTopic = nil } })) {
-            TextField("Topic name", text: $topicActions.topicName)
-            Button("Cancel", role: .cancel) { topicActions.renamingTopic = nil }
-            Button("Save") { topicActions.rename(repository: imports.repository) }
-        }
-        .alert("Organization", isPresented: Binding(get: { topicActions.error != nil }, set: { if !$0 { topicActions.error = nil } })) {
-            Button("OK", role: .cancel) { topicActions.error = nil }
-        } message: { Text(topicActions.error ?? "") }
-        .sheet(isPresented: $showImport) { NewImportView(subject: subject) }
-        .navigationDestination(for: LibraryDestination.self) { destination in
-            switch destination {
-            case .concept(let id):
-                if let concept = concepts.first(where: { $0.id == id }) {
-                    ConceptDetailView(concept: concept)
-                } else {
-                    ContentUnavailableView("Concept unavailable", systemImage: "book.closed")
-                }
-            case .source(let id):
-                if let source = sources.first(where: { $0.id == id }) {
-                    SourceDetailView(source: source)
-                } else {
-                    ContentUnavailableView("Source unavailable", systemImage: "doc.text")
-                }
-            case .importJob(let id):
-                ImportJobView(jobID: id)
-            }
-        }
-        .navigationDestination(for: PracticeDestination.self) { destination in
-            LearningMethodView(destination: destination)
-        }
-    }
-}
-
 struct SubjectSettingsView: View {
     private let subjectID: UUID
     private let originalName: String
-    @Environment(ImportCoordinator.self) private var imports
+    @Environment(CloudLibraryStore.self) private var library: CloudLibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var error: String?
     @State private var showResetConfirmation = false
     @State private var didResetProgress = false
     @State private var showDeleteConfirmation = false
+    @State private var expectedVersion = 0
+    @State private var updating: String?
+    @State private var capturedName: String
+    @State private var didCaptureVersion = false
 
     init(subjectID: UUID, name: String) {
         self.subjectID = subjectID
         originalName = name
         _name = State(initialValue: name)
+        _capturedName = State(initialValue: name)
     }
 
-    private var canSave: Bool { !name.trimmed.isEmpty && name.trimmed != originalName }
+    private var canSave: Bool { !name.trimmed.isEmpty && name.trimmed != capturedName }
 
     var body: some View {
         NavigationStack {
@@ -329,26 +169,38 @@ struct SubjectSettingsView: View {
                         .onSubmit(save)
                 } header: { Text("Subject name") }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
+                if let current = library.subjects.first(where: { $0.id == subjectID }), current.name != capturedName {
+                    Section {
+                        LabeledContent("Current saved name", value: current.name)
+                        Button("Review latest version") { capturedName = current.name; expectedVersion = current.version }
+                    }
+                }
                 if didResetProgress {
                     Section { Label("Learning progress reset", systemImage: "checkmark.circle") }
                 }
                 Section {
-                    Button("Reset learning progress", systemImage: "arrow.counterclockwise", role: .destructive) {
+                    Button(role: .destructive) {
                         showResetConfirmation = true
+                    } label: {
+                        HStack { if updating == "reset" { ProgressView() }; Label(updating == "reset" ? "Resetting learning progress…" : "Reset learning progress", systemImage: "arrow.counterclockwise") }
                     }
-                    Button("Delete subject", systemImage: "trash", role: .destructive) { showDeleteConfirmation = true }
+                    Button(role: .destructive) { showDeleteConfirmation = true } label: {
+                        HStack { if updating == "delete" { ProgressView() }; Label(updating == "delete" ? "Deleting subject…" : "Delete subject", systemImage: "trash") }
+                    }
                 }
             }
+            .disabled(updating != nil)
             .navigationTitle("Subject settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(updating != nil) }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save).disabled(!canSave)
+                    Button(action: save) { if updating == "save" { ProgressView() } else { Text("Save") } }.accessibilityLabel("Save").disabled(!canSave || updating != nil)
                 }
             }
         }
-        .interactiveDismissDisabled(name != originalName)
+        .onAppear { if !didCaptureVersion { expectedVersion = library.subjects.first { $0.id == subjectID }?.version ?? 0; didCaptureVersion = true } }
+        .interactiveDismissDisabled(name != originalName || updating != nil)
         .alert("Reset learning progress?", isPresented: $showResetConfirmation) {
             Button("Reset learning progress", role: .destructive, action: resetLearningProgress)
             Button("Cancel", role: .cancel) { }
@@ -365,167 +217,36 @@ struct SubjectSettingsView: View {
 
     private func save() {
         guard canSave else { return }
-        do { try imports.repository.renameSubject(subjectID, name: name); dismiss() }
-        catch { self.error = error.localizedDescription }
+        let input = name, version = expectedVersion
+        cloudCommand("save") {
+            _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())", method: "PATCH", fields: ["name": .string(input), "expectedVersion": .number(version)])
+            try await library.refresh(); dismiss()
+        }
     }
 
     private func resetLearningProgress() {
-        do {
-            try imports.resetLearningProgress(subjectID: subjectID)
-            error = nil; didResetProgress = true
-        } catch {
-            didResetProgress = false
-            self.error = "Learning progress could not be reset: \(error.localizedDescription)"
+        let version = library.subjects.first { $0.id == subjectID }?.version ?? expectedVersion
+        cloudCommand("reset") {
+            _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/reset", fields: ["expectedVersion": .number(version)])
+            try await library.refresh()
+            if let latest = library.subjects.first(where: { $0.id == subjectID }), latest.name == capturedName { expectedVersion = latest.version }
+            didResetProgress = true
         }
     }
 
     private func delete() {
-        do { try imports.deleteSubject(subjectID: subjectID); dismiss() }
-        catch { self.error = "The subject could not be deleted: \(error.localizedDescription)" }
-    }
-}
-
-struct ConceptDetailView: View {
-    let concept: KnowledgeConcept
-    @Environment(ImportCoordinator.self) private var imports
-    @Query private var facts: [KnowledgeFact]
-    @Query private var connections: [KnowledgeConnection]
-    @Query private var concepts: [KnowledgeConcept]
-    @State private var evidence: EvidencePresentation?
-    @State private var error: String?
-    @State private var resolutionSuggestions: [ConceptResolutionSuggestion] = []
-    init(concept: KnowledgeConcept) {
-        self.concept = concept
-        let id = concept.id, subjectID = concept.subjectID
-        _facts = Query(filter: #Predicate<KnowledgeFact> { $0.conceptID == id && !$0.isRetired })
-        _connections = Query(filter: #Predicate<KnowledgeConnection> { ($0.fromConceptID == id || $0.toConceptID == id) && !$0.isRetired })
-        _concepts = Query(filter: #Predicate<KnowledgeConcept> { $0.subjectID == subjectID && !$0.isRetired })
-    }
-    var body: some View {
-        List {
-            Section {
-                Text(concept.explanation)
-                let aliases = alternativeNames
-                if !aliases.isEmpty { Text("Also known as: " + aliases.joined(separator: ", ")).foregroundStyle(.secondary) }
-                Button("View source") { showEvidence(title: concept.name, load: concept.evidence) }
-            }
-            ConceptTopicSection(concept: concept)
-            ConceptRecallProgressSection(conceptID: concept.id)
-            if !resolutionSuggestions.isEmpty {
-                Section("AI-assisted interpretations") {
-                    ForEach(Array(resolutionSuggestions.enumerated()), id: \.offset) { _, suggestion in
-                        VStack(alignment: .leading, spacing: 12) {
-                            ConceptResolutionProvenance(suggestion: suggestion)
-                            if !suggestion.changedLibraryName, suggestion.suggestedName != nil {
-                                Text("The existing concept’s name was retained when this source was merged.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            if !suggestion.evidence.isEmpty {
-                                Button("View supporting note context") {
-                                    evidence = .init(title: "Suggestion context", references: suggestion.evidence)
-                                }.buttonStyle(.borderless)
-                            }
-                            Button("Undo saved suggestion") {
-                                do { try imports.repository.undoResolutionSuggestion(suggestion, for: concept) }
-                                catch { self.error = error.localizedDescription }
-                            }.buttonStyle(.borderless)
-                        }.padding(.vertical, 4)
-                    }
-                }
-            }
-            Section("Facts") {
-                ForEach(facts) { fact in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(fact.kindRaw.capitalized).font(.caption).foregroundStyle(.secondary)
-                        Text(fact.statement).textSelection(.enabled)
-                        if !fact.qualifications.isEmpty { Text(fact.qualifications).foregroundStyle(.secondary) }
-                        if fact.isUserEdited { Text("Edited by you").font(.caption).foregroundStyle(.secondary) }
-                        if let note = fact.reviewNote { ReviewFlag(text: note) }
-                        Button("View source") { showEvidence(title: fact.statement, load: fact.evidence) }
-                    }.padding(.vertical, 4)
-                }
-            }
-            if !connections.isEmpty {
-                Section("Connections") {
-                    ForEach(connections) { connection in
-                        let otherID = connection.fromConceptID == concept.id ? connection.toConceptID : connection.fromConceptID
-                        VStack(alignment: .leading, spacing: 8) {
-                            if let other = concepts.first(where: { $0.id == otherID }) {
-                                NavigationLink(value: LibraryDestination.concept(other.id)) {
-                                    Text(name(connection.fromConceptID) + " " + (ConnectionKind(rawValue: connection.kindRaw)?.label ?? connection.kindRaw) + " " + name(connection.toConceptID))
-                                        .font(.headline)
-                                }
-                            }
-                            Text(connection.explanation)
-                            if connection.isInferred { Label("Inferred connection", systemImage: "sparkles").font(.caption).foregroundStyle(.secondary) }
-                            if connection.isUserEdited { Text("Edited by you").font(.caption).foregroundStyle(.secondary) }
-                            if let note = connection.reviewNote { ReviewFlag(text: note) }
-                            Button("View supporting passages") { showEvidence(title: "Connection evidence", load: connection.evidence) }
-                        }.padding(.vertical, 4)
-                    }
-                }
-            }
-            if let error { Text(error).foregroundStyle(.red) }
-        }
-        .navigationTitle(concept.name)
-        .sheet(item: $evidence) { EvidenceView(presentation: $0) }
-        .task(id: concept.sourceWordingsData) {
-            do {
-                resolutionSuggestions = try concept.sourceWordings().compactMap(\.resolutionSuggestion).filter { $0.status == .applied }
-            } catch { self.error = "The saved interpretation history could not be read." }
+        let version = library.subjects.first { $0.id == subjectID }?.version ?? expectedVersion
+        cloudCommand("delete") {
+            _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())", method: "DELETE", fields: ["expectedVersion": .number(version)])
+            library.select(nil); try await library.refresh(); dismiss()
         }
     }
-    private var alternativeNames: [String] {
-        func key(_ name: String) -> String {
-            name.normalizedWhitespace.normalizedName
-                .replacingOccurrences(of: "’", with: "'")
-                .replacingOccurrences(of: "‘", with: "'")
-        }
-        var seen: Set<String> = [key(concept.name)]
-        return concept.aliases.compactMap { alias in
-            let name = alias.normalizedWhitespace
-            guard !name.isEmpty, seen.insert(key(name)).inserted else { return nil }
-            return name
-        }
-    }
-    private func name(_ id: UUID) -> String { concepts.first { $0.id == id }?.name ?? "Unavailable concept" }
-    private func showEvidence(title: String, load: () throws -> [EvidenceReference]) {
-        do { evidence = .init(title: title, references: try load()) }
-        catch { self.error = "The source references could not be read." }
-    }
-}
-
-struct SourceDetailView: View {
-    let source: KnowledgeSource
-    @State private var prepared: PreparedSource?
-    @State private var originalURL: URL?
-    @State private var error: String?
-    var body: some View {
-        List {
-            Section {
-                Text("Imported \(source.importedAt.formatted(date: .abbreviated, time: .shortened))").foregroundStyle(.secondary)
-                Button("Open original file", systemImage: "doc") {
-                    do { if let prepared { originalURL = try SourcePreparation.directory().appendingPathComponent(prepared.storedFilename) } }
-                    catch { self.error = error.localizedDescription }
-                }.disabled(prepared == nil)
-            }
-            if let prepared {
-                Section("Original passages") {
-                    ForEach(prepared.segments) { segment in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(segment.locationLabel).font(.caption).foregroundStyle(.secondary)
-                            Text(segment.text).textSelection(.enabled)
-                        }.padding(.vertical, 4)
-                    }
-                }
-            }
-            if !source.reviewNotes.isEmpty { Section("Review notes") { ForEach(source.reviewNotes, id: \.self) { ReviewFlag(text: $0) } } }
-            if let error { Text(error).foregroundStyle(.red) }
-        }
-        .navigationTitle(source.title)
-        .quickLookPreview($originalURL)
-        .task {
-            do { prepared = try source.prepared() }
+    private func cloudCommand(_ action: String, operation: @escaping @MainActor () async throws -> Void) {
+        guard updating == nil else { return }; updating = action; error = nil
+        Task {
+            defer { updating = nil }
+            do { try await operation() }
+            catch is CancellationError { }
             catch { self.error = error.localizedDescription }
         }
     }
@@ -539,7 +260,7 @@ nonisolated struct EvidencePresentation: Identifiable {
 
 struct EvidenceView: View {
     let presentation: EvidencePresentation
-    @Environment(ImportCoordinator.self) private var imports
+    @Environment(CloudLibraryStore.self) private var library: CloudLibraryStore
     @Environment(\.dismiss) private var dismiss
     @State private var sources: [UUID: PreparedSource] = [:]
     @State private var error: String?
@@ -548,7 +269,8 @@ struct EvidenceView: View {
             List {
                 ForEach(Array(presentation.references.enumerated()), id: \.offset) { _, reference in
                     Section {
-                        Text(reference.quote).textSelection(.enabled)
+                        let segment = sources[reference.sourceID]?.segments.first { $0.id == reference.segmentID }
+                        Text(reference.quote.isEmpty ? segment?.text ?? "" : reference.quote).textSelection(.enabled)
                         if let segment = sources[reference.sourceID]?.segments.first(where: { $0.id == reference.segmentID }) {
                             DisclosureGroup("Full passage") { Text(segment.text).textSelection(.enabled) }
                             Text(segment.locationLabel).font(.caption).foregroundStyle(.secondary)
@@ -562,10 +284,14 @@ struct EvidenceView: View {
         }
         .task {
             do {
-                let context = imports.repository.container.mainContext
-                for source in try context.fetch(FetchDescriptor<KnowledgeSource>()) { sources[source.id] = try source.prepared() }
-                for job in try context.fetch(FetchDescriptor<KnowledgeImportJob>()) where sources[job.sourceID] == nil {
-                    sources[job.sourceID] = try job.prepared()
+                for sourceID in Set(presentation.references.map(\.sourceID)) {
+                    let path = "/api/v1/sources/" + sourceID.uuidString.lowercased()
+                    let source = try await library.client.json(path)
+                    let passages = try await library.client.pages(CloudJSON.self, path: path + "/passages")
+                    let segments = passages.map { SourceSegment(id: $0.text("id"), page: $0.value("page") == .null ? nil : $0.value("page").int,
+                        section: $0.value("section").string, text: $0.text("text")) }
+                    sources[sourceID] = PreparedSource(id: sourceID, title: source.text("title"), kind: SourceKind(rawValue: source.text("kind")) ?? .text,
+                        storedFilename: "", digest: "", segments: segments)
                 }
             } catch { self.error = "Some supporting passages could not be loaded." }
         }

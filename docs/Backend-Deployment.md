@@ -8,7 +8,9 @@ The Knowledge backend runs independently of Shrimp and Portainer on the Raspberr
 | --- | --- |
 | `db` | PostgreSQL 18; persistent `knowledge_pgdata` volume |
 | `migrate` | One-shot Drizzle migration process using the database owner credential |
-| `api` | Fastify API using the non-administrative application role |
+| `api` | Fastify application API and interactive AI using the application role |
+| `worker` | Durable source/import/Recall processing; shares private `knowledge_source_files` storage with the API |
+| `backup` | Operations-profile database and source archive under the cleanup lock |
 | `caddy` | Forwards `/api/*` to Fastify without stripping the prefix and serves the Password AutoFill association file |
 | `cloudflared` | Optional dedicated Knowledge tunnel, enabled after its token is installed |
 
@@ -33,9 +35,9 @@ The script:
 1. Archives only backend and infrastructure source, excluding installed dependencies and generated output. No local credential files or iOS source are uploaded.
 2. Verifies the archive checksum on the Pi and creates a timestamped release under `/opt/knowledge/releases/`.
 3. Records its source checksum, base Git revision, and image tag in `.env.release`. Uncommitted source is explicitly marked `dirty` with a source checksum.
-4. Generates database passwords and the authentication secret only if absent. Existing credentials are retained.
-5. Creates a database backup before migrating an existing deployment, builds the image, and applies migrations.
-6. Starts the API and Caddy, waiting for the API's production readiness health check.
+4. Generates database passwords, authentication secret, and AI-encryption key only if absent. Existing credentials are retained.
+5. Creates a database/source backup before migrating an existing cloud deployment (database-only for a preceding account-only release), builds contracts/backend/API/worker, and applies additive migrations.
+6. Starts the API, worker, and Caddy, waiting for API readiness and the worker heartbeat health check.
 7. Updates `/opt/knowledge/current` after successful startup and preserves the previous release for application rollback.
 
 The Pi must provide Docker, Compose, SSH, `flock`, and OpenSSL. Initial creation of `/opt/knowledge` requires sudo; routine deployments use the existing directory and the Docker group. Release application is serialized with a filesystem lock.
@@ -54,15 +56,21 @@ The Pi retains its database bootstrap script at `/opt/knowledge/config/postgres-
 ./infra/scripts/rollback.sh knowledge-pi
 ```
 
-Backups default to `~/Backups/knowledge` on the Mac, include a SHA-256 sidecar, and contain a PostgreSQL custom-format dump. Deployment backups also remain under `/opt/knowledge/backups/` on the Pi.
+Backups default to `~/Backups/knowledge` on the Mac, include a SHA-256 sidecar, and contain `database.dump` (PostgreSQL custom format) plus `sources/`. Cleanup is blocked while the archive is created. A separate protected `.config.tar.gz` includes `.secrets`, `.env`, and configuration; retain both archives and their checksums together. Deployment backups also remain under `/opt/knowledge/backups/` on the Pi.
 
 Application rollback switches to the previous image and configuration; it does not reverse migrations or restore database contents. Automatic startup-failure recovery also retains migrations. Data restoration is a separate operation, with an explicit backup and recovery plan.
 
 Runtime credentials live under `/opt/knowledge/.secrets/`, whose directory permissions are `0700`. Individual mounted files are readable to their containers' different user IDs. Keep the containing directory private and include credentials in an appropriately protected disaster-recovery backup; a database dump alone does not preserve the application's external credentials.
 
-The API additionally mounts `auth-secret`, used for Knowledge session signatures and provider-token encryption. Its public authentication origin defaults to `https://knowledge.kiwiapps.dev`; trusted extra origins are explicitly configured with `AUTH_TRUSTED_ORIGINS`. The production Compose configuration trusts Cloudflare's client-IP header because API ports remain private behind the tunnel. See [user accounts](User-Accounts.md) for the endpoint contract and development settings. Never replace the authentication secret during routine deployment.
+The API additionally mounts `auth-secret` for Knowledge session signatures. API and worker mount `ai-encryption-key` for encrypted AI credentials. Never replace either key during routine releases. Its public authentication origin defaults to `https://knowledge.kiwiapps.dev`; trusted extra origins are explicitly configured with `AUTH_TRUSTED_ORIGINS`. The production Compose configuration trusts Cloudflare's client-IP header because API ports remain private behind the tunnel. See [user accounts](User-Accounts.md) for the endpoint contract and development settings. Never replace the authentication secret during routine deployment.
 
 Do not use `docker compose down --volumes` or prune named volumes. Compose definitions remain in Git and on disk; Portainer provides visibility into the externally managed stack.
+
+## Cloud processing and funding
+
+See [Cloud library](Cloud-Library.md) for server ownership, worker leases, funding, operational metrics, and private storage. `CHATGPT_SELF_HOSTED_ENABLED=true` is restricted to personal self-hosting; leave it disabled for broader hosted service use. The optional `ai-api.yaml` overlay is selected only when the private `.secrets/openai-api-key` file exists. Set `AI_API_DAILY_REQUEST_LIMIT` explicitly in `/opt/knowledge/.env` before allowing API-funded inference; the default is zero. Funding is selected per operation and never falls back automatically.
+
+Source storage is a named volume, mounted only into API, worker, and the backup service. Caddy has no mount or file-serving route for sources. Preserve both `knowledge_pgdata` and `knowledge_source_files`. Restore the protected configuration alongside the database and source archive so encrypted provider grants remain readable. Stop API and worker before a restoration, restore into the existing volumes with their ownership preserved, then resume the matching release. Restoration is a separate explicit operation.
 
 ## Cloudflare and Name.com
 

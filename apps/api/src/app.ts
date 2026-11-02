@@ -6,6 +6,7 @@ import { createDatabase } from "./db/client.js";
 import { bundledMigrations } from "./db/migrations.js";
 import { createAuth } from "./auth/auth.js";
 import { registerAccountRoutes } from "./auth/routes.js";
+import { registerLibraryRoutes } from "./library/routes.js";
 
 const statusSchema = {
   type: "object",
@@ -22,8 +23,8 @@ const statusSchema = {
 export function createApp(config: Config) {
   const app = Fastify({
     bodyLimit: 1_048_576,
-    requestTimeout: 30_000,
-    connectionTimeout: 10_000,
+    requestTimeout: 300_000,
+    connectionTimeout: 300_000,
     forceCloseConnections: "idle",
     genReqId: () => randomUUID(),
     requestIdHeader: false,
@@ -80,6 +81,7 @@ export function createApp(config: Config) {
   });
 
   registerAccountRoutes(app, auth, config);
+  registerLibraryRoutes(app, db, pool, auth, config);
 
   return app;
 }

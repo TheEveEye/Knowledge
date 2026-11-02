@@ -2,23 +2,9 @@ import Foundation
 import Security
 
 @MainActor
-protocol KeychainQuerying {
-    func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?)
-    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus
-    func add(_ query: [String: Any]) -> OSStatus
-    func delete(_ query: [String: Any]) -> OSStatus
-}
-
-@MainActor
-final class KeychainCredentialStore: ChatGPTCredentialStorage {
-    private let service: String
-    private let keychain: any KeychainQuerying
+final class KeychainCredentialStore {
+    private let service = "dev.kiwiapps.knowledge.chatgpt"
     private let accountPrefix = "account."
-
-    init(service: String = "dev.kiwiapps.knowledge.chatgpt", keychain: (any KeychainQuerying)? = nil) {
-        self.service = service
-        self.keychain = keychain ?? SystemKeychain()
-    }
 
     func hostID() throws -> String {
         if let data = try read("host-id") {
@@ -38,7 +24,8 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         query[kSecReturnAttributes as String] = true
         query[kSecReturnData as String] = true
-        let (status, result) = keychain.copyMatching(query)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return [] }
         guard status == errSecSuccess else { throw AuthenticationError.storage(status) }
         guard let items = result as? [[String: Any]] else { throw AuthenticationError.storage(errSecDecode) }
@@ -84,7 +71,7 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
             guard validClientID(clientID) else { throw AuthenticationError.storage(errSecParam) }
             try write(Data(clientID.utf8), account: account)
         } else {
-            let status = keychain.delete(baseQuery(account: account))
+            let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else { throw AuthenticationError.storage(status) }
         }
     }
@@ -93,7 +80,8 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        let (status, result) = keychain.copyMatching(query)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw AuthenticationError.storage(status) }
         guard let data = result as? Data else { throw AuthenticationError.storage(errSecDecode) }
@@ -109,12 +97,10 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
             kSecAttrAccessible as String: account.hasPrefix(accountPrefix)
                 ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
-        var status = keychain.update(query, attributes: attributes)
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
-            var addition = query
-            for (key, value) in attributes { addition[key] = value }
-            status = keychain.add(addition)
-            if status == errSecDuplicateItem { status = keychain.update(query, attributes: attributes) }
+            status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
+            if status == errSecDuplicateItem { status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary) }
         }
         guard status == errSecSuccess else { throw AuthenticationError.storage(status) }
     }
@@ -133,18 +119,4 @@ final class KeychainCredentialStore: ChatGPTCredentialStorage {
     private func validClientID(_ value: String) -> Bool {
         value != "dynamic_agent_client" && value.range(of: "^[a-zA-Z0-9_-]{1,200}$", options: .regularExpression) != nil
     }
-}
-
-@MainActor
-private final class SystemKeychain: KeychainQuerying {
-    func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?) {
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        return (status, result)
-    }
-    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
-        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-    }
-    func add(_ query: [String: Any]) -> OSStatus { SecItemAdd(query as CFDictionary, nil) }
-    func delete(_ query: [String: Any]) -> OSStatus { SecItemDelete(query as CFDictionary) }
 }

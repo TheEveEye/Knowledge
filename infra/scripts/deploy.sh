@@ -10,8 +10,8 @@ temporary_dir=$(mktemp -d)
 archive="$temporary_dir/source.tar.gz"
 trap '[[ ! -f "$archive" ]] || rm "$archive"; rmdir "$temporary_dir"' EXIT
 COPYFILE_DISABLE=1 tar --no-xattrs --no-acls \
-  --exclude=node_modules --exclude=dist --exclude=.DS_Store --exclude=.secrets \
-  -czf "$archive" package.json package-lock.json .dockerignore apps/api infra
+  --exclude=node_modules --exclude=dist --exclude=.DS_Store --exclude=.secrets --exclude=.data --exclude=backups --exclude=.env --exclude='.env.*' \
+  -czf "$archive" package.json package-lock.json .dockerignore apps/api apps/worker apps/recall-lab/package.json packages infra
 source_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
 revision=$(git rev-parse --short=12 HEAD)
 if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then revision="$revision-dirty-${source_sha:0:12}"; fi

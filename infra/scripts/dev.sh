@@ -7,14 +7,15 @@ bash infra/scripts/init-secrets.sh "$repo_dir/.secrets"
 args=(--project-name knowledge --project-directory "$repo_dir" --env-file "$repo_dir/.env"
   -f infra/compose/compose.yaml -f infra/compose/development.yaml)
 if [[ -s "$repo_dir/.secrets/email-api-key" ]]; then args+=(-f infra/compose/email.yaml); fi
+if [[ -s "$repo_dir/.secrets/openai-api-key" ]]; then args+=(-f infra/compose/ai-api.yaml); fi
 case ${1:-up} in
   up)
     docker compose "${args[@]}" build api
     docker compose "${args[@]}" up -d --wait --wait-timeout 90 db
     docker compose "${args[@]}" run --rm --no-deps -T migrate
-    docker compose "${args[@]}" up -d --no-deps --wait --wait-timeout 120 api caddy
+    docker compose "${args[@]}" up -d --no-deps --wait --wait-timeout 120 api worker caddy
     ;;
   down) docker compose "${args[@]}" down ;;
-  logs) docker compose "${args[@]}" logs --tail 100 -f api caddy ;;
+  logs) docker compose "${args[@]}" logs --tail 100 -f api worker caddy ;;
   *) printf 'Usage: %s [up|down|logs]\n' "$0" >&2; exit 1 ;;
 esac

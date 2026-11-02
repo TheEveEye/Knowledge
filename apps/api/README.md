@@ -27,7 +27,7 @@ From the repository root, with Docker running:
 npm run dev:up
 ```
 
-The command generates private local database and authentication credentials if absent, builds the API, applies migrations, and starts PostgreSQL and Caddy. The local API is available through Caddy at `http://127.0.0.1:8088/api/status`. The development override publishes PostgreSQL at `127.0.0.1:5433` and the API directly at `127.0.0.1:3001`.
+The command generates private local database, authentication, and AI-encryption credentials if absent, builds shared packages and applications, applies migrations, and starts PostgreSQL, the API, worker, and Caddy. The local API is available through Caddy at `http://127.0.0.1:8088/api/status`. The development override publishes PostgreSQL at `127.0.0.1:5433` and the API directly at `127.0.0.1:3001`.
 
 ```sh
 npm run dev:logs
@@ -47,7 +47,7 @@ The host process listens on `127.0.0.1:3000`; its logging and database limits ma
 
 ## Database and migrations
 
-- `src/db/schema.ts` declares the Knowledge schema and account tables. Migration `0000` initializes permissions; `0001` adds accounts and sessions. Library tables will follow with their sync contracts.
+- `src/db/schema.ts` re-exports the shared schema in `packages/backend`. Migration `0000` initializes permissions; `0001` adds accounts and sessions, `0002` adds email delivery limits, `0003` adds account-owned study data, `0004` records request policy and reasoning metadata, `0005` strengthens owned history references, `0006` versions AI connections, `0007` constrains pending import decisions, and `0008` leases interactive operations and links their receipts to owned subjects.
 - `drizzle/` holds version-controlled SQL migrations, snapshots, and the migration journal. Generate new migrations with `npm run db:generate -- --name=descriptive_name` from the repository root, then review their SQL.
 - The one-shot migration process uses the owner credential. An advisory lock serializes database migrations, and Drizzle applies pending changes transactionally and tracks them in its journal. Shipped migrations are immutable.
 - The API connects as `knowledge_api`, a non-superuser role that cannot create roles or databases. It has access to application data and read-only access to the migration journal.
@@ -78,10 +78,10 @@ The initial role bootstrap runs only on an empty PostgreSQL volume. Changing a c
 | `EMAIL_FROM` | `signin@auth.kiwiapps.dev` | Bare sender email on a verified sending domain |
 | `EMAIL_DAILY_LIMIT` | `90` | Global application delivery budget per UTC day |
 
-Database connections remain inside the private Docker network in production. There are no public database or API container ports; Caddy is the gateway. Knowledge session handling is implemented; social sign-in providers, AI-provider access, library sync, and background processing are later milestones.
+Database connections remain inside the private Docker network in production. There are no public database or API container ports; Caddy is the gateway. Authenticated study routes under `/api/v1` use the validated Knowledge user UUID. Social sign-in is deferred. See [cloud library](../../docs/Cloud-Library.md) for contracts, transaction boundaries, AI funding, storage, worker limits, and client behavior.
 
 Request logging excludes query strings, headers, and bodies; error responses omit internal details. SIGTERM/SIGINT initiate graceful HTTP and database shutdown, with a bounded deadline.
 
-The root dependency override updates Drizzle Kit's legacy esbuild helper to a patched esbuild release. Development and optional dependencies are pruned from the runtime image, including development tools retained through Better Auth's optional peer dependencies. Required PostgreSQL and Drizzle runtime packages are direct dependencies.
+The root dependency override updates Drizzle Kit's legacy esbuild helper to a patched esbuild release. Development dependencies are pruned from the runtime image. Platform-specific optional PDF.js dependencies remain available for ARM64 PDF extraction. Required PostgreSQL and Drizzle runtime packages are direct dependencies.
 
 See [backend deployment](../../docs/Backend-Deployment.md) for the Pi, release scripts, and Cloudflare setup.

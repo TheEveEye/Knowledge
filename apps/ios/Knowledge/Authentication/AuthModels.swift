@@ -58,7 +58,6 @@ nonisolated struct ChatGPTCredentials: Codable, Sendable, Equatable {
     var refreshToken: String?
     var expiresAt: Date?
     var scopes: [String]
-    var earliestRefreshAt: String?
     var receivedAt: Date? = nil
 
     var planEnabled: Bool { accessToken != nil && scopes.contains(ChatGPTConfiguration.planScope) }
@@ -88,32 +87,4 @@ nonisolated struct OAuthAuthorization: Sendable {
     let verifier: String
     let nonce: String
     let redirectURI: URL
-}
-
-nonisolated struct OAuthTokenResponse: Sendable {
-    let credentials: ChatGPTCredentials
-}
-
-@MainActor protocol ChatGPTCredentialStorage {
-    func hostID() throws -> String
-    func loadAccounts() throws -> [StoredChatGPTAccount]
-    func saveAccount(_ account: StoredChatGPTAccount) throws
-    func activeAccountID() throws -> String?
-    func setActiveAccountID(_ clientID: String?) throws
-    func pendingRegistrationClientID() throws -> String?
-    func setPendingRegistrationClientID(_ clientID: String?) throws
-}
-
-@MainActor protocol ChatGPTAuthenticating {
-    func authorizationEndpoint() async throws -> URL
-    func exchange(_ authorization: OAuthAuthorization) async throws -> OAuthTokenResponse
-    func refresh(_ account: StoredChatGPTAccount) async throws -> OAuthTokenResponse
-    func verifyIdentity(idToken: String, clientID: String, nonce: String?) async throws -> ChatGPTIdentity
-    func revoke(_ account: StoredChatGPTAccount) async throws
-    func verifyRefreshedIdentity(idToken: String, clientID: String, receivedAt: Date?) async throws -> ChatGPTIdentity
-}
-
-@MainActor protocol ChatGPTBrowserAuthenticating {
-    func authorize(_ request: OAuthBrowserRequest) async throws -> OAuthAuthorization
-    func cancel()
 }

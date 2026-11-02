@@ -20,6 +20,7 @@
 ## UI copy
 
 - Do not add taglines, promotional copy, or unsolicited explanatory text to suffix views, form footers, or other trailing UI anywhere in the app. Keep these areas free of filler; show necessary validation guidance only when it is relevant to the user's input.
+- Keep action-triggered loading feedback inline in the button or row that initiated it, with the spinner and status text on one horizontal line. Do not add a separate loading row, section, or card for that action.
 
 ## No tests
 

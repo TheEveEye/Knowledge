@@ -22,6 +22,48 @@
       "when": 1793271412924,
       "tag": "0002_email_delivery_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793452324026,
+      "tag": "0003_cloud_library",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793468255691,
+      "tag": "0004_ai_request_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793468814992,
+      "tag": "0005_owned_history_references",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793469417612,
+      "tag": "0006_connection_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793469960085,
+      "tag": "0007_owned_import_decisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793471506846,
+      "tag": "0008_operation_leases",
+      "breakpoints": true
     }
   ]
 }

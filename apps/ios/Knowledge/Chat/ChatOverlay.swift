@@ -1,14 +1,12 @@
 import SwiftUI
 
-struct ChatOverlay: View {
-    @Bindable var session: ChatSession
+struct ChatOverlay<Session: ChatSessionPresenting>: View {
+    let session: Session
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
     @Binding var isExpanded: Bool
-    var showsCollapsedButton = true
     var searchText: Binding<String>? = nil
-    var showsHeader = false
     @State private var message = ""
     @FocusState private var isFocused: Bool
     @Namespace private var glassNamespace
@@ -52,15 +50,13 @@ struct ChatOverlay: View {
                     } else {
                         Spacer(minLength: 0)
                     }
-                    if isExpanded || showsCollapsedButton {
-                        composer.padding(.horizontal)
-                    }
+                    composer.padding(.horizontal)
                 }
                 .padding(.vertical, 6)
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if isExpanded && showsHeader {
+            if isExpanded {
                 ChatToolbar(isExpanded: $isExpanded).transition(.opacity)
             }
         }
@@ -231,8 +227,8 @@ private struct ChatWelcomeView: View {
     }
 }
 
-private struct ChatConversation: View {
-    let session: ChatSession
+private struct ChatConversation<Session: ChatSessionPresenting>: View {
+    let session: Session
     let onBackgroundTap: () -> Void
     let onMessageTap: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

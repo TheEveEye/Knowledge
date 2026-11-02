@@ -32,9 +32,15 @@ if [[ "$mode" == deploy ]]; then
   fi
   if [[ -n "$previous" ]]; then
     mkdir -p "$KNOWLEDGE_REMOTE_DIR/backups"
-    backup="$KNOWLEDGE_REMOTE_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)-before-migration.dump"
-    knowledge_compose "$previous" exec -T db pg_dump -U knowledge_owner -d knowledge -Fc > "$backup"
-    knowledge_compose "$previous" exec -T db pg_restore --list < "$backup" > /dev/null
+    if [[ -f "$previous/infra/scripts/backup-entrypoint.sh" ]]; then
+      backup="$KNOWLEDGE_REMOTE_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)-before-migration.tar.gz"
+      knowledge_compose "$previous" run --rm --no-deps -T backup > "$backup.partial"
+      mv "$backup.partial" "$backup"
+    else
+      backup="$KNOWLEDGE_REMOTE_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)-before-migration.dump"
+      knowledge_compose "$previous" exec -T db pg_dump -U knowledge_owner -d knowledge -Fc > "$backup"
+      knowledge_compose "$previous" exec -T db pg_restore --list < "$backup" > /dev/null
+    fi
   fi
   docker build --pull --build-arg "APP_REVISION=$(sed -n 's/^APP_REVISION=//p' "$release_dir/.env.release")" \
     -t "knowledge-api:$(basename "$release_dir")" -f "$release_dir/apps/api/Dockerfile" "$release_dir"
@@ -47,10 +53,12 @@ elif [[ "$mode" != rollback ]]; then
   exit 1
 fi
 
-knowledge_front_services
+knowledge_front_services "$release_dir"
 if ! knowledge_compose "$release_dir" up -d --no-deps --wait --wait-timeout 120 "${FRONT_SERVICES[@]}"; then
   if [[ -n "$previous" && "$previous" != "$release_dir" ]]; then
     printf 'Startup failed; restoring the previous application image. Database migrations are retained.\n' >&2
+    if [[ ! -f "$previous/apps/worker/package.json" && -f "$release_dir/apps/worker/package.json" ]]; then knowledge_compose "$release_dir" stop worker; fi
+    knowledge_front_services "$previous"
     knowledge_compose "$previous" up -d --no-deps --wait --wait-timeout 120 "${FRONT_SERVICES[@]}"
   fi
   exit 1

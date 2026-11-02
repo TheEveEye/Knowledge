@@ -1,0 +1,1 @@
+ALTER TABLE "knowledge"."pending_library_decisions" ADD CONSTRAINT "decision_owned_import" FOREIGN KEY ("user_id","subject_id","import_id") REFERENCES "knowledge"."imports"("user_id","subject_id","id") ON DELETE no action ON UPDATE no action;

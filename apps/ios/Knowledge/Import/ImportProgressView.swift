@@ -6,6 +6,7 @@ struct ImportProgressView: View {
     var title = "Notes"
     var isRunning = true
     var error: String? = nil
+    var serverStatus: String? = nil
     var backgroundNotice: String? = nil
     var onChooseModel: (() -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -175,6 +176,8 @@ struct ImportProgressView: View {
     }
 
     private var stageTitle: String {
+        if serverStatus == "failed" || serverStatus == "blocked" { return "Import needs attention" }
+        if serverStatus == "queued" { return "Import queued" }
         if error != nil { return "Import needs attention" }
         if !isRunning { return "Import paused" }
         if progress.isReviewingSource { return "Checking source support…" }
@@ -308,6 +311,9 @@ private struct ImportProgressDetailsView: View {
                     }
                     if progress.total > 0 {
                         LabeledContent("Batches checked", value: "\(progress.completed) of \(progress.total)")
+                    }
+                    if progress.receivedCharacters > 0, isRunning {
+                        LabeledContent("Response received", value: "\(progress.receivedCharacters.formatted()) characters")
                     }
                     if isRunning, progress.stage == .extracting, progress.organizationLabel == nil {
                         LabeledContent("Active source batches", value: progress.activeWorkerCount.formatted())

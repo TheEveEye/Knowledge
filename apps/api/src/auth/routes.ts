@@ -14,7 +14,7 @@ const authRoutes = new Map([
   ["/api/auth/revoke-other-sessions", "POST"],
 ]);
 
-function authHeaders(request: FastifyRequest, config: Config): Headers {
+export function authHeaders(request: FastifyRequest, config: Config): Headers {
   const headers = fromNodeHeaders(request.headers);
   // Only the configured Cloudflare deployment trusts this edge-set, single IP.
   // Local and direct development traffic uses the socket IP, never forwarded input.
@@ -25,7 +25,7 @@ function authHeaders(request: FastifyRequest, config: Config): Headers {
   return headers;
 }
 
-function forwardHeaders(headers: Headers, reply: FastifyReply) {
+export function forwardHeaders(headers: Headers, reply: FastifyReply) {
   for (const [name, value] of headers) {
     if (!["set-cookie", "content-length", "transfer-encoding", "connection"].includes(name)) reply.header(name, value);
   }

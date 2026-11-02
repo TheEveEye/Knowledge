@@ -1,17 +1,16 @@
 {
-  "fill-specializations" : [
-    {
-      "value" : {
-        "automatic-gradient" : "extended-srgb:0.00000,0.78431,0.70196,1.00000"
-      }
-    },
-    {
-      "appearance" : "dark",
-      "value" : "automatic"
-    }
+  "features" : [
+    "refractivity"
   ],
+  "fill" : {
+    "linear-gradient" : [
+      "extended-srgb:0.00000,0.76471,0.81569,1.00000",
+      "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+    ]
+  },
   "groups" : [
     {
+      "hidden" : false,
       "layers" : [
         {
           "blend-mode" : "normal",
@@ -22,7 +21,10 @@
             {
               "appearance" : "dark",
               "value" : {
-                "automatic-gradient" : "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+                "linear-gradient" : [
+                  "extended-srgb:0.00000,0.76471,0.81569,1.00000",
+                  "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+                ]
               }
             }
           ],
@@ -45,7 +47,10 @@
             {
               "appearance" : "dark",
               "value" : {
-                "automatic-gradient" : "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+                "linear-gradient" : [
+                  "extended-srgb:0.00000,0.76471,0.81569,1.00000",
+                  "extended-srgb:0.00000,0.78431,0.70196,1.00000"
+                ]
               }
             }
           ],
@@ -63,18 +68,29 @@
       "lighting" : "individual",
       "refractivity" : {
         "depth" : 0,
-        "enabled" : false,
+        "enabled" : true,
         "strength" : 0.5
       },
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0
+        "opacity" : 0.5
       },
       "specular" : true,
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.25
-      }
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.5
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.3
+          }
+        }
+      ]
     }
   ],
   "supported-platforms" : {

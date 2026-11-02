@@ -36,17 +36,6 @@ nonisolated struct PreparedSource: Codable, Sendable, Equatable {
     let segments: [SourceSegment]
 }
 
-nonisolated struct SourceChunk: Codable, Sendable {
-    let index: Int
-    let segments: [SourceSegment]
-    let requiredSegmentIDs: [String]
-}
-
-nonisolated struct EvidenceQuote: Codable, Sendable, Equatable {
-    let segmentID: String
-    let quote: String
-}
-
 nonisolated struct EvidenceReference: Codable, Sendable, Equatable {
     let sourceID: UUID
     let segmentID: String
@@ -61,39 +50,6 @@ nonisolated struct CoverageDecision: Codable, Sendable, Equatable {
     var contextRequest: String? = nil
     enum ContentKind: String, Codable, Sendable { case structural, substantive }
     var contentKind: ContentKind? = nil
-}
-
-nonisolated struct ExtractedConcept: Codable, Sendable {
-    let id: String
-    let name: String
-    let aliases: [String]
-    let explanation: String
-    let evidence: [EvidenceQuote]
-    let reviewReason: String?
-}
-nonisolated struct ExtractedFact: Codable, Sendable {
-    let id: String
-    let conceptID: String
-    let statement: String
-    let kind: FactKind
-    let qualifications: String
-    let evidence: [EvidenceQuote]
-    let reviewReason: String?
-}
-nonisolated struct ExtractedConnection: Codable, Sendable {
-    let id: String
-    let fromConceptID: String
-    let toConceptID: String
-    let kind: ConnectionKind
-    let explanation: String
-    let supportingFactIDs: [String]
-    let reviewReason: String?
-}
-nonisolated struct ExtractionPayload: Codable, Sendable {
-    let concepts: [ExtractedConcept]
-    let facts: [ExtractedFact]
-    let connections: [ExtractedConnection]
-    let coverage: [CoverageDecision]
 }
 
 nonisolated struct ConceptWording: Codable, Sendable, Equatable {
@@ -184,26 +140,6 @@ nonisolated struct ImportDraft: Codable, Sendable {
     func isPassageReviewed(_ segmentID: String) -> Bool {
         reviewedPassageIDs.contains(segmentID)
     }
-
-    mutating func setPassageReviewed(_ segmentID: String, reviewed: Bool) {
-        guard coverage.contains(where: { $0.segmentID == segmentID && $0.disposition == .uncertain }) else { return }
-        var ids = reviewedPassageIDs
-        ids.removeAll { $0 == segmentID }
-        if reviewed { ids.append(segmentID) }
-        reviewedPassageIDs = ids
-        if reviewTracking != nil {
-            updatePassageAcknowledgement(segmentID, reviewed: reviewed)
-        }
-    }
-
-    func name(for id: UUID, in context: SubjectSnapshot) -> String {
-        concepts.first { $0.id == id }?.name ?? context.concepts.first { $0.id == id }?.name ?? "Unavailable concept"
-    }
-    var unresolvedCount: Int {
-        if let reviewTracking { return reviewTracking.issues.filter(\.isBlocking).count }
-        return concepts.filter { $0.reviewReason != nil }.count + facts.filter { $0.reviewReason != nil }.count
-        + connections.filter { $0.reviewReason != nil }.count + passagesNeedingReview.count + existingFactReviews.count
-    }
 }
 
 nonisolated struct ExcludedConnectionReview: Codable, Sendable, Identifiable {
@@ -247,187 +183,9 @@ nonisolated struct SavedConnectionSummary: Codable, Sendable {
     let explanation: String
     let supportingFactIDs: [UUID]
 }
-
-nonisolated struct MergeDecision: Codable, Sendable {
-    let conceptID: UUID
-    let mergeWithID: UUID?
-    let reason: String
-    let reviewReason: String?
-}
-nonisolated struct SuggestedConnection: Codable, Sendable {
-    let fromConceptID: UUID
-    let toConceptID: UUID
-    let kind: ConnectionKind
-    let explanation: String
-    let supportingFactIDs: [UUID]
-    let reviewReason: String?
-}
 nonisolated struct FactReview: Codable, Sendable {
     let factID: UUID
     let reason: String
-}
-nonisolated struct ReconciliationPayload: Codable, Sendable {
-    let decisions: [MergeDecision]
-    let connections: [SuggestedConnection]
-    let factReviews: [FactReview]
-    let updates: [LibraryContentProposal]
-}
-
-/// The wire format requires one keyed decision per concept; the application keeps an ordered array.
-nonisolated struct ReconciliationResponse: Decodable, Sendable {
-    struct Decision: Decodable, Sendable {
-        let mergeWithID: UUID?
-        let reason: String
-        let reviewReason: String?
-    }
-    let decisions: [String: Decision]
-    let connections: [SuggestedConnection]
-    let factReviews: [FactReview]
-    let updates: [LibraryContentProposal]
-
-    func payload() throws -> ReconciliationPayload {
-        let values = try decisions.sorted { $0.key < $1.key }.map { key, value -> MergeDecision in
-            guard let id = UUID(uuidString: key) else { throw ImportValidator.invalid("An invalid reconciliation key was returned.") }
-            return .init(conceptID: id, mergeWithID: value.mergeWithID, reason: value.reason, reviewReason: value.reviewReason)
-        }
-        return .init(decisions: values, connections: connections, factReviews: factReviews, updates: updates)
-    }
-}
-
-nonisolated struct ImportRequestUsage: Codable, Sendable {
-    let responseID: String?
-    let inputTokens: Int?
-    let outputTokens: Int?
-}
-nonisolated struct ImportCheckpoint: Codable, Sendable {
-    var completedBatches: [CompletedImportBatch] = []
-    var batchErrors: [ImportBatchError] = []
-    // Source-checked batches can still have optional, isolated patch work. Never library entries.
-    var pendingPatches: [PendingImportPatch] = []
-    var draft: ImportDraft? = nil
-    var topicOrganization: TopicOrganizationCheckpoint? = nil
-    var reconciledPartCount = 0
-    var usage: [ImportRequestUsage] = []
-
-    /// Assembly order is independent of the order in which workers finish.
-    var parts: [ImportDraft] { completedBatches.sorted { $0.index < $1.index }.map(\.draft) }
-
-    init() {}
-
-    private enum CodingKeys: String, CodingKey {
-        case completedBatches, batchErrors, pendingPatches, draft, topicOrganization, reconciledPartCount, usage
-    }
-    init(from decoder: any Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        completedBatches = try values.decode([CompletedImportBatch].self, forKey: .completedBatches)
-        batchErrors = try values.decode([ImportBatchError].self, forKey: .batchErrors)
-        pendingPatches = try values.decode([PendingImportPatch].self, forKey: .pendingPatches)
-        draft = try values.decodeIfPresent(ImportDraft.self, forKey: .draft)
-        topicOrganization = try values.decodeIfPresent(TopicOrganizationCheckpoint.self, forKey: .topicOrganization)
-        reconciledPartCount = try values.decode(Int.self, forKey: .reconciledPartCount)
-        usage = try values.decode([ImportRequestUsage].self, forKey: .usage)
-        try validateIndices()
-    }
-    func encode(to encoder: any Encoder) throws {
-        try validateIndices()
-        var values = encoder.container(keyedBy: CodingKeys.self)
-        try values.encode(completedBatches.sorted { $0.index < $1.index }, forKey: .completedBatches)
-        try values.encode(batchErrors, forKey: .batchErrors)
-        try values.encode(pendingPatches, forKey: .pendingPatches)
-        try values.encodeIfPresent(draft, forKey: .draft)
-        try values.encodeIfPresent(topicOrganization, forKey: .topicOrganization)
-        try values.encode(reconciledPartCount, forKey: .reconciledPartCount)
-        try values.encode(usage, forKey: .usage)
-    }
-    func validateIndices(batchCount: Int? = nil) throws {
-        let completed = completedBatches.map(\.index), failed = batchErrors.map(\.index), patches = pendingPatches.map(\.index)
-        guard reconciledPartCount >= 0, Set(completed).count == completed.count,
-              Set(patches).count == patches.count, Set(patches).isSubset(of: completed),
-              pendingPatches.isEmpty || (draft == nil && reconciledPartCount == 0),
-              topicOrganization == nil || (draft?.isComplete == true && draft?.topicOrganization == nil),
-              Set(failed).count == failed.count, Set(completed).isDisjoint(with: failed),
-              (completed + failed).allSatisfy({ $0 >= 0 && (batchCount == nil || $0 < batchCount!) }) else {
-            throw ImportError.damagedCheckpoint
-        }
-    }
-}
-
-nonisolated struct PendingImportPatch: Codable, Sendable {
-    let index: Int
-    let concepts: [ExtractedConcept]
-    let facts: [ExtractedFact]
-    var connections: [PendingConnectionPatch]
-    var passageIDs: [String]
-    var contextAttempt: Int? = nil
-    var lastContextSegmentIDs: [String]? = nil
-}
-
-nonisolated struct PendingConnectionPatch: Codable, Sendable {
-    let key: String
-    let suggestion: ExtractedConnection
-    let exclusionID: UUID
-}
-
-nonisolated struct ConnectionPatchPayload: Codable, Sendable {
-    let decisions: [String: ConnectionPatchDecision]
-}
-
-nonisolated struct ConnectionPatchDecision: Codable, Sendable {
-    let disposition: String
-    let fromConceptID: String?
-    let toConceptID: String?
-    let supportingFactIDs: [String]
-    let reason: String
-}
-
-nonisolated struct CompletedImportBatch: Codable, Sendable {
-    let index: Int
-    let draft: ImportDraft
-}
-
-nonisolated struct ImportBatchError: Codable, Sendable, Equatable, Identifiable {
-    let index: Int
-    let message: String
-    var id: Int { index }
-}
-
-nonisolated struct ImportProcessingConfiguration: Sendable {
-    static let maximumConcurrentExtractionBatches = Int.max
-    let maximumConcurrentBatches: Int
-    init(maximumConcurrentExtractionBatches: Int = Self.maximumConcurrentExtractionBatches) {
-        precondition(maximumConcurrentExtractionBatches > 0)
-        maximumConcurrentBatches = maximumConcurrentExtractionBatches
-    }
-    func workerCount(pendingBatchCount: Int) -> Int { min(maximumConcurrentBatches, pendingBatchCount) }
-}
-
-nonisolated struct ImportBatchFailures: Error, LocalizedError {
-    let failures: [ImportBatchError]
-    var errorDescription: String? {
-        "\(failures.count) \(failures.count == 1 ? "batch needs" : "batches need") attention. Resume retries unfinished batches; checked batches are kept."
-    }
-}
-
-nonisolated enum ImportError: Error, LocalizedError, Equatable {
-    case unsupportedFile, unreadablePDF, lockedPDF, needsOCR([Int]), unreadableText, emptySource, sourceTooLarge
-    case invalidExtraction(String), incompleteDraft, accountChanged, busy, invalidSelection(String), damagedCheckpoint
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedFile: "Choose a searchable PDF, TXT, or Markdown file."
-        case .unreadablePDF: "This PDF could not be read. Export a new copy or paste its text."
-        case .lockedPDF: "This PDF is locked. Import an unlocked copy."
-        case .needsOCR(let pages): "Pages \(pages.map(String.init).joined(separator: ", ")) have no selectable text. Use a searchable PDF or paste the text; OCR is coming later."
-        case .unreadableText: "The file is not readable UTF-8 or UTF-16 text. Save a text copy and try again."
-        case .emptySource: "Add some notes or choose a file containing text."
-        case .sourceTooLarge: "Import up to 25 MB and 300,000 text characters at a time. Split this source into smaller files."
-        case .invalidExtraction(let reason): "The extraction could not be validated: \(reason) Retry this import or choose another model."
-        case .incompleteDraft: "Finish processing all passages before saving this import."
-        case .accountChanged: "The ChatGPT account changed. Processing stopped and your draft was kept."
-        case .busy: "This import is already processing or saving."
-        case .invalidSelection(let reason): reason
-        case .damagedCheckpoint: "This saved draft could not be read. Keep the original source and start a new import."
-        }
-    }
 }
 
 nonisolated extension String {
