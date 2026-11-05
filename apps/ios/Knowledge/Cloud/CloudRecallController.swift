@@ -17,11 +17,13 @@ import SwiftUI
     @ObservationIgnored private unowned let library: CloudLibraryStore
     @ObservationIgnored private var task: Task<Void, Never>?
     private var pending: Pending?
+    private var commandPath: String?
     private enum Pending {
         case answer(version: Int, answer: String, value: CloudJSON)
         case assessment(version: Int, dispute: String?, scope: String)
         case explanation(version: Int)
         case command(path: String, fields: [String: CloudJSON])
+        case refresh
     }
     init(sessionID: String, library: CloudLibraryStore) { self.sessionID = sessionID; self.library = library }
     private var version: Int { presentation.value("session").value("version").int }
@@ -32,19 +34,37 @@ import SwiftUI
         case .answer: "Saving your answer…"
         case .assessment: "Checking your answer…"
         case .explanation: "Preparing an explanation…"
-        case .command(let path, _): path == "/advance" ? "Saving result…" : path == "/undo" ? "Undoing result…" : "Saving…"
-        case nil: "Checking your answer…"
+        case .command, .refresh:
+            commandPath == "/advance" ? "Loading next question…" : commandPath == "/unknown" ? "Saving your answer…" : commandPath == "/undo" ? "Undoing result…" : "Updating session…"
+        case nil: "Refreshing session…"
         }
     }
+    var canRetryRequest: Bool { pending != nil }
+    var requestAction: String? { commandPath }
     var canEditPendingAnswer: Bool { state.episode?.phase == "awaiting" && state.episode?.pendingOperation == "assess" && presentation.value("session").value("state").value("episode").value("assessmentPending").flag }
 
-    func refresh() async throws {
+    func refresh(duringRequest: Bool = false) async throws {
         guard !closed else { throw CancellationError() }
+        guard duringRequest || !isRequesting else { return }
+        let run = generation
         let value = try await library.client.json(prefix)
-        if value.value("question") != .null, let subjectID = UUID(uuidString: value.value("session").text("subjectID")) {
-            try await library.loadRecallMaterials(for: subjectID)
+        // Session-only changes do not require downloading the whole question bank
+        // again when the confirmed question can use the displayed material.
+        if value.value("question") != .null,
+           (try? CloudRecallPresentation.state(value, library: library, sessionID: sessionID)) == nil,
+           let subjectID = UUID(uuidString: value.value("session").text("subjectID")) {
+            // An invalidation may supersede the shared material read. Retry the
+            // read without treating cancellation of that cache task as grading failure.
+            for attempt in 0..<3 {
+                do { try await library.loadRecallMaterials(for: subjectID); break }
+                catch is CancellationError {
+                    try Task.checkCancellation()
+                    guard !closed, generation == run, attempt < 2 else { throw CancellationError() }
+                }
+            }
         }
-        guard !closed else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard !closed, generation == run else { throw CancellationError() }
         guard value.value("session").value("version").int >= version else { return }
         var updated = try CloudRecallPresentation.state(value, library: library, sessionID: sessionID)
         if formDirty, let previous = state.episode {
@@ -64,12 +84,12 @@ import SwiftUI
     }
     func reloadSession() {
         guard !isRequesting, !closed else { return }
-        formDirty = false; hasStaleInput = false; pending = nil; isRequesting = true
+        formDirty = false; hasStaleInput = false; pending = nil; commandPath = nil; isRequesting = true
         let run = UUID(); generation = run
         task = Task { [weak self] in
             guard let self else { return }
             defer { if generation == run { isRequesting = false; task = nil } }
-            do { try await refresh(); if generation == run { error = nil } } catch { if generation == run, !closed { self.error = error.localizedDescription } }
+            do { try await refresh(duringRequest: true); if generation == run { error = nil } } catch { if generation == run, !closed { self.error = error.localizedDescription } }
         }
     }
     func setResponse(_ value: RecallResponse) {
@@ -82,7 +102,22 @@ import SwiftUI
         guard !isRequesting, !hasStaleInput, let episode = state.episode, episode.phase == "answer", !episode.draft.trimmed.isEmpty else { return }
         start(.answer(version: version, answer: episode.draft, value: episode.nextInput.kind == .text ? .string(episode.draft) : CloudRecallPresentation.inputValue(episode.response, for: episode.nextInput)))
     }
-    func dontKnow() { guard !isRequesting, !hasStaleInput else { return }; command("/unknown") }
+    func dontKnow() {
+        guard !isRequesting, pending == nil, !hasStaleInput, library.ready, library.isForeground,
+              !closed, var episode = state.episode, episode.phase == "answer" else { return }
+        // This result is deterministic and the answer is already on the device.
+        // Reveal it immediately; advancement still requires server confirmation.
+        if episode.turns.isEmpty {
+            var turn = RecallTurn(id: UUID(), prompt: episode.question.prompt, kind: .initial, answer: "I don't know.", submittedAt: .now, input: .text)
+            turn.assessment = RecallAssessment(outcome: .incorrect, metCriterionIDs: [], missingCriterionIDs: episode.question.criteria.map(\.id),
+                contradictions: [], feedback: "Review the answer below, then practise it again later.", followUp: nil, followUpKind: nil,
+                sourceConcern: nil, model: "server:self-reported-unknown", policyVersion: RecallAssessmentPolicy.version, responseID: nil, assessedAt: .now)
+            episode.turns = [turn]
+        }
+        episode.phase = "feedback"; episode.draft = ""; episode.response = nil
+        state.episode = episode
+        command("/unknown")
+    }
     func retry(userInitiated: Bool = true) {
         guard !isRequesting else { return }
         usageLimited = false
@@ -94,7 +129,7 @@ import SwiftUI
         generation = UUID(); task?.cancel(); task = nil; isRequesting = false; error = message
     }
     func close() {
-        closed = true; generation = UUID(); task?.cancel(); task = nil; pending = nil
+        closed = true; generation = UUID(); task?.cancel(); task = nil; pending = nil; commandPath = nil
         state = .init(queue: [], episode: nil); presentation = .null; error = nil; isRequesting = false; formDirty = false; hasStaleInput = false
     }
     func skip(problem: String? = nil) {
@@ -136,16 +171,20 @@ import SwiftUI
         } catch { if !closed { self.error = error.localizedDescription }; return false }
     }
     private func command(_ path: String, fields: [String: CloudJSON] = [:]) {
+        guard pending == nil else { return }
         var fields = fields; fields["expectedVersion"] = .number(version)
         start(.command(path: path, fields: fields))
     }
     private func start(_ operation: Pending) {
         guard !isRequesting, !closed, library.ready, library.isForeground else { return }
         pending = operation; isRequesting = true; error = nil; usageLimited = false
+        if case .command(let path, _) = operation { commandPath = path }
+        else if case .refresh = operation { /* Keep the initiating action during a read retry. */ }
+        else { commandPath = nil }
         let run = UUID(); generation = run
-        state.episode?.phase = "awaiting"
         if case .explanation = operation { state.episode?.phase = "awaitingExplanation"; state.episode?.pendingOperation = "explain" }
-        else { state.episode?.pendingOperation = "assess" }
+        else if case .answer = operation { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
+        else if case .assessment = operation { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
         task = Task { [weak self] in
             guard let self else { return }
             defer { if generation == run { isRequesting = false; task = nil } }
@@ -157,29 +196,34 @@ import SwiftUI
                         let result = try await library.mutate(prefix + "/answer", fields: ["expectedVersion": .number(version), "answer": .string(answer), "inputValue": value])
                         guard generation == run else { return }
                         formDirty = false; pending = .assessment(version: result.value("version").int, dispute: nil, scope: "initial")
-                        try await refresh()
+                        try await refresh(duringRequest: true)
                     case .assessment(let version, let dispute, let scope):
                         _ = try await library.mutate(prefix + "/assess", fields: ["expectedVersion": .number(version), "dispute": dispute.map { .string($0) } ?? .null, "disputeScope": .string(scope)], streaming: true)
-                        guard generation == run else { return }; pending = nil; formDirty = false
+                        guard generation == run else { return }; pending = .refresh; formDirty = false
                     case .explanation(let version):
                         _ = try await library.mutate(prefix + "/explain", fields: ["expectedVersion": .number(version)], streaming: true)
-                        guard generation == run else { return }; pending = nil
+                        guard generation == run else { return }; pending = .refresh
                     case .command(let path, let fields):
                         _ = try await library.mutate(prefix + path, fields: fields)
-                        guard generation == run else { return }; pending = nil; formDirty = false
+                        guard generation == run else { return }; pending = .refresh; formDirty = false
+                    case .refresh:
+                        try await refresh(duringRequest: true)
+                        guard generation == run else { return }; pending = nil; commandPath = nil
                     }
                 }
-                try await refresh(); try await library.refresh()
+                library.scheduleRefresh()
             } catch {
                 guard generation == run, !closed else { return }
                 usageLimited = (error as? CloudFailure)?.code == "AI_LIMIT" && presentation.value("session").value("state").value("selection").text("funding") == "chatgpt"
-                let message = error is CancellationError ? "Assessment paused. Your answer was kept; retry to continue." : error.localizedDescription
-                if (error as? CloudFailure)?.code == "VERSION_CONFLICT" { pending = nil }
-                try? await refresh()
+                let message = error is CancellationError ? "Session refresh interrupted. Retry to continue." : error.localizedDescription
+                if (error as? CloudFailure)?.code == "VERSION_CONFLICT" { pending = .refresh; formDirty = false }
+                // A failed command retains its original version and operation ID
+                // for an idempotent retry. A confirmed command retries only its read.
                 self.error = message
                 if pending != nil {
                     if case .explanation = pending { state.episode?.phase = "awaitingExplanation"; state.episode?.pendingOperation = "explain" }
-                    else { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
+                    else if case .answer = pending { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
+                    else if case .assessment = pending { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
                 }
             }
         }

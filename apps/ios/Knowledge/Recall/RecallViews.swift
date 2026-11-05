@@ -72,7 +72,7 @@ struct RecallOverviewCards: View {
             }
             .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
             .padding(16)
-            .background(.background, in: RoundedRectangle(cornerRadius: 20))
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(title), \(value.formatted()), \(detail)")
         }
@@ -100,7 +100,11 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
     var body: some View {
         List {
             if isHistory { summary }
-            else if let episode = controller.state.episode { questionSections(episode).disabled(controller.isRequesting && episode.phase == "answer") }
+            else if let episode = controller.state.episode {
+                questionSections(episode)
+                    .disabled((controller.isRequesting && episode.phase == "answer")
+                        || (controller.canRetryRequest && !controller.isRequesting && !episode.phase.hasPrefix("awaiting")))
+            }
             else { summary }
             if !isHistory, let error = controller.error {
                 Section {
@@ -109,13 +113,25 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                         Button { controller.reloadSession() } label: { HStack { if controller.isRequesting { ProgressView() }; Text("Discard draft and reload") } }.disabled(controller.isRequesting)
                     }
                     if controller.usageLimited { Link("Manage ChatGPT usage", destination: ChatGPTAccountLinks.usage) }
-                    if controller.state.episode?.phase.hasPrefix("awaiting") == true {
-                        Button("Retry", systemImage: "arrow.clockwise") { controller.retry() }.disabled(controller.isRequesting)
+                    if controller.canRetryRequest {
+                        Button { controller.retry() } label: {
+                            HStack {
+                                if controller.isRequesting { ProgressView(); Text(controller.requestLabel) }
+                                else { Label("Retry", systemImage: "arrow.clockwise") }
+                            }
+                        }.disabled(controller.isRequesting)
                     }
                 }.disabled(revealingSource || editingAnswer)
             }
             if !isHistory, controller.state.lastReviewEventID != nil {
-                Section { Button("Undo last result", systemImage: "arrow.uturn.backward") { controller.undoLastReview() }.disabled(controller.isRequesting) }
+                Section {
+                    Button { controller.undoLastReview() } label: {
+                        HStack {
+                            if controller.isRequesting, controller.requestAction == "/undo" { ProgressView(); Text(controller.requestLabel) }
+                            else { Label("Undo last result", systemImage: "arrow.uturn.backward") }
+                        }
+                    }.disabled(controller.isRequesting || controller.canRetryRequest)
+                }
             }
         }
         .environment(\.editMode, .constant(
@@ -323,7 +339,13 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
             }
         }
         Section {
-            Button("Next question", systemImage: "arrow.right") { controller.next() }
+            Button { controller.next() } label: {
+                HStack {
+                    if controller.isRequesting, controller.requestAction == "/advance" || controller.requestAction == "/unknown" {
+                        ProgressView(); Text(controller.requestLabel)
+                    } else { Label("Next question", systemImage: "arrow.right") }
+                }
+            }
             Button("Explain more", systemImage: "text.bubble") { controller.explainMore() }
             Button("Disagree with assessment", systemImage: "hand.raised") { reason = ""; reconsiderationScope = episode.turns.count > 1 ? .conversation : .initial; challenge = .assessment }
         }.disabled(revealingSource || editingAnswer || controller.isRequesting)

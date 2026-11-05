@@ -7,6 +7,7 @@ import Observation
     var draft: ImportDraft
     private(set) var version: Int
     private(set) var saving = false
+    private(set) var chatEditing = false
     private(set) var dirty = false
     private(set) var requiresReview = false
     var error: String?
@@ -32,8 +33,20 @@ import Observation
     func synchronize() throws {
         guard !closed, !saving, !dirty else { return }
         let row = library.drafts.first { $0.text("id") == importID } ?? .null
-        guard row.value("version").int != version else { return }
+        // A refresh started before our confirmed edit may still publish its row.
+        // Never move the editor's acknowledged version backwards.
+        guard row.value("version").int > version else { return }
         draft = try Self.decode(row); baseline = draft; version = row.value("version").int
+    }
+    func beginChat() async throws {
+        guard !chatEditing else { throw CloudFailure(code: "DRAFT_BUSY", message: "Another chat request is updating this draft.") }
+        chatEditing = true
+        do { try await flush() }
+        catch { chatEditing = false; throw error }
+    }
+    func endChat() {
+        chatEditing = false
+        do { try synchronize() } catch { self.error = error.localizedDescription }
     }
     func edited() {
         guard !closed else { return }
@@ -63,7 +76,10 @@ import Observation
                     guard !closed else { throw CancellationError() }
                     baseline = sent.draft; version = result.value("version").int; pending = nil
                     dirty = !Self.changes(from: baseline, to: draft).isEmpty
-                    try await library.refresh()
+                    library.scheduleRefresh()
+                } catch is CancellationError {
+                    // Closing the account/editor is cancellation, not a failed edit.
+                    throw CancellationError()
                 } catch {
                     if let failure = error as? CloudFailure {
                         if failure.code == "VERSION_CONFLICT" { requiresReview = true }

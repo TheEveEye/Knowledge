@@ -8,9 +8,10 @@ import type { AISelection, JSONObject, JSONValue, Model } from "@knowledge/contr
 import type { Database } from "./database.js";
 import { DomainError, completedOperation, expected, hash, invalidate, jsonArray, jsonObject, mutation, requireValue, stringValue } from "./core.js";
 import { aiConnections, aiRequests, jobs, operations, serverState } from "./schema.js";
+import { retainAIRejection } from "./ai-diagnostics.js";
 
 type Credentials = { accessToken: string; refreshToken: string; idToken: string; expiresAt: number; scopes: string[] };
-export interface AIResult { text: string; output: JSONValue[]; inputTokens: number; outputTokens: number }
+export interface AIResult { requestID: string; text: string; output: JSONValue[]; inputTokens: number; outputTokens: number }
 function secret(name: string): string | undefined { const file = process.env[name + "_FILE"]; return file ? readFileSync(file, "utf8").trim() : process.env[name]; }
 const jwks = createRemoteJWKSet(new URL("https://auth.openai.com/.well-known/jwks.json"), { timeoutDuration: 10_000 });
 export class CredentialVault {
@@ -209,7 +210,18 @@ export class AIService {
       if (schema) body.text = { format: { type: "json_schema", name: "knowledge_" + kind.replace(/\W/g, "_"), strict: true, schema } };
       if (tools?.length) { body.tools = tools; body.include = ["reasoning.encrypted_content"]; }
       const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", redirect: "error", signal: combined, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (!response.ok || !response.body) throw providerError(response.status);
+      if (!response.ok) {
+        const rejection = (await response.text()).slice(0, 100_000);
+        let code = "";
+        try { code = stringValue(jsonObject(jsonObject(JSON.parse(rejection)).error).code); } catch { /* Non-JSON provider response remains available privately. */ }
+        await retainAIRejection(userId, requestID, { kind, model: selection.model, reasoning: selection.reasoning,
+          status: response.status, providerCode: code, providerRequestID: response.headers.get("x-request-id"),
+          policyHash: hash(instructions), rejection, schema });
+        process.stderr.write(JSON.stringify({ event: "ai_provider_rejected", kind, requestID, status: response.status }) + "\n");
+        if (code === "invalid_json_schema") throw new DomainError("AI_SCHEMA_INVALID", "The server sent an unsupported AI response schema. This needs a server update; your saved work was kept.", 422);
+        throw providerError(response.status, code);
+      }
+      if (!response.body) throw providerError(503);
       let buffer = "", text = "", bytes = 0, completed: JSONObject | null = null;
       const finalized = new Map<number, JSONObject>(), textParts = new Map<string, string>();
       const decoder = new TextDecoder();
@@ -267,7 +279,7 @@ export class AIService {
       combined.throwIfAborted();
       const saved = await this.db.update(aiRequests).set({ status: "completed", inputTokens, outputTokens }).where(and(eq(aiRequests.id, requestID), eq(aiRequests.status, "running"), gt(aiRequests.leaseExpiresAt, new Date()))).returning({ id: aiRequests.id });
       if (!saved.length) throw new DomainError("AI_DISCONNECTED", "This request was cancelled or lost processing ownership.", 409);
-      return { text, output: finalOutput, inputTokens, outputTokens };
+      return { requestID, text, output: finalOutput, inputTokens, outputTokens };
     } catch (error) {
       await this.db.update(aiRequests).set({ status: "failed" }).where(and(eq(aiRequests.id, requestID), eq(aiRequests.status, "running")));
       if (error instanceof DomainError || signal.aborted) throw error;

@@ -170,7 +170,9 @@ import SwiftData
         do { try container.mainContext.delete(model: CloudCachedRecord.self); try container.mainContext.save(); try FileManager.default.removeItem(at: folder) }
         catch { message = "The account cache could not be fully removed." }
     }
-    private func scheduleRefresh() {
+    // Confirmed commands schedule a display refresh without making their success
+    // depend on a read that a newer server invalidation may cancel.
+    func scheduleRefresh() {
         let run = generation, connection = connectionGeneration
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
@@ -183,7 +185,7 @@ import SwiftData
             }
         }
     }
-    func select(_ id: UUID?) {
+    func select(_ id: UUID?, loadSnapshot: Bool = true) {
         navigationTask?.cancel()
         prefetchTask?.cancel(); prefetchTask = nil
         for other in Array(subjectReads.keys) where other != id { subjectReads.removeValue(forKey: other)?.task.cancel() }
@@ -191,8 +193,28 @@ import SwiftData
         activeSubjectID = id
         if let id, let snapshot = subjectSnapshots[id] { display(snapshot) }
         else { clearSubject() }
-        guard id != nil, ready else { return }
+        guard id != nil, ready, loadSnapshot else { return }
         navigationTask = Task { [weak self] in await self?.refreshForNavigation() }
+    }
+    /// Publish the requested draft before fetching the rest of its subject.
+    func loadDraft(_ id: String) async throws {
+        let run = generation, selected = activeSubjectID
+        guard isForeground, selected != nil else { throw CancellationError() }
+        let row = try await client.json("/api/v1/imports/" + id)
+        try Task.checkCancellation()
+        guard generation == run, isForeground, activeSubjectID == selected,
+              UUID(uuidString: row.text("subjectID")) == selected,
+              row.text("id") == id else { throw CancellationError() }
+        if let index = drafts.firstIndex(where: { $0.text("id") == id }) {
+            if drafts[index].value("version").int <= row.value("version").int { drafts[index] = row }
+        } else {
+            drafts.append(row)
+        }
+        // A snapshot from before this import existed cannot satisfy navigation.
+        if let selected, let snapshot = subjectSnapshots[selected],
+           !snapshot.drafts.contains(where: { $0.text("id") == id }) {
+            snapshotEpochs[selected] = nil
+        }
     }
     func refresh() async throws {
         try Task.checkCancellation()
@@ -256,7 +278,12 @@ import SwiftData
         loadedSubjectID = snapshot.subject.id
         entries = snapshot.entries
         sources = snapshot.sources.sorted { $0.text("createdAt") > $1.text("createdAt") }
-        drafts = snapshot.drafts.sorted { $0.text("updatedAt") > $1.text("updatedAt") }
+        // A direct draft read may have finished after this snapshot started.
+        let confirmedDrafts = Dictionary(drafts.filter { UUID(uuidString: $0.text("subjectID")) == snapshot.subject.id }.map { ($0.text("id"), $0) }, uniquingKeysWith: { first, _ in first })
+        drafts = snapshot.drafts.map { row in
+            if let confirmed = confirmedDrafts[row.text("id")], confirmed.value("version").int > row.value("version").int { return confirmed }
+            return row
+        }.sorted { $0.text("updatedAt") > $1.text("updatedAt") }
         jobs = snapshot.jobs; decisions = snapshot.decisions
         var dashboard = snapshot.recall.object
         if let materials = recallMaterials[snapshot.subject.id] { dashboard["materials"] = .array(materials) }
@@ -368,9 +395,17 @@ import SwiftData
             catch { if !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground { if error is URLError { state = .unavailable(error.localizedDescription) }; if let reportError { reportError(error.localizedDescription) } else { message = error.localizedDescription } } }
         }
     }
-    func refreshForNavigation() async {
+    func refreshForNavigation(reuseConfirmedSnapshot: Bool = false) async {
         if case .closed = state { return }
         guard isForeground, let selected = activeSubjectID, let subject = subjects.first(where: { $0.id == selected }) else { return }
+        // Draft review can reuse confirmed data while the event connection is healthy.
+        // Mutations, server events and reconnects invalidate the snapshot's epoch.
+        if reuseConfirmedSnapshot, ready,
+           let snapshot = subjectSnapshots[selected], snapshot.subject.version == subject.version,
+           snapshotEpochs[selected] == subjectEpochs[selected] {
+            display(snapshot)
+            return
+        }
         let run = generation
         do {
             let value = try await loadSubject(subject)

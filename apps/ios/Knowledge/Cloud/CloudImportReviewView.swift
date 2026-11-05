@@ -7,26 +7,30 @@ struct CloudImportReviewView: View {
     @State private var editor: CloudImportEditor?
     @State private var error: String?
     @State private var saving = false
+    @State private var pendingSaveJobID: String?
     @State private var rechecking = false
     @State private var showsChanges = false
-    @State private var showsModelPicker = false
     @State private var evidence: EvidencePresentation?
     private var draft: CloudJSON { library.drafts.first { $0.text("id") == importID } ?? .null }
-    private var sourceTitle: String { library.sources.first { $0.text("id") == draft.text("sourceID") }?.text("title") ?? "Notes" }
+    private var sourceTitle: String {
+        library.sources.first { $0.text("id") == draft.text("sourceID") }?.text("title")
+            ?? library.allDrafts.first { $0.text("id") == importID }?.value("sourceTitle").string ?? "Notes"
+    }
     private var job: CloudJSON? { library.currentJob(importID: importID) }
-    private var committing: Bool { saving || (job?.text("kind") == "prepareCommit" && ["queued", "running"].contains(job?.text("status") ?? "")) }
+    private var committing: Bool {
+        saving || pendingSaveJobID != nil || library.jobs.contains {
+            $0.text("importID") == importID && $0.text("kind") == "prepareCommit" && ["queued", "running"].contains($0.text("status"))
+        }
+    }
     var body: some View {
         Group {
             if draft.text("status") == "saved" {
-                VStack(spacing: 20) {
-                    ContentUnavailableView("Added to your knowledge", systemImage: "checkmark.circle")
-                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
-                }
+                ContentUnavailableView("Added to your knowledge", systemImage: "checkmark.circle")
             } else if draft.text("status") == "review", let editor {
                 List {
                     if let job, ["failed", "blocked", "paused"].contains(job.text("status")) { Section { CloudJobRow(job: job) } }
                     if library.decisions.contains(where: { $0.text("importID") == importID }) { Section { Button("Review changes") { showsChanges = true } } }
-                    CloudImportReviewSections(editor: editor, title: sourceTitle, onRecheck: recheck, isRechecking: rechecking, evidence: $evidence).disabled(committing || rechecking)
+                    CloudImportReviewSections(editor: editor, title: sourceTitle, onRecheck: recheck, isRechecking: rechecking, evidence: $evidence).disabled(committing || rechecking || editor.chatEditing)
                     if let message = editor.error ?? error {
                         Section {
                             Text(message).foregroundStyle(.red)
@@ -39,7 +43,7 @@ struct CloudImportReviewView: View {
                                 }
                                 Button("Reload saved draft") { do { try editor.reloadSaved() } catch { self.error = error.localizedDescription } }
                             } else {
-                                Button { Task { do { try await editor.flush() } catch { self.error = error.localizedDescription } } } label: {
+                                Button { Task { do { try await editor.flush() } catch is CancellationError { } catch { self.error = error.localizedDescription } } } label: {
                                     HStack { if editor.saving { ProgressView() }; Text("Retry saving changes") }
                                 }.disabled(editor.saving)
                             }
@@ -48,12 +52,13 @@ struct CloudImportReviewView: View {
                 }
             } else if let job {
                 ImportProgressView(progress: CloudImportProgress.make(job), model: job.value("selection").text("model"), title: sourceTitle,
-                    isRunning: ["queued", "running"].contains(job.text("status")), error: job.value("error").string, serverStatus: job.text("status"), onChooseModel: { showsModelPicker = true })
+                    isRunning: ["queued", "running"].contains(job.text("status")), error: job.value("error").string, serverStatus: job.text("status"))
                     .toolbar { ToolbarItem(placement: .primaryAction) { CloudImportJobControls(job: job) } }
             } else if let error {
                 ContentUnavailableView("Draft unavailable", systemImage: "doc.questionmark", description: Text(error))
             } else { ProgressView("Loading your draft…") }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(draft.text("status") == "review" ? "Review import" : "Import")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaPadding(.bottom, draft.text("status") == "saved" ? 0 : 68)
@@ -64,28 +69,43 @@ struct CloudImportReviewView: View {
         }
         .preference(key: ImportChatJobKey.self, value: draft.text("status") == "saved" ? nil : UUID(uuidString: importID))
         .toolbar {
-            if draft.text("status") != "saved" {
+            if draft.text("status") == "saved" {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
+                }
+            } else {
                 ToolbarItem(placement: .topBarTrailing) {
-                    ImportDraftActionsMenu(onDiscard: discard, isDiscarding: library.busyActions.contains("deleteDraft-" + importID)).disabled(committing || rechecking || library.busyActions.contains("deleteDraft-" + importID))
+                    ImportDraftActionsMenu(onDiscard: discard, isDiscarding: library.busyActions.contains("deleteDraft-" + importID)).disabled(committing || rechecking || editor?.chatEditing == true || library.busyActions.contains("deleteDraft-" + importID))
                 }
             }
             if draft.text("status") == "review" {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: save) {
                         HStack { if committing { ProgressView() } else { Label("Save", systemImage: "checkmark").labelStyle(.iconOnly) } }
-                    }.accessibilityLabel("Save").buttonStyle(.borderedProminent).disabled(committing || rechecking || editor == nil || editor?.requiresReview == true)
+                    }.accessibilityLabel("Save").buttonStyle(.borderedProminent).disabled(committing || rechecking || editor == nil || editor?.requiresReview == true || editor?.chatEditing == true)
                 }
             }
         }
-        .task { await library.refreshForNavigation(); loadEditor() }
-        .onChange(of: library.drafts) { loadEditor() }
+        .task(id: importID) {
+            loadEditor()
+            do {
+                try await library.loadDraft(importID)
+                error = nil
+                loadEditor()
+            } catch is CancellationError { return }
+            catch { self.error = error.localizedDescription }
+            // The draft is already visible; supporting library data loads afterward.
+            await library.refreshForNavigation(reuseConfirmedSnapshot: true)
+            loadEditor()
+        }
+        .onChange(of: library.drafts) { loadEditor(); reconcileSaveJob() }
+        .onChange(of: library.jobs) { reconcileSaveJob() }
         .onDisappear {
             guard let editor, editor.dirty else { return }
-            Task { do { try await editor.flush() } catch { editor.error = error.localizedDescription } }
+            Task { do { try await editor.flush() } catch is CancellationError { } catch { editor.error = error.localizedDescription } }
         }
         .sheet(isPresented: $showsChanges) { CloudImportChangesView(importID: importID) }
         .sheet(item: $evidence) { EvidenceView(presentation: $0).cloudConnectionGate() }
-        .sheet(isPresented: $showsModelPicker) { if let job { CloudImportJobModelView(job: job) } }
     }
     private func discard() {
         let version = draft.value("version")
@@ -98,27 +118,38 @@ struct CloudImportReviewView: View {
         do { if editor == nil { editor = try library.importEditor(for: importID) }; try editor?.synchronize() }
         catch { self.error = error.localizedDescription }
     }
+    private func reconcileSaveJob() {
+        guard let pendingSaveJobID else { return }
+        if draft.text("status") == "saved" || library.jobs.contains(where: { $0.text("id") == pendingSaveJobID }) {
+            self.pendingSaveJobID = nil
+        }
+    }
     private func save() {
-        guard let editor, !committing, !rechecking else { return }; saving = true; error = nil
+        guard let editor, !committing, !rechecking, !editor.chatEditing else { return }; saving = true; error = nil
         Task {
             defer { saving = false }
             do {
                 try await editor.flush()
                 let decision = library.decisions.first { $0.text("importID") == importID }?.value("state")
-                _ = try await library.mutate("/api/v1/imports/\(importID)/save", fields: ["expectedVersion": .number(editor.version), "expectedSubjectVersion": decision?.value("subjectVersion") ?? .null, "choices": .object([:])])
-                try await library.refresh()
-            } catch { self.error = error.localizedDescription }
+                let result = try await library.mutate("/api/v1/imports/\(importID)/save", fields: ["expectedVersion": .number(editor.version), "expectedSubjectVersion": decision?.value("subjectVersion") ?? .null, "choices": .object([:])])
+                // The command queues work; a superseded refresh may return before that job is displayed.
+                pendingSaveJobID = result.value("jobID").string
+                reconcileSaveJob()
+                library.scheduleRefresh()
+            } catch is CancellationError { }
+            catch { self.error = error.localizedDescription }
         }
     }
     private func recheck() {
-        guard let editor, !committing, !rechecking else { return }; rechecking = true; error = nil
+        guard let editor, !committing, !rechecking, !editor.chatEditing else { return }; rechecking = true; error = nil
         Task {
             defer { rechecking = false }
             do {
                 try await editor.flush()
                 _ = try await library.mutate("/api/v1/imports/\(importID)/recheck", fields: ["expectedVersion": .number(editor.version), "selection": library.selection(for: "import").json])
-                try await library.refresh()
-            } catch { self.error = error.localizedDescription }
+                library.scheduleRefresh()
+            } catch is CancellationError { }
+            catch { self.error = error.localizedDescription }
         }
     }
 }

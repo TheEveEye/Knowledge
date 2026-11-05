@@ -1,6 +1,8 @@
 import { z } from "zod";
 const text = z.string().min(1), nullable = z.string().nullable(), option = z.strictObject({ id: text, text });
-export const answerInputSchema = z.discriminatedUnion("kind", [
+// Each branch has a distinct literal kind, so anyOf retains unambiguous parsing
+// while emitting the provider-supported union instead of JSON Schema oneOf.
+export const answerInputSchema = z.union([
   z.strictObject({ kind: z.literal("text") }),
   z.strictObject({ kind: z.literal("choice"), options: z.array(option).min(3).max(5), correctOptionID: text }),
   z.strictObject({ kind: z.literal("number"), unit: z.string(), expectedValue: z.number(), tolerance: z.number().nonnegative() }),

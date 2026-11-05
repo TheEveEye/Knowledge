@@ -9,6 +9,8 @@ import Observation
     var canEditPendingAnswer: Bool { get }
     var hasStaleInput: Bool { get }
     var requestLabel: String { get }
+    var requestAction: String? { get }
+    var canRetryRequest: Bool { get }
     func reloadSession()
     func setDraft(_ value: String)
     func setResponse(_ value: RecallResponse)
@@ -29,6 +31,8 @@ import Observation
 }
 extension RecallSessionPresenting {
     var hasStaleInput: Bool { false }
+    var requestAction: String? { nil }
+    var canRetryRequest: Bool { state.episode?.phase.hasPrefix("awaiting") == true }
     var requestLabel: String { state.episode?.pendingOperation == "explain" ? "Preparing an explanation…" : "Checking your answer…" }
     func reloadSession() { }
     func submit() { submit(knownUnknown: false) }

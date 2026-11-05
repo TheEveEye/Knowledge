@@ -102,8 +102,12 @@ struct CloudLibraryView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section("Subjects") {
+                    if library.subjects.isEmpty {
+                        ContentUnavailableView("Build your knowledge", systemImage: "books.vertical",
+                            description: Text("Create a subject, then import notes to turn them into concepts and connections."))
+                        Button("Create a subject", systemImage: "plus") { newSubject = true }
+                    }
                     ForEach(library.subjects) { subject in NavigationLink(value: Selection.subject(subject.id)) { Label(subject.name, systemImage: "book.closed") } }
-                    if library.subjects.isEmpty { Button("Create a subject", systemImage: "plus") { newSubject = true } }
                 }
                 if !library.allDrafts.isEmpty {
                     Section("Draft imports") {
@@ -130,7 +134,7 @@ struct CloudLibraryView: View {
                     if library.activeSubjectID == id, library.loadedSubjectID == id, let subject = library.subjects.first(where: { $0.id == id }) { CloudSubjectView(subject: subject, search: $search) }
                     else { ProgressView("Loading subject…").frame(maxWidth: .infinity, maxHeight: .infinity) }
                 case .importJob(let id, let subjectID):
-                    if library.activeSubjectID == subjectID, library.loadedSubjectID == subjectID { NavigationStack { CloudImportReviewView(importID: id.uuidString.lowercased()) } }
+                    if library.activeSubjectID == subjectID { NavigationStack { CloudImportReviewView(importID: id.uuidString.lowercased()) } }
                     else { ProgressView("Loading your draft…").frame(maxWidth: .infinity, maxHeight: .infinity) }
                 case nil: NavigationStack { ContentUnavailableView("Choose a subject", systemImage: "books.vertical") }
                 }
@@ -164,7 +168,9 @@ struct CloudLibraryView: View {
         }
         .onChange(of: selection) {
             chatExpanded = false; search = ""
-            if library.activeSubjectID != selectedSubjectID { library.select(selectedSubjectID) }
+            if case .importJob = selection {
+                if library.activeSubjectID != selectedSubjectID { library.select(selectedSubjectID, loadSnapshot: false) }
+            } else { library.select(selectedSubjectID) }
         }
         .onChange(of: library.activeSubjectID) { _, id in
             if selectedSubjectID != id { selection = id.map { .subject($0) } }
@@ -176,6 +182,10 @@ struct CloudLibraryView: View {
     }
 }
 struct CloudSubjectView: View {
+    private struct ImportDestination: Hashable {
+        let id: String
+    }
+
     let subject: CloudSubject
     @Binding var search: String
     @Environment(CloudLibraryStore.self) private var library
@@ -184,6 +194,7 @@ struct CloudSubjectView: View {
     @State private var history = false
     @State private var path = NavigationPath()
     @State private var expandedTopics: Set<UUID> = []
+    private var expansionKey: String { "knowledge.expandedTopics." + library.client.userID.uuidString.lowercased() + "." + subject.id.uuidString.lowercased() }
     @State private var practiceTopic: TopicRecord?
     @State private var pendingPractice: PracticeDestination?
     private var concepts: [CloudEntity] { library.entries.filter { $0.kind == "concept" && !$0.isRetired }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending } }
@@ -208,7 +219,7 @@ struct CloudSubjectView: View {
                 if !library.drafts.filter({ $0.text("status") != "saved" }).isEmpty {
                     Section("Draft imports") {
                         ForEach(library.drafts.filter { $0.text("status") != "saved" }, id: \.cloudID) { draft in
-                            NavigationLink { CloudImportReviewView(importID: draft.text("id")) } label: {
+                            NavigationLink(value: ImportDestination(id: draft.text("id"))) {
                                 CloudImportLabel(draft: draft)
                             }
                             .cloudDraftDiscard(draft)
@@ -280,7 +291,14 @@ struct CloudSubjectView: View {
                 if destination.method == .recall { CloudRecallView(subjectID: subject.id, topicID: destination.topicID) }
                 else { Rectangle().fill(.background.secondary).ignoresSafeArea().navigationTitle(destination.method.rawValue) }
             }
+            .navigationDestination(for: ImportDestination.self) { destination in
+                CloudImportReviewView(importID: destination.id)
+            }
         }
+        .onAppear {
+            expandedTopics = Set((UserDefaults.standard.string(forKey: expansionKey) ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+        }
+        .onChange(of: expandedTopics) { _, ids in UserDefaults.standard.set(ids.map { $0.uuidString.lowercased() }.sorted().joined(separator: ","), forKey: expansionKey) }
         .anchorPreference(key: SubjectChatBoundsKey.self, value: .bounds) { SubjectChatPlacement(bounds: $0, isSubjectRoot: path.isEmpty) }
     }
 }
@@ -331,6 +349,13 @@ struct CloudMoveConceptTopicView: View {
         NavigationStack {
             List {
                 Section { Text(concept.title).font(.headline) }
+                if version != library.activeSubject?.version {
+                    Section("Current saved placement") {
+                        let placement = library.entries.first { $0.kind == "placement" && !$0.isRetired && $0.text("conceptID").lowercased() == concept.id.uuidString.lowercased() }
+                        Text(TopicTree.path(for: placement.flatMap { UUID(uuidString: $0.text("topicID")) }, topics: topics))
+                        Button("Review latest placement") { version = library.activeSubject?.version ?? version }
+                    }
+                }
                 Section("Choose a topic") {
                     choice("Unsorted", id: nil)
                     ForEach(topics.sorted { TopicTree.path(for: $0.id, topics: topics).localizedStandardCompare(TopicTree.path(for: $1.id, topics: topics)) == .orderedAscending }) { topic in
@@ -347,7 +372,7 @@ struct CloudMoveConceptTopicView: View {
         CloudActionButton(name, key: "move-" + concept.id.uuidString + "-" + (id?.uuidString ?? "unsorted")) {
             _ = try await library.mutate("/api/v1/subjects/\(concept.subjectID.uuidString.lowercased())/placements/\(concept.id.uuidString.lowercased())", method: "PUT", fields: ["expectedVersion": .number(version), "topicID": id.map { .string($0.uuidString.lowercased()) } ?? .null, "locked": .bool(true)])
             dismiss()
-        }.disabled(library.busyActions.contains { $0.hasPrefix("move-" + concept.id.uuidString + "-") })
+        }.disabled(version != library.activeSubject?.version || library.busyActions.contains { $0.hasPrefix("move-" + concept.id.uuidString + "-") })
     }
 }
 struct CloudTopicBranch: View {
@@ -380,14 +405,17 @@ struct CloudTopicBranch: View {
         .alert("Rename topic", isPresented: $renaming) {
             TextField("Topic name", text: $name)
             Button("Cancel", role: .cancel) { }
-            Button("Save") {
+            Button(version == library.activeSubject?.version ? "Save" : "Save using latest version") {
                 guard let subjectID = library.activeSubjectID else { return }
-                let input = name, expectedVersion = version
+                let input = name, expectedVersion = library.activeSubject?.version ?? version
                 library.perform("rename-topic-" + node.id.uuidString, reportError: { renameError = $0; renaming = true }) {
                     _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/entries/\(node.id.uuidString.lowercased())", method: "PATCH", fields: ["expectedVersion": .number(expectedVersion), "fields": .object(["name": .string(input)])])
                 }
             }
-        } message: { if let renameError { Text(renameError) } }
+        } message: {
+            if let renameError { Text(renameError) }
+            if version != library.activeSubject?.version { Text("Current saved name: " + (library.entries.first { $0.id == node.id }?.title ?? node.topic.name)) }
+        }
     }
 }
 struct CloudEntryView: View {
@@ -474,14 +502,15 @@ struct CloudEntryView: View {
 struct CloudActionButton: View {
     let title: String
     let key: String
+    var role: ButtonRole? = nil
     var systemImage: String? = nil
     var toolbarProgress = false
     let action: @MainActor @Sendable () async throws -> Void
     @Environment(CloudLibraryStore.self) private var library
     @State private var failure: String?
-    init(_ title: String, key: String, systemImage: String? = nil, toolbarProgress: Bool = false, action: @escaping @MainActor @Sendable () async throws -> Void) { self.title = title; self.key = key; self.systemImage = systemImage; self.toolbarProgress = toolbarProgress; self.action = action }
+    init(_ title: String, key: String, role: ButtonRole? = nil, systemImage: String? = nil, toolbarProgress: Bool = false, action: @escaping @MainActor @Sendable () async throws -> Void) { self.title = title; self.key = key; self.role = role; self.systemImage = systemImage; self.toolbarProgress = toolbarProgress; self.action = action }
     var body: some View {
-        Button { library.perform(key, reportError: { failure = $0 }) { try await action() } } label: {
+        Button(role: role) { library.perform(key, reportError: { failure = $0 }) { try await action() } } label: {
             HStack {
                 if library.busyActions.contains(key) { ProgressView() }
                 if !toolbarProgress || !library.busyActions.contains(key) {

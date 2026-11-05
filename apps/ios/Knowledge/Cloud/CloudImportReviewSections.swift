@@ -7,6 +7,7 @@ struct CloudImportReviewSections: View {
     var isRechecking = false
     @Binding var evidence: EvidencePresentation?
     @Environment(CloudLibraryStore.self) private var library
+    private var existingWarnings: [CloudJSON] { library.drafts.first { $0.text("id") == editor.importID }?.value("draft").value("existingFactReviews").array ?? [] }
     private var rawEntries: [CloudJSON] { library.drafts.first { $0.text("id") == editor.importID }?.value("draft").value("entries").array ?? [] }
     private var topics: [TopicRecord] {
         let values = library.entries.filter { $0.kind == "topic" && !$0.isRetired }.map { ($0.id, $0.fields) }
@@ -33,7 +34,7 @@ struct CloudImportReviewSections: View {
         editor.draft.concepts.filter { topic.conceptIDs.contains($0.id) && $0.reviewReason != nil }.count
             + editor.draft.facts.filter { topic.conceptIDs.contains($0.conceptID) && $0.reviewReason != nil }.count
     }
-    private var issues: Int { editor.draft.concepts.filter { $0.reviewReason != nil }.count + editor.draft.facts.filter { $0.reviewReason != nil }.count + editor.draft.connections.filter { $0.reviewReason != nil }.count + editor.draft.passagesNeedingReview.count }
+    private var issues: Int { editor.draft.concepts.filter { $0.reviewReason != nil }.count + editor.draft.facts.filter { $0.reviewReason != nil }.count + editor.draft.connections.filter { $0.reviewReason != nil }.count + editor.draft.passagesNeedingReview.count + existingWarnings.filter { !$0.value("reviewed").flag }.count }
     var body: some View {
         Group {
             Section {
@@ -63,6 +64,23 @@ struct CloudImportReviewSections: View {
                     ForEach(suggestions) { concept in
                         NavigationLink { Form { conceptFields(concept) } } label: {
                             VStack(alignment: .leading, spacing: 4) { Text(concept.name); Text(concept.resolutionSuggestion?.rationale ?? placement(concept).reason ?? "Topic suggestion").font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                        }
+                    }
+                }
+            }
+            if !existingWarnings.isEmpty {
+                Section("Existing facts to revisit") {
+                    ForEach(Array(existingWarnings.enumerated()), id: \.offset) { _, warning in
+                        let fact = library.entries.first { $0.id.uuidString.lowercased() == warning.text("factID").lowercased() }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(fact?.text("statement") ?? "Saved fact unavailable").font(.headline)
+                            ReviewFlag(text: warning.text("reason"))
+                            if let fact { Button("View source") { evidence = fact.evidencePresentation }.buttonStyle(.borderless) }
+                            CloudActionButton(warning.value("reviewed").flag ? "Reopen review" : "Mark as reviewed", key: "review-fact-" + warning.text("factID")) {
+                                try await editor.flush()
+                                _ = try await library.mutate("/api/v1/imports/\(editor.importID)/existing-facts/\(warning.text("factID"))/review", fields: ["expectedVersion": .number(editor.version), "reviewed": .bool(!warning.value("reviewed").flag)])
+                                try await library.refresh(); try editor.synchronize()
+                            }.buttonStyle(.borderless)
                         }
                     }
                 }

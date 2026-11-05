@@ -17,7 +17,7 @@ struct CloudHistoryView: View {
             }
         }.navigationTitle("History")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .task { do { revisions = try await library.client.pages(CloudJSON.self, path: "/api/v1/subjects/\(subjectID.uuidString.lowercased())/history").filter { $0.text("origin") != "baseline" }.sorted { $0.text("createdAt") > $1.text("createdAt") } } catch { self.error = error.localizedDescription } }
+            .task(id: library.invalidationEpoch) { do { revisions = try await library.client.pages(CloudJSON.self, path: "/api/v1/subjects/\(subjectID.uuidString.lowercased())/history").filter { $0.text("origin") != "baseline" }.sorted { $0.text("createdAt") > $1.text("createdAt") }; error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
 }
 struct CloudRevisionView: View {
@@ -31,14 +31,29 @@ struct CloudRevisionView: View {
     @State private var error: String?
     @State private var evidence: EvidencePresentation?
     @State private var confirmUndo = false
+    private var undoJob: CloudJSON { revision.value("undoJob") }
+    private var undoPending: Bool { ["queued", "running", "paused", "blocked"].contains(undoJob.text("status")) }
+    private var undoKey: String { "undo-import-" + revisionID }
+    private var isUndone: Bool { revision.value("isUndone").flag }
     var body: some View {
         List {
             Section {
                 if let date = CloudDates.date(revision.text("createdAt")) { Text(date.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary) }
                 Text(revision.text("summary"))
-                if revision.text("origin") == "import" {
-                    Button(role: .destructive) { confirmUndo = true } label: { HStack { if library.busyActions.contains("undoImport") { ProgressView() }; Text("Undo import") } }
-                        .disabled(library.busyActions.contains("undoImport") || (!conflicts.isEmpty && conflicts.contains { choices[$0.text("id")] == nil }))
+                if isUndone { Label("Import undone", systemImage: "checkmark.circle") }
+                else if undoPending {
+                    Button {
+                        library.perform(undoKey) { try await library.controlJob(undoJob.text("id"), action: "resume", expectedSelection: .null); try await refreshRevision() }
+                    } label: {
+                        HStack {
+                            if ["queued", "running"].contains(undoJob.text("status")) || library.busyActions.contains(undoKey) { ProgressView() }
+                            Text(["paused", "blocked"].contains(undoJob.text("status")) ? "Resume undo" : "Preparing undo…")
+                        }
+                    }.disabled(!["paused", "blocked"].contains(undoJob.text("status")) || library.busyActions.contains(undoKey))
+                }
+                else if revision.text("origin") == "import" {
+                    Button(role: .destructive) { confirmUndo = true } label: { HStack { if library.busyActions.contains(undoKey) { ProgressView() }; Text("Undo import") } }
+                        .disabled(library.busyActions.contains(undoKey) || (!conflicts.isEmpty && conflicts.contains { choices[$0.text("id")] == nil }))
                 }
             }
             ForEach(["concept", "fact", "connection", "topic", "placement"], id: \.self) { kind in
@@ -69,28 +84,33 @@ struct CloudRevisionView: View {
                 }
             }
             if !conflicts.isEmpty, reviewVersion.int != library.activeSubject?.version {
-                CloudActionButton("Review latest changes", key: "reviewUndo") { try await library.refresh(); choices = [:]; conflicts = []; reviewVersion = .null }
+                CloudActionButton("Review latest changes", key: "reviewUndo") { try await library.refresh(); choices = [:]; try await refreshRevision() }
             }
             if let error { Text(error).foregroundStyle(.red) }
         }.navigationTitle(revision.text("title"))
             .navigationBarTitleDisplayMode(.inline)
             .sheet(item: $evidence) { EvidenceView(presentation: $0).cloudConnectionGate() }
             .confirmationDialog("Undo this import?", isPresented: $confirmUndo, titleVisibility: .visible) {
-                Button("Undo import", role: .destructive) { library.perform("undoImport") {
+                Button("Undo import", role: .destructive) { library.perform(undoKey) {
                     guard let subject = library.activeSubject else { return }
                     let response = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)/undo", fields: ["expectedVersion": reviewVersion == .null ? .number(subject.version) : reviewVersion, "choices": .object(choices)])
-                    let jobID = response.text("jobID")
-                    for _ in 0..<60 {
-                        let job = try await library.client.json("/api/v1/jobs/" + jobID)
-                        if job.text("status") == "completed" { let result = job.value("progress").value("result"); conflicts = result.value("conflicts").array; reviewVersion = result.value("version"); return }
-                        if ["failed", "blocked", "cancelled"].contains(job.text("status")) { throw CloudFailure(code: "UNDO_FAILED", message: job.text("error")) }
-                        try await Task.sleep(for: .seconds(1))
-                    }
-                    throw CloudFailure(code: "UNDO_PENDING", message: "Undo preparation is still running. Open this revision again to review its result.")
+                    _ = response
+                    try await refreshRevision()
                 } }
             } message: { Text("Later edits and information used by later notes will be kept.") }
-            .task { do { revision = try await library.client.json("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)"); let decision = library.decisions.first { $0.value("state").text("revisionID") == revisionID }?.value("state") ?? .null; conflicts = decision.value("conflicts").array; reviewVersion = decision.value("subjectVersion") } catch { self.error = error.localizedDescription } }
+            .task(id: library.invalidationEpoch) { do { try await refreshRevision() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
+    private func refreshRevision() async throws {
+        let latest = try await library.client.json("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)")
+        try Task.checkCancellation()
+        revision = latest
+        let decision = latest.value("undoDecision")
+        let nextConflicts = decision.value("conflicts").array
+        if nextConflicts != conflicts || reviewVersion != decision.value("subjectVersion") { choices = [:] }
+        conflicts = nextConflicts; reviewVersion = decision.value("subjectVersion")
+        error = latest.value("undoJob").value("error").string
+    }
+
     private func title(_ record: CloudJSON) -> String {
         let f = record.value("fields")
         if record.text("kind") == "placement" { return revision.value("names").value(f.text("conceptID")).string ?? library.entries.first { $0.id.uuidString.lowercased() == f.text("conceptID").lowercased() }?.title ?? "Concept organization" }

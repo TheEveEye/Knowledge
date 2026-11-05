@@ -232,13 +232,20 @@ export class LibraryService {
     const hashes = Object.entries(r.manifest).filter(([key]) => ids.has(key.slice(key.indexOf("/") + 1))).map(([, hash]) => hash);
     const versions = hashes.length ? await this.db.select().from(entityVersions).where(and(eq(entityVersions.userId, userId), inArray(entityVersions.hash, hashes))) : [];
     const names = Object.fromEntries(versions.filter(v => v.payload.subjectID === subjectID && typeof v.payload.fields.name === "string").map(v => [v.payload.id, stringValue(v.payload.fields.name)]));
-    return { id: r.id, subjectID: r.subjectId, parentID: r.parentId, operationID: r.operationId, origin: r.origin, title: r.title, summary: r.summary, createdAt: r.createdAt.toISOString(), changes: r.changes, undoesRevisionID: r.undoesRevisionId, names };
+    const undone = (await this.db.select({ id: revisions.id }).from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), eq(revisions.undoesRevisionId, revisionID))).limit(1))[0];
+    const undoJob = (await this.db.select().from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.subjectId, subjectID), eq(jobs.kind, "prepareUndo"), sql`${jobs.input}->>'revisionID'=${revisionID}`)).orderBy(desc(jobs.updatedAt), desc(jobs.id)).limit(1))[0];
+    const undoDecision = (await this.db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userId), eq(pendingDecisions.subjectId, subjectID), sql`${pendingDecisions.state}->>'revisionID'=${revisionID}`)).limit(1))[0];
+    return { id: r.id, subjectID: r.subjectId, parentID: r.parentId, operationID: r.operationId, origin: r.origin, title: r.title, summary: r.summary, createdAt: r.createdAt.toISOString(), changes: r.changes, undoesRevisionID: r.undoesRevisionId, names,
+      isUndone: !!undone, undoDecision: undoDecision?.state ?? null, undoJob: undoJob ? { id: undoJob.id, version: undoJob.version, status: undoJob.status, error: undoJob.error, progress: undoJob.progress } : null };
+
   }
   async undo(userId: string, subjectID: string, revisionID: string, operationID: string, version: number, choices: Record<string, "current" | "incoming"> = {}) {
     return mutation(this.db, userId, operationID, { action: "undo", subjectID, revisionID, version, choices }, async tx => {
       const subject = await ownedSubject(tx, userId, subjectID, true); expected(subject.version, version);
       const revision = await this.revision(userId, subjectID, revisionID);
       if (revision.origin !== "import") throw new DomainError("INVALID_UNDO", "Only saved imports can be undone.");
+      if (revision.isUndone) return { undone: true };
+      if (revision.undoJob && ["queued", "running", "paused", "blocked"].includes(revision.undoJob.status)) return { jobID: revision.undoJob.id };
       const job = requireValue((await tx.insert(jobs).values({ userId, subjectId: subjectID, kind: "prepareUndo", input: { revisionID, operationID, version, choices } }).returning())[0]);
       await invalidate(tx, userId, "jobs", subjectID, job.version); return { jobID: job.id };
     });

@@ -11,17 +11,45 @@ import { imports, jobs, operations, passages, pendingDecisions, preferences, sou
 import { removeUnusedImportSource } from "./source-lifecycle.js";
 import { policies } from "./policies.js";
 import { semanticUpdates } from "./semantic.js";
-import { asJSON, connectionKinds, extractionSchema, factKinds, reconciliationSchema, selectionSchema, structured, topicAssignmentSchema, topicOutlineSchema, type Extraction } from "./structured.js";
+import { asJSON, connectionKinds, extractionSchema, factKinds, reconciliationBatchSchema, reconciliationSchema, selectionSchema, structured, topicAssignmentBatchSchema, topicOutlineSchema, type Extraction } from "./structured.js";
 import { batchContext, batchPlan, extractionProgress, plannedBatches, sourceBatches, streamedConcepts } from "./import-batches.js";
 import { repairPendingImportSource } from "./import-source-repair.js";
 import { FileStore } from "./files.js";
+import { affectedEntries, inferenceInput, sourceReviewBatch, type ReviewPassage, type SourceReviewIssue, type SourceReviewVerdict } from "./import-source-review.js";
 
 export interface DraftEntry { record: LibraryEntity; selected: boolean; reviewReason: string | null; mergeTargetID: string | null; acceptMerge: boolean; original: JSONObject; mergeDecisionLocked?: boolean }
-export interface DraftState { entries: DraftEntry[]; coverage: JSONValue[]; updates: JSONValue[]; reviewNotes: string[]; reviewedPassageIDs?: string[] }
+export interface DraftState { entries: DraftEntry[]; coverage: JSONValue[]; updates: JSONValue[]; reviewNotes: string[]; reviewedPassageIDs?: string[]; existingFactReviews?: JSONValue[] }
 const draftJSON = (draft: DraftState) => asJSON(draft) as JSONObject;
 export const importDTO = (row: typeof imports.$inferSelect) => ({ id: row.id, subjectID: row.subjectId, sourceID: row.sourceId, baseRevisionID: row.baseRevisionId, version: row.version, status: row.status, draft: row.draft, checkpoint: row.checkpoint, selection: row.selection, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
 const entry = (subjectID: string, kind: LibraryEntity["kind"], id: string, fields: JSONObject, reviewReason: string | null = null): DraftEntry => ({ record: { id, subjectID, kind, fields, protectedFields: [], isRetired: false, redirectID: null }, selected: !reviewReason, reviewReason, mergeTargetID: null, acceptMerge: false, original: structuredClone(fields) });
 function unique(ids: string[], label: string) { if (new Set(ids).size !== ids.length) throw new DomainError("INVALID_EXTRACTION", `Duplicate ${label} IDs.`); }
+// Reconciliation/review can exclude a prerequisite after extraction selected its
+// dependents. Preserve that exclusion and cascade it through facts and connections.
+function excludeUnavailableDependents(draft: DraftState, saved: LibraryEntity[]): boolean {
+  const available = new Map(saved.filter(r => !r.isRetired).map(r => [r.id, r.kind]));
+  const entries = new Map(draft.entries.map(e => [e.record.id, e]));
+  const has = (id: JSONValue | undefined, kind: LibraryEntity["kind"]) => {
+    if (typeof id !== "string") return false;
+    const incoming = entries.get(id);
+    return incoming ? incoming.selected && incoming.record.kind === kind : available.get(id) === kind;
+  };
+  let changed = false, pending = true;
+  while (pending) {
+    pending = false;
+    for (const e of draft.entries) {
+      if (!e.selected) continue;
+      const { kind, fields } = e.record;
+      const unavailable = (kind === "fact" || kind === "placement") ? !has(fields.conceptID, "concept")
+        : kind === "connection" && (!has(fields.fromConceptID, "concept") || !has(fields.toConceptID, "concept") || jsonArray(fields.supportingFactIDs).some(id => !has(id, "fact")));
+      if (unavailable) { e.selected = false; changed = true; pending = true; }
+    }
+  }
+  if (changed) {
+    const note = "Entries requiring excluded or unavailable concepts or supporting facts were excluded. Review the selection before saving.";
+    if (!draft.reviewNotes.includes(note)) draft.reviewNotes.push(note);
+  }
+  return changed;
+}
 function reconciliationCoverage(value: z.infer<typeof reconciliationSchema>, conceptIDs: string[]) {
   const received = value.decisions.map(d => d.conceptID), required = new Set(conceptIDs);
   const missing = conceptIDs.filter(id => !received.includes(id)), unexpected = received.filter(id => !required.has(id));
@@ -37,6 +65,19 @@ function reconciliationReferences(value: z.infer<typeof reconciliationSchema>, b
     ...draft.filter(e => e.selected && e.record.kind === "concept" && !e.record.isRetired).map(e => e.record.id)]);
   const merges = new Map(draft.filter(e => e.selected && e.record.kind === "concept" && e.acceptMerge && e.mergeTargetID)
     .map(e => [e.record.id, e.mergeTargetID!]));
+  // Earlier batches may already have made this proposed target an alias of the
+  // current concept. Resolve accepted aliases before overlaying new decisions;
+  // merging back into that alias means retaining the canonical concept, not a cycle.
+  for (const d of value.decisions) {
+    if (!d.mergeWithID || d.mergeWithID === d.conceptID) continue;
+    let target = d.mergeWithID;
+    const seen = new Set<string>();
+    while (merges.has(target)) {
+      if (seen.has(target)) throw new DomainError("INVALID_MERGE", "Previously accepted merge decisions contain a cycle.");
+      seen.add(target); target = merges.get(target)!;
+    }
+    d.mergeWithID = target === d.conceptID ? null : target;
+  }
   for (const d of value.decisions) {
     if (d.mergeWithID === d.conceptID) throw new DomainError("INVALID_MERGE", `Concept ${d.conceptID} cannot merge into itself. Use mergeWithID=null for a canonical concept kept separate.`);
     if (d.mergeWithID && !available.has(d.mergeWithID)) throw new DomainError("INVALID_MERGE", `Merge target ${d.mergeWithID} is unavailable. Use a supplied live concept from this subject or the selected draft, including this batch, or use mergeWithID=null.`);
@@ -81,7 +122,22 @@ function state(value: JSONObject): DraftState {
     const e = jsonObject(raw); return { record: jsonObject(e.record) as unknown as LibraryEntity, selected: e.selected === true, reviewReason: typeof e.reviewReason === "string" ? e.reviewReason : null,
       mergeTargetID: typeof e.mergeTargetID === "string" ? e.mergeTargetID : null, acceptMerge: e.acceptMerge === true, original: jsonObject(e.original), mergeDecisionLocked: e.mergeDecisionLocked === true };
   });
-  return { entries, coverage: jsonArray(value.coverage), updates: jsonArray(value.updates), reviewNotes: jsonArray(value.reviewNotes).filter((s): s is string => typeof s === "string"), reviewedPassageIDs: jsonArray(value.reviewedPassageIDs).filter((s): s is string => typeof s === "string") };
+  return { entries, existingFactReviews: jsonArray(value.existingFactReviews), coverage: jsonArray(value.coverage), updates: jsonArray(value.updates), reviewNotes: jsonArray(value.reviewNotes).filter((s): s is string => typeof s === "string"), reviewedPassageIDs: jsonArray(value.reviewedPassageIDs).filter((s): s is string => typeof s === "string") };
+}
+function retainFactReviews(draft: DraftState, reviews: { factID: string; reason: string }[], current: LibraryEntity[]): boolean {
+  let added = false;
+  for (const review of reviews) {
+    const incoming = draft.entries.find(e => e.record.kind === "fact" && e.record.id === review.factID);
+    if (incoming) {
+      if (!incoming.reviewReason) { incoming.reviewReason = review.reason; incoming.selected = false; added = true; }
+    } else if (current.some(e => e.kind === "fact" && e.id === review.factID && !e.isRetired)) {
+      draft.existingFactReviews ??= [];
+      if (!draft.existingFactReviews.some(raw => jsonObject(raw).factID === review.factID)) {
+        draft.existingFactReviews.push({ factID: review.factID, reason: review.reason, reviewed: false }); added = true;
+      }
+    }
+  }
+  return added;
 }
 export class ImportService {
   constructor(readonly db: Database, readonly ai: AIService, readonly queue: JobQueue) {}
@@ -144,6 +200,18 @@ export class ImportService {
       await invalidate(tx, userId, "imports", row.subjectId, version + 1); return { version: version + 1 };
     });
   }
+  async acknowledgeExistingFact(userId: string, id: string, operationID: string, version: number, factID: string, reviewed: boolean) {
+    return mutation(this.db, userId, operationID, { action: "reviewExistingFact", id, version, factID, reviewed }, async tx => {
+      const initial = await this.get(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
+      const row = requireValue((await tx.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))).for("update"))[0]); expected(row.version, version);
+      if (row.status !== "review") throw new DomainError("DRAFT_UNAVAILABLE", "Wait for this import to be ready for review.", 409);
+      const draft = state(row.draft), reviews = draft.existingFactReviews ?? [];
+      if (!reviews.some(raw => jsonObject(raw).factID === factID)) throw new DomainError("NOT_FOUND", "This fact has no warning in this import.", 404);
+      draft.existingFactReviews = reviews.map(raw => jsonObject(raw).factID === factID ? { ...jsonObject(raw), reviewed } : raw);
+      await tx.update(imports).set({ draft: draftJSON(draft), version: version + 1, updatedAt: new Date() }).where(eq(imports.id, id));
+      await invalidate(tx, userId, "imports", row.subjectId, version + 1); return { version: version + 1 };
+    });
+  }
   async edit(userId: string, id: string, operationID: string, version: number, changes: { id: string; selected?: boolean | undefined; name?: string | undefined; fields?: JSONObject | undefined; acceptMerge?: boolean | undefined; resolutionAction?: "apply" | "undo" | "dismiss" | "restore" | undefined }[]) {
     return mutation(this.db, userId, operationID, { action: "editDraft", id, version, changes }, async tx => {
       const initial = await this.get(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
@@ -192,14 +260,20 @@ export class ImportService {
       const row = requireValue((await tx.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))).for("update"))[0]); expected(row.version, version);
       if (row.status === "saved") return { saved: true };
       if (row.status !== "review") throw new DomainError("DRAFT_UNAVAILABLE", "Finish processing before saving.", 409);
+      const active = (await tx.select().from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.importId, id), eq(jobs.kind, "prepareCommit")))).find(j => ["queued", "running", "paused", "blocked"].includes(j.status));
+      if (active) throw new DomainError("SAVE_PENDING", "Resume or cancel the pending save before saving again.", 409);
+      const draft = state(row.draft);
+      if (excludeUnavailableDependents(draft, await snapshot(tx, userId, row.subjectId))) {
+        await tx.update(imports).set({ draft: draftJSON(draft), version: row.version + 1, updatedAt: new Date() }).where(eq(imports.id, id));
+        await invalidate(tx, userId, "imports", row.subjectId, row.version + 1);
+        return { requiresReview: true, version: row.version + 1 };
+      }
       for (const entry of state(row.draft).entries.filter(e => e.selected)) {
         const fields = entry.record.fields, kind = entry.record.kind;
         if ((kind === "concept" || kind === "topic") && !stringValue(fields.name).trim()) throw new DomainError("INVALID_EDIT", "Give each included concept and topic a name before saving.");
         if (kind === "concept" && !stringValue(fields.explanation).trim() || kind === "fact" && !stringValue(fields.statement).trim() || kind === "connection" && !stringValue(fields.explanation).trim()) throw new DomainError("INVALID_EDIT", "Complete the wording of each included entry before saving, or exclude that entry.");
       }
       if (!state(row.draft).entries.some(e => e.selected && ["concept", "fact", "connection"].includes(e.record.kind))) throw new DomainError("EMPTY_SELECTION", "Select study material before saving this import.");
-      const active = (await tx.select().from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.importId, id), eq(jobs.kind, "prepareCommit")))).find(j => ["queued", "running", "paused", "blocked"].includes(j.status));
-      if (active) throw new DomainError("SAVE_PENDING", "Resume or cancel the pending save before saving again.", 409);
       const job = requireValue((await tx.insert(jobs).values({ userId, subjectId: row.subjectId, importId: id, kind: "prepareCommit", input: { importID: id, operationID, inputVersion: version, choices, subjectVersion }, progress: { stage: "preparingCommit", completed: 0 }, selection: row.selection, aiConnectionId: row.aiConnectionId }).returning())[0]);
       await invalidate(tx, userId, "jobs", row.subjectId, 1); return { jobID: job.id };
     });
@@ -217,6 +291,7 @@ export class ImportService {
           while (pending.length) {
             const next = pending.pop()!; if (visited.has(next)) continue; visited.add(next);
             const entry = draft.entries.find(e => e.record.id === next); if (!entry) { if (include && !saved.some(e => e.id === next && !e.isRetired)) throw new DomainError("INVALID_SELECTION", "A required entry is unavailable."); continue; }
+            if (include && !entry.selected && entry.reviewReason) throw new DomainError("REVIEW_REQUIRED", "This entry or a required dependency has a source review flag. Include it manually after checking its evidence.");
             entry.selected = include;
             if (include) pending.push(...[entry.record.fields.conceptID, entry.record.fields.fromConceptID, entry.record.fields.toConceptID, ...jsonArray(entry.record.fields.supportingFactIDs)].filter((v): v is string => typeof v === "string"));
             else for (const dependent of draft.entries) if ([dependent.record.fields.conceptID, dependent.record.fields.fromConceptID, dependent.record.fields.toConceptID, ...jsonArray(dependent.record.fields.supportingFactIDs)].includes(next)) pending.push(dependent.record.id);
@@ -359,8 +434,8 @@ export class ImportService {
       for (let offset = Number(checkpoint.reconciliationOffset ?? 0); offset < concepts.length; offset += 25) {
         const batch = concepts.slice(offset, offset + 25), candidates = [...current.filter(e => e.kind === "concept" && !e.isRetired), ...concepts.filter(e => !batch.includes(e)).map(e => e.record)];
         await this.queue.report(job, { stage: "reconciling", completed: offset, total: concepts.length });
-        const decision = await structured(this.ai, job.userId, selection, "reconciliation", policies.import_reconciliationInstructions + "\nReturn decisions as an array with conceptID copied from every batch concept.",
-          { batchConcepts: asJSON(batch.map(e => e.record)), candidates: asJSON(candidates), facts: asJSON([...current.filter(e => e.kind === "fact"), ...draft.entries.filter(e => e.record.kind === "fact").map(e => e.record)]), connections: asJSON(current.filter(e => e.kind === "connection")) }, reconciliationSchema, signal, true, 3, undefined, value => reconciliationReferences(value, batch, current, draft.entries));
+        const decision = await structured(this.ai, job.userId, selection, "reconciliation", policies.import_reconciliationInstructions,
+          { batchConcepts: asJSON(batch.map(e => e.record)), candidates: asJSON(candidates), existingMergeDecisions: asJSON(draft.entries.filter(e => e.acceptMerge && e.mergeTargetID).map(e => ({ conceptID: e.record.id, canonicalID: e.mergeTargetID }))), facts: asJSON([...current.filter(e => e.kind === "fact"), ...draft.entries.filter(e => e.record.kind === "fact").map(e => e.record)]), connections: asJSON(current.filter(e => e.kind === "connection")) }, reconciliationBatchSchema(batch.map(e => e.record.id)), signal, true, 3, undefined, value => reconciliationReferences(value, batch, current, draft.entries));
         unique(decision.decisions.map(d => d.conceptID), "reconciliation");
         if (canonical(decision.decisions.map(d => d.conceptID).sort()) !== canonical(batch.map(e => e.record.id).sort())) throw new DomainError("INVALID_RECONCILIATION", "Every supplied concept requires one identity decision.");
         for (const d of decision.decisions) {
@@ -369,9 +444,9 @@ export class ImportService {
           e.mergeTargetID = d.mergeWithID; e.acceptMerge = d.mergeWithID !== null && !d.reviewReason;
           if (d.reviewReason) { e.reviewReason = d.reviewReason; e.selected = false; }
         }
-        for (const f of decision.factReviews) { const e = draft.entries.find(e => e.record.id === f.factID); if (e) { e.reviewReason = f.reason; e.selected = false; } }
+        retainFactReviews(draft, decision.factReviews, current);
         draft.updates.push(...asJSON(decision.updates) as JSONValue[]);
-        // Suggested new relationships are never silently selected.
+        // Independent source review decides which suggestions can be selected.
         for (const c of decision.connections) {
           const known = [...current, ...draft.entries.map(e => e.record)];
           if (c.fromConceptID === c.toConceptID || !known.some(e => e.kind === "concept" && e.id === c.fromConceptID) || !known.some(e => e.kind === "concept" && e.id === c.toConceptID) || c.supportingFactIDs.some(id => !known.some(e => e.kind === "fact" && e.id === id))) continue;
@@ -407,7 +482,7 @@ export class ImportService {
       const topics = [...existingTopics, ...draft.entries.filter(e => e.record.kind === "topic").map(e => e.record)];
       for (let offset = Number(checkpoint.organizationOffset ?? 0); offset < concepts.length; offset += 25) {
         const batch = concepts.slice(offset, offset + 25);
-        const assignments = await structured(this.ai, job.userId, selection, "topic_assignments", policies.topics_assignmentInstructions, { concepts: asJSON(batch.map(e => e.record)), topics: asJSON(topics) }, topicAssignmentSchema, signal);
+        const assignments = await structured(this.ai, job.userId, selection, "topic_assignments", policies.topics_assignmentInstructions + "\nReturn placements keyed by every supplied concept record.id. Use only supplied topic record.id values, or null for Unsorted.", { concepts: asJSON(batch.map(e => e.record)), topics: asJSON(topics) }, topicAssignmentBatchSchema(batch.map(e => e.record.id), topics.map(t => t.id)), signal);
         unique(assignments.placements.map(p => p.conceptID), "placement");
         if (canonical(assignments.placements.map(p => p.conceptID).sort()) !== canonical(batch.map(e => e.record.id).sort())) throw new DomainError("INVALID_ORGANIZATION", "Every concept requires a placement decision.");
         for (const p of assignments.placements) { if (p.topicID && !topics.some(t => t.id === p.topicID)) throw new DomainError("INVALID_ORGANIZATION", "A placement references an unknown topic."); draft.entries.push(entry(row.subjectId, "placement", randomUUID(), { conceptID: p.conceptID, topicID: p.topicID, isLocked: false, reason: p.reviewReason })); }
@@ -418,6 +493,7 @@ export class ImportService {
     }
     await this.queue.complete(job, async tx => {
       const latest = requireValue((await tx.select().from(imports).where(and(eq(imports.id, row.id), eq(imports.userId, job.userId))).for("update"))[0]); expected(latest.version, Number(job.input.inputVersion));
+      excludeUnavailableDependents(draft, await snapshot(tx, job.userId, row.subjectId));
       await tx.update(imports).set({ draft: draftJSON(draft), checkpoint, status: "review", version: row.version + 1, updatedAt: new Date() }).where(eq(imports.id, row.id));
       await invalidate(tx, job.userId, "imports", row.subjectId, row.version + 1);
     });
@@ -426,6 +502,17 @@ export class ImportService {
     const row = await this.get(job.userId, requireValue(job.importId));
     if (row.status === "saved") { await this.queue.complete(job, async () => {}); return; }
     expected(row.version, Number(job.input.inputVersion));
+    // Also repair already queued/failed saves before reusing their AI checkpoint.
+    const selectionDraft = state(row.draft);
+    if (excludeUnavailableDependents(selectionDraft, await snapshot(this.db, job.userId, row.subjectId))) {
+      await this.queue.complete(job, async tx => {
+        const latest = requireValue((await tx.select().from(imports).where(and(eq(imports.id, row.id), eq(imports.userId, job.userId))).for("update"))[0]); expected(latest.version, row.version);
+        await tx.update(imports).set({ draft: draftJSON(selectionDraft), version: latest.version + 1, updatedAt: new Date() }).where(eq(imports.id, row.id));
+        await tx.update(jobs).set({ progress: { stage: "review", message: "Selection dependencies were repaired. Review the draft before saving." } }).where(eq(jobs.id, job.id));
+        await invalidate(tx, job.userId, "imports", row.subjectId, latest.version + 1);
+      });
+      return;
+    }
     const head = await ownedSubject(this.db, job.userId, row.subjectId), checkpoint = structuredClone(job.checkpoint);
     if (Object.keys(jsonObject(job.input.choices ?? {})).length) expected(head.version, Number(job.input.subjectVersion));
     const resume = checkpoint.commitHeadID === head.revisionId && checkpoint.commitImportVersion === row.version;
@@ -439,8 +526,8 @@ export class ImportService {
           const values = batch.slice(offset, offset + 25);
           const candidates = [...current.filter(r => r.kind === "concept" && !r.isRetired), ...prepared.entries.filter(e => e.record.kind === "concept" && e.selected && !values.includes(e)).map(e => e.record)];
           await this.queue.report(job, { stage: "preparingCommit", completed: offset, total: batch.length });
-          const decision = await structured(this.ai, job.userId, requireValue(job.selection), "commit_reconciliation", policies.import_reconciliationInstructions + "\nReturn decisions as an array, including conceptID for each batch concept.",
-            { batchConcepts: asJSON(values.map(e => e.record)), candidates: asJSON(candidates), facts: asJSON([...current.filter(r => r.kind === "fact"), ...prepared.entries.filter(e => e.record.kind === "fact").map(e => e.record)]), connections: asJSON(current.filter(r => r.kind === "connection")) }, reconciliationSchema, signal, true, 3, undefined, value => reconciliationReferences(value, values, current, prepared.entries));
+          const decision = await structured(this.ai, job.userId, requireValue(job.selection), "commit_reconciliation", policies.import_reconciliationInstructions,
+            { batchConcepts: asJSON(values.map(e => e.record)), candidates: asJSON(candidates), existingMergeDecisions: asJSON(prepared.entries.filter(e => e.acceptMerge && e.mergeTargetID).map(e => ({ conceptID: e.record.id, canonicalID: e.mergeTargetID }))), facts: asJSON([...current.filter(r => r.kind === "fact"), ...prepared.entries.filter(e => e.record.kind === "fact").map(e => e.record)]), connections: asJSON(current.filter(r => r.kind === "connection")) }, reconciliationBatchSchema(values.map(e => e.record.id)), signal, true, 3, undefined, value => reconciliationReferences(value, values, current, prepared.entries));
           unique(decision.decisions.map(d => d.conceptID), "commit reconciliation");
           if (canonical(decision.decisions.map(d => d.conceptID).sort()) !== canonical(values.map(e => e.record.id).sort())) throw new DomainError("INVALID_RECONCILIATION", "Every concept requires one identity decision.");
           for (const d of decision.decisions) {
@@ -448,7 +535,17 @@ export class ImportService {
             if (d.reviewReason && d.mergeWithID) throw new DomainError("MERGE_REVIEW_REQUIRED", "An identity match requires review. Reopen the draft before saving.", 409);
             e.mergeTargetID = d.mergeWithID; e.acceptMerge = !!d.mergeWithID;
           }
+          const needsFactReview = retainFactReviews(prepared, decision.factReviews, current);
           prepared.updates.push(...asJSON(decision.updates) as JSONValue[]);
+          if (needsFactReview) {
+            await this.queue.complete(job, async tx => {
+              const latest = requireValue((await tx.select().from(imports).where(and(eq(imports.userId, job.userId), eq(imports.id, row.id))).for("update"))[0]); expected(latest.version, row.version);
+              await tx.update(imports).set({ draft: draftJSON(prepared), version: latest.version + 1, updatedAt: new Date() }).where(eq(imports.id, row.id));
+              await tx.update(jobs).set({ progress: { stage: "review", message: "New source warnings need review before saving." } }).where(eq(jobs.id, job.id));
+              await invalidate(tx, job.userId, "imports", row.subjectId, latest.version + 1);
+            });
+            return;
+          }
           checkpoint.commitHeadID = head.revisionId; checkpoint.commitImportVersion = row.version; checkpoint.commitPrepared = draftJSON(prepared); checkpoint.commitOffset = offset + 25;
           await this.queue.checkpoint(job, checkpoint, { stage: "preparingCommit", completed: Math.min(offset + 25, batch.length), total: batch.length });
         }
@@ -578,46 +675,96 @@ export class ImportService {
   private async reviewSource(job: ClaimedJob, row: typeof imports.$inferSelect, draft: DraftState, source: SourcePassage[], signal: AbortSignal, checkpoint: JSONObject): Promise<DraftState> {
     if (checkpoint.reviewProgress) draft = state(jsonObject(checkpoint.reviewProgress));
     const completed = new Set(jsonArray(checkpoint.reviewCompleted).filter((s): s is string => typeof s === "string"));
-    const quoteSchema = z.array(z.strictObject({ segmentID: z.string(), quote: z.string().min(1) }));
-    const missingFact = z.strictObject({ conceptID: z.string(), statement: z.string().min(1), kind: z.enum(factKinds), qualifications: z.string(), evidence: quoteSchema });
-    const issues: { id: string; entryID: string | null; passageID: string | null; reason: string }[] = draft.entries.filter(e => e.reviewReason).map(e => ({ id: randomUUID(), entryID: e.record.id, passageID: null, reason: e.reviewReason! }));
+    const saved = await snapshot(this.db, job.userId, row.subjectId);
+    const inferred = draft.entries.filter(e => e.record.kind === "connection" && e.record.fields.isInferred === true);
+    const issues: SourceReviewIssue[] = draft.entries.filter(e => e.reviewReason && !inferred.includes(e)).map(e => ({ id: randomUUID(), entryID: e.record.id, passageID: null, reason: e.reviewReason! }));
     for (const raw of draft.coverage) {
       const c = jsonObject(raw), citedByFact = draft.entries.some(e => e.record.kind === "fact" && jsonArray(e.record.fields.evidence).some(raw => jsonObject(raw).segmentID === c.segmentID));
       if (c.disposition === "uncertain" || (c.contentKind === "substantive" && !citedByFact)) issues.push({ id: randomUUID(), entryID: null, passageID: stringValue(c.segmentID), reason: stringValue(c.reason) || "Check that every teachable claim is represented as an individual fact." });
     }
+    for (const e of inferred) issues.push({ id: randomUUID(), entryID: e.record.id, passageID: null, inferred: true, reason: "Independently verify the complete inferred relationship against original source evidence." });
+    // Include original passages from saved supporting facts, scoped to this owner
+    // and subject. A saved paraphrase alone cannot certify an inference.
+    const supportIDs = new Set(inferred.flatMap(e => jsonArray(e.record.fields.supportingFactIDs)));
+    const extraSources = [...new Set(saved.filter(r => supportIDs.has(r.id)).flatMap(r => jsonArray(r.fields.evidence).map(raw => stringValue(jsonObject(raw).sourceID))))].filter(id => id && id !== row.sourceId);
+    const originals: ReviewPassage[] = source.map(p => ({ ...p, sourceID: row.sourceId }));
+    if (extraSources.length) originals.push(...(await this.db.select().from(passages).where(and(eq(passages.userId, job.userId), eq(passages.subjectId, row.subjectId), inArray(passages.sourceId, extraSources))).orderBy(asc(passages.sourceId), asc(passages.ordinal))).map(p => ({ id: p.id, sourceID: p.sourceId, text: p.text, page: p.page, section: p.section })));
+    const firstPassage = (issue: SourceReviewIssue) => {
+      if (issue.passageID) return source.findIndex(p => p.id === issue.passageID);
+      const refs = affectedEntries(issue, draft.entries, row.sourceId).flatMap(e => jsonArray(e.record.fields.evidence).map(raw => jsonObject(raw)));
+      const index = source.findIndex(p => refs.some(r => r.sourceID === row.sourceId && r.segmentID === p.id));
+      return index < 0 ? source.length : index;
+    };
+    issues.sort((a, b) => firstPassage(a) - firstPassage(b) || Number(!!a.inferred) - Number(!!b.inferred));
     const passageMap = new Map(source.map(p => [p.id, p.text]));
-    const references = (values: { segmentID: string; quote: string }[]) => values.map(e => {
+    const references = (values: { sourceID: string; segmentID: string; quote: string }[]) => values.map(e => {
       const original = passageMap.get(e.segmentID), normalize = (s: string) => s.normalize("NFKC").replace(/\u00ad/g, "").replace(/\s+/g, " ").trim();
-      if (!original || !normalize(e.quote) || !normalize(original).includes(normalize(e.quote))) throw new DomainError("INVALID_REVIEW", "Source review returned an invalid quotation.");
+      if (e.sourceID !== row.sourceId || !original || !normalize(e.quote) || !normalize(original).includes(normalize(e.quote))) throw new DomainError("INVALID_REVIEW", "Source review returned an invalid quotation.");
       return { ...e, sourceID: row.sourceId };
     });
+    const cached = new Map<string, { verdict: SourceReviewVerdict; input: string }>();
+    const issueInput = (issue: SourceReviewIssue) => issue.inferred ? inferenceInput(requireValue(draft.entries.find(e => e.record.id === issue.entryID)), draft.entries, saved) : canonical(affectedEntries(issue, draft.entries, row.sourceId));
+    const canSelect = (entry: DraftEntry) => {
+      const records = new Map([...saved, ...draft.entries.map(e => e.record)].map(r => [r.id, r]));
+      const resolve = (value: JSONValue | undefined): string | null => {
+        if (typeof value !== "string") return null;
+        const seen = new Set<string>(); let id = value;
+        while (!seen.has(id)) {
+          seen.add(id); const e = draft.entries.find(e => e.record.id === id), record = records.get(id);
+          const next = e?.acceptMerge ? e.mergeTargetID : record?.redirectID;
+          if (!next) return record?.kind === "concept" && !record.isRetired ? id : null;
+          id = next;
+        }
+        return null;
+      };
+      const has = (id: JSONValue | undefined, kind: LibraryEntity["kind"]) => {
+        if (typeof id !== "string") return false;
+        const e = draft.entries.find(e => e.record.id === id), record = records.get(id);
+        return record?.kind === kind && !record.isRetired && (!e || (e.selected && !e.reviewReason)) && !(draft.existingFactReviews ?? []).some(raw => { const warning = jsonObject(raw); return warning.factID === id && warning.reviewed !== true; });
+      };
+      const f = entry.record.fields, from = resolve(f.fromConceptID), to = resolve(f.toConceptID);
+      if (!from || !to || from === to || !has(from, "concept") || !has(to, "concept") || !has(f.fromConceptID, "concept") || !has(f.toConceptID, "concept") || !jsonArray(f.supportingFactIDs).length || jsonArray(f.supportingFactIDs).some(id => !has(id, "fact"))) return false;
+      return ![...saved.filter(r => !r.isRetired), ...draft.entries.filter(e => e.selected).map(e => e.record)].some(r => r.id !== entry.record.id && r.kind === "connection" && resolve(r.fields.fromConceptID) === from && resolve(r.fields.toConceptID) === to && r.fields.kind === f.kind && normalizeName(stringValue(r.fields.explanation)) === normalizeName(stringValue(f.explanation)));
+    };
     for (const issue of issues) {
-      const issueKey = issue.entryID ?? issue.passageID ?? issue.id;
+      const issueKey = issue.inferred ? "inferred:" + issue.entryID : issue.entryID ?? issue.passageID ?? issue.id;
       if (completed.has(issueKey)) continue;
       const saveProgress = async () => { completed.add(issueKey); checkpoint.reviewCompleted = [...completed]; checkpoint.reviewProgress = draftJSON(draft); await this.queue.checkpoint(job, checkpoint, { stage: "reviewing", completed: completed.size, total: issues.length }); };
-      signal.throwIfAborted(); const before = structuredClone(draft), affected = issue.entryID ? draft.entries.filter(e => e.record.id === issue.entryID) : draft.entries.filter(e => jsonArray(e.record.fields.evidence).some(raw => jsonObject(raw).segmentID === issue.passageID));
-      const editable: Record<string, z.ZodType> = {};
-      for (const e of affected) {
-        const names = e.record.protectedFields.length ? [] : e.record.kind === "concept" ? ["name", "aliases", "explanation"] : e.record.kind === "fact" ? ["statement", "qualifications", "kind"] : e.record.kind === "connection" ? ["explanation", "kind", "fromConceptID", "toConceptID"] : [];
-        editable[e.record.id] = z.strictObject(Object.fromEntries(names.map(name => [name, z.array(z.string()).nullable()])));
-      }
-      const decision = z.strictObject({ disposition: z.enum(["supported", "repair", "needsReview"]), reason: z.string(), evidence: quoteSchema, repairs: z.strictObject(editable), missingFacts: z.array(missingFact), passageAssessment: issue.passageID ? z.enum(["substantive", "structural"]).nullable() : z.null(), needsMoreContext: z.boolean() });
+      signal.throwIfAborted(); const before = structuredClone(draft), affected = affectedEntries(issue, draft.entries, row.sourceId);
       const citedIDs = new Set(affected.flatMap(e => jsonArray(e.record.fields.evidence).map(raw => stringValue(jsonObject(raw).segmentID)))); if (issue.passageID) citedIDs.add(issue.passageID);
-      const positions = source.flatMap((p, i) => citedIDs.has(p.id) ? [i] : []);
       try {
-        let verdict: z.infer<typeof decision> | null = null;
-        for (const radius of [3, 6, 18]) {
-          const first = positions.length ? Math.max(0, Math.min(...positions) - radius) : 0, last = positions.length ? Math.min(source.length, Math.max(...positions) + radius + 1) : Math.min(source.length, radius * 2 + 1);
-          const result = await structured(this.ai, job.userId, requireValue(job.selection), "source_review", policies.review_instructions.replace("\\(ImportSchemas.sourceFidelityPolicy)", policies.import_sourceFidelityPolicy),
-            { issues: [{ ...issue, dependents: affected.map(e => ({ kind: e.record.kind, id: e.record.id })) }], concepts: asJSON(draft.entries.filter(e => e.record.kind === "concept").map(e => e.record)), facts: asJSON(affected.filter(e => e.record.kind === "fact").map(e => e.record)), connections: asJSON(affected.filter(e => e.record.kind === "connection").map(e => e.record)), protectedEntryIDs: affected.filter(e => e.record.protectedFields.length).map(e => e.record.id), passages: asJSON(source.slice(first, last)), hasEarlierSource: first > 0, hasLaterSource: last < source.length, validationFeedback: [] },
-            z.strictObject({ decisions: z.strictObject({ [issue.id]: decision }) }), signal, true, 1);
-          const candidate = requireValue(result.decisions[issue.id]);
-          if (!candidate.needsMoreContext) { verdict = candidate; break; }
+        if (cached.get(issue.id)?.input !== issueInput(issue)) {
+          let batch = issues.slice(issues.indexOf(issue)).filter(i => !completed.has(i.inferred ? "inferred:" + i.entryID : i.entryID ?? i.passageID ?? i.id)).slice(0, 4);
+          const inputs = new Map(batch.map(i => [i.id, issueInput(i)]));
+          let results: Map<string, SourceReviewVerdict>;
+          try { results = await sourceReviewBatch(this.ai, job, row.sourceId, batch, draft.entries, saved, originals, signal); }
+          catch (error) {
+            if (!(error instanceof DomainError) || error.code !== "INVALID_REVIEW_CONTEXT" || batch.length === 1) throw error;
+            batch = [issue]; results = await sourceReviewBatch(this.ai, job, row.sourceId, batch, draft.entries, saved, originals, signal);
+          }
+          for (const i of batch) cached.set(i.id, { input: inputs.get(i.id)!, verdict: results.get(i.id) ?? { disposition: "needsReview", reason: "Source review still needs broader context. Review the entry against the original source.", evidence: [], repairs: {}, missingFacts: [], passageAssessment: null, needsMoreContext: true } });
         }
-        if (!verdict) { draft.reviewNotes.push("Source review still needs broader context. Review the flagged entry against the original source."); await saveProgress(); continue; }
+        const verdict = requireValue(cached.get(issue.id)).verdict;
+        if (issue.inferred) {
+          const target = requireValue(affected[0]);
+          target.selected = false;
+          target.record.fields.inferenceReview = { status: verdict.disposition === "supported" && !verdict.needsMoreContext ? "supported" : "needsReview", reason: verdict.reason, evidence: asJSON(verdict.evidence), inputSignature: issueInput(issue) };
+          if (verdict.disposition === "supported" && !verdict.needsMoreContext) {
+            target.reviewReason = null;
+            // Explicit rechecks preserve the user's excluded selections.
+            target.selected = (job.input.recheck !== true || before.entries.find(e => e.record.id === target.record.id)?.selected === true) && canSelect(target);
+          } else target.reviewReason = verdict.reason;
+          await saveProgress(); continue;
+        }
+        if (verdict.needsMoreContext) { draft.reviewNotes.push(verdict.reason); await saveProgress(); continue; }
         if (verdict.disposition === "needsReview") { await saveProgress(); continue; }
         if (!verdict.evidence.length) throw new DomainError("INVALID_REVIEW", "Source review requires original evidence.");
         references(verdict.evidence);
+        const hasRepairs = Object.values(verdict.repairs).some(fields => Object.values(fields as Record<string, unknown>).some(v => v !== null));
+        if (verdict.disposition === "supported" && (hasRepairs || verdict.missingFacts.length)) throw new DomainError("INVALID_REVIEW", "A supported verdict cannot silently repair wording or add facts.");
+        const anchors = issue.passageID ? new Set([issue.passageID]) : citedIDs;
+        if (issue.passageID && (!verdict.passageAssessment || !verdict.evidence.some(e => e.segmentID === issue.passageID))) throw new DomainError("INVALID_REVIEW", "Assess and cite the actual reviewed passage explicitly.");
+        for (const f of verdict.missingFacts) if (!f.evidence.some(e => anchors.has(e.segmentID))) throw new DomainError("INVALID_REVIEW", "A recovered fact must cite the passage or material under review.");
         for (const [id, fields] of Object.entries(verdict.repairs)) {
           const target = requireValue(draft.entries.find(e => e.record.id === id));
           for (const [field, raw] of Object.entries(fields as Record<string, unknown>)) if (raw !== null) {
@@ -631,19 +778,33 @@ export class ImportService {
         }
         for (const f of verdict.missingFacts) {
           if (verdict.disposition !== "repair" || !draft.entries.some(e => e.record.id === f.conceptID && e.record.kind === "concept") || !f.evidence.length) throw new DomainError("INVALID_REVIEW", "A recovered fact requires a source-grounded concept and evidence.");
-          if (!draft.entries.some(e => e.record.kind === "fact" && e.record.fields.statement === f.statement && e.record.fields.conceptID === f.conceptID)) draft.entries.push(entry(row.subjectId, "fact", randomUUID(), { conceptID: f.conceptID, sourceID: row.sourceId, statement: f.statement, kind: f.kind, qualifications: f.qualifications, evidence: references(f.evidence), original: { statement: f.statement, kind: f.kind, qualifications: f.qualifications } }));
+          if (!draft.entries.some(e => e.record.kind === "fact" && e.record.fields.statement === f.statement && e.record.fields.conceptID === f.conceptID && e.record.fields.kind === f.kind && e.record.fields.qualifications === f.qualifications)) draft.entries.push(entry(row.subjectId, "fact", randomUUID(), { conceptID: f.conceptID, sourceID: row.sourceId, statement: f.statement, kind: f.kind, qualifications: f.qualifications, evidence: references(f.evidence), original: { statement: f.statement, kind: f.kind, qualifications: f.qualifications } }));
         }
+        if (issue.passageID && verdict.passageAssessment === "substantive" && !draft.entries.some(e => e.record.kind === "fact" && jsonArray(e.record.fields.evidence).some(ref => jsonObject(ref).segmentID === issue.passageID))) throw new DomainError("INVALID_REVIEW", "A substantive passage needs an individual recovered or existing draft fact citing it before coverage can be cleared.");
         for (const e of affected) e.reviewReason = null;
         if (issue.passageID) {
           const coverage = draft.coverage.map(jsonObject).find(c => c.segmentID === issue.passageID);
           if (coverage) { coverage.disposition = verdict.passageAssessment === "structural" ? "excluded" : "extracted"; coverage.reason = verdict.reason; coverage.contextRequest = null; }
         }
       } catch (error) {
-        if (!(error instanceof DomainError) || !["INVALID_AI_RESPONSE", "INVALID_REVIEW"].includes(error.code)) throw error;
+        if (!(error instanceof DomainError) || !["INVALID_AI_RESPONSE", "INVALID_REVIEW", "INVALID_REVIEW_CONTEXT"].includes(error.code)) throw error;
         draft = before; draft.reviewNotes.push(error.message);
+        if (issue.inferred) {
+          const target = requireValue(draft.entries.find(e => e.record.id === issue.entryID));
+          target.selected = false; target.reviewReason = "This inferred connection could not be verified. Review its original evidence before including it.";
+          target.record.fields.inferenceReview = { status: "needsReview", reason: target.reviewReason, evidence: [], inputSignature: issueInput(issue) };
+        }
       }
       await saveProgress();
     }
+    for (const target of draft.entries.filter(e => e.record.kind === "connection" && e.record.fields.isInferred === true)) {
+      const review = jsonObject(target.record.fields.inferenceReview ?? {});
+      if (review.status === "supported" && review.inputSignature !== inferenceInput(target, draft.entries, saved)) {
+        target.selected = false; target.reviewReason = "Supporting material changed during source review. Review this inferred connection before including it.";
+        target.record.fields.inferenceReview = { ...review, status: "needsReview", reason: target.reviewReason };
+      } else if (target.selected && !canSelect(target)) target.selected = false;
+    }
+    excludeUnavailableDependents(draft, saved);
     return draft;
   }
   private async suggestNames(job: ClaimedJob, row: typeof imports.$inferSelect, draft: DraftState, passages: SourcePassage[], signal: AbortSignal, checkpoint: JSONObject): Promise<DraftState> {

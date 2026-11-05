@@ -8,7 +8,6 @@ struct ImportProgressView: View {
     var error: String? = nil
     var serverStatus: String? = nil
     var backgroundNotice: String? = nil
-    var onChooseModel: (() -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showDetails = false
 
@@ -28,10 +27,6 @@ struct ImportProgressView: View {
                             .font(.callout)
                         Button("View details") { showDetails = true }
                     }
-                }
-                if !isRunning, let onChooseModel {
-                    Button("Choose model", systemImage: "slider.horizontal.3", action: onChooseModel)
-                        .buttonStyle(.bordered).accessibilityHint("Changes the model used when you resume")
                 }
                 if showsConnectionFeedback { connectionFeedback }
                 if !progress.topicOverviewReady || progress.topicOverview.isEmpty {
@@ -61,7 +56,7 @@ struct ImportProgressView: View {
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-                            .background(.background, in: RoundedRectangle(cornerRadius: 16))
+                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
                             .accessibilityElement(children: .combine)
                         }
                         if progress.topicOverview.count > 6 {
@@ -130,13 +125,7 @@ struct ImportProgressView: View {
     private var sourceOverview: some View {
         let sections = ImportSourceSummary.make(progress: progress, isRunning: isRunning)
         return VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Your notes").font(.headline).accessibilityAddTraits(.isHeader)
-                if !isRunning {
-                    Text("Your completed work is saved. Resume when you’re ready.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            }
+            Text("Your notes").font(.headline).accessibilityAddTraits(.isHeader)
             ForEach(sections.prefix(6)) { section in ImportSourceSectionCard(section: section) }
             if sections.count > 6 {
                 DisclosureGroup("\(sections.count - 6) more sections") {
@@ -245,7 +234,7 @@ private struct ImportConnectionPreviewCard: View {
                 .accessibilityLabel("Connection from \(connection.from) to \(connection.to)")
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .combine)
     }
 }
@@ -271,7 +260,7 @@ private struct ImportSourceSectionCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .combine)
     }
 

@@ -25,6 +25,7 @@ import SwiftUI
         let operationID: UUID
         let selection: CloudSelection
         var history: [CloudJSON]?
+        var waitingForReview = false
     }
 
     init(subjectID: UUID, importID: String? = nil, library: CloudLibraryStore) {
@@ -61,7 +62,10 @@ import SwiftUI
     }
     func resumeQueued() {
         guard task == nil, library.ready, library.isForeground, !usageBlocked, !queue.isEmpty else { return }
-        var turn = queue.removeFirst()
+        let reviewReady = importID.map { id in library.drafts.first(where: { $0.text("id") == id })?.text("status") == "review" } ?? true
+        guard let readyIndex = queue.firstIndex(where: { !$0.waitingForReview || reviewReady }) else { return }
+        var turn = queue.remove(at: readyIndex)
+        turn.waitingForReview = false
         if turn.history == nil { turn.history = history(through: turn.userMessageID) }
         let run = UUID()
         generation = run; active = turn; isResponding = true; update(turn.id, text: "")
@@ -81,7 +85,7 @@ import SwiftUI
         let turn = Turn(id: UUID(), userMessageID: old.userMessageID, operationID: old.operationID, selection: old.selection, history: old.history)
         failed[id] = nil; usageBlocked = false
         if let index = messages.firstIndex(where: { $0.id == id }) { messages[index].retryID = nil }
-        messages.append(.init(id: turn.id, role: .assistant, text: "Queued to retry."))
+        messages.append(.init(id: turn.id, role: .assistant, text: "Queued to retry.", requestText: messages.first(where: { $0.id == old.userMessageID })?.text))
         queue.insert(turn, at: 0); resumeQueued()
     }
     func canUndo(_ id: UUID) -> Bool {
@@ -101,10 +105,17 @@ import SwiftUI
     }
     private func runTurn(_ turn: Turn, generation run: UUID) async {
         do {
+            let editor: CloudImportEditor?
+            if let importID, library.drafts.first(where: { $0.text("id") == importID })?.text("status") == "review" {
+                editor = try library.importEditor(for: importID)
+                try await editor?.beginChat()
+            } else { editor = nil }
+            defer { editor?.endChat() }
             let path = importID.map { "/api/v1/imports/\($0)/chat" } ?? "/api/v1/subjects/\(subjectID.uuidString.lowercased())/chat"
             var body: [String: CloudJSON] = ["selection": turn.selection.json, "messages": .array(turn.history ?? [])]
             if importID != nil { body["operationID"] = .string(turn.operationID.uuidString.lowercased()) }
             var completed = false
+            var waitingForReview = false
             try await library.client.events(path, method: "POST", body: .object(body)) { [self] event, value in
                 guard generation == run else { throw CancellationError() }
                 if event == "delta", let index = messages.firstIndex(where: { $0.id == turn.id }) { messages[index].text += value.text("text") }
@@ -117,12 +128,19 @@ import SwiftUI
                 }
                 if event == "failed" { throw CloudFailure(code: value.text("code"), message: value.text("message")) }
                 if event == "completed" {
+                    waitingForReview = value.value("waitingForReview").flag
                     if let text = value.value("text").string, let index = messages.firstIndex(where: { $0.id == turn.id }) { messages[index].text = text }
                     completed = true
                 }
             }
             guard generation == run else { return }
             guard completed else { throw URLError(.networkConnectionLost) }
+            if waitingForReview {
+                var deferred = turn; deferred.waitingForReview = true
+                queue.insert(deferred, at: 0)
+                update(turn.id, text: "Your request is queued until this import is ready for review.")
+                return
+            }
             guard messages.first(where: { $0.id == turn.id })?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
                 throw CloudFailure(code: "EMPTY_AI_RESPONSE", message: "The AI returned no reply. Retry your message.")
             }
@@ -141,9 +159,16 @@ import SwiftUI
     }
     private func history(through userMessageID: UUID) -> [CloudJSON] {
         guard let last = messages.firstIndex(where: { $0.id == userMessageID }) else { return [] }
-        return Array(messages[...last].filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && ($0.role == .user || ($0.role == .assistant && $0.isComplete)) }.suffix(40)).map {
-            .object(["role": .string($0.role == .user ? "user" : "assistant"), "content": .string($0.text)])
+        // Pending, cancelled and failed requests are not conversational context for a new goal.
+        // Keep completed user/reply pairs, then append only this turn's actual request.
+        let completed = messages[..<last].filter { $0.role == .assistant && $0.isComplete && $0.requestText != nil }.suffix(6)
+        var result: [CloudJSON] = []
+        for message in completed {
+            result.append(.object(["role": .string("user"), "content": .string(String((message.requestText ?? "").prefix(8_000)))]))
+            result.append(.object(["role": .string("assistant"), "content": .string(String(message.text.prefix(8_000)))]))
         }
+        result.append(.object(["role": .string("user"), "content": .string(messages[last].text)]))
+        return result
     }
     private func interrupt(_ message: String?) {
         guard let turn = active else { return }

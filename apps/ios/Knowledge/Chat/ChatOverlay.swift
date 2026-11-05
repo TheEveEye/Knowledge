@@ -10,8 +10,12 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
     @State private var message = ""
     @FocusState private var isFocused: Bool
     @Namespace private var glassNamespace
+    // Match the search capsule height and clear target so their rounded ends stay concentric.
+    @ScaledMetric(relativeTo: .body) private var searchControlSize: CGFloat = 44
 
     private var hasMessage: Bool { !message.trimmed.isEmpty }
+    private var isSearchFocused: Bool { !isExpanded && searchText != nil && isFocused }
+    private var showsClearSearch: Bool { !isExpanded && !(searchText?.wrappedValue.isEmpty ?? true) }
 
     var body: some View {
         GeometryReader { _ in
@@ -83,12 +87,13 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
                         // Keep one field alive while its purpose changes, with
                         // separate storage for the search query and chat draft.
                         TextField(isExpanded ? session.presentation.placeholder : "Find a concept or alias",
-                                  text: isExpanded ? $message : (searchText ?? $message), axis: .vertical)
+                                  text: isExpanded ? $message : (searchText ?? $message),
+                                  axis: isExpanded ? .vertical : .horizontal)
                             .textFieldStyle(.plain)
                             .font(.body)
                             .lineLimit(isExpanded ? 1...5 : 1...1)
                             .focused($isFocused)
-                            .padding(.vertical, 10)
+                            .padding(.vertical, isExpanded ? 10 : 0)
                             .accessibilityLabel(isExpanded ? session.presentation.inputLabel : "Find a concept or alias")
                         if !isExpanded, let searchText, !searchText.wrappedValue.isEmpty {
                             Button("Clear search", systemImage: "xmark.circle.fill") {
@@ -97,12 +102,14 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
                             .labelStyle(.iconOnly)
                             .foregroundStyle(.secondary)
                             .buttonStyle(.plain)
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(width: searchControlSize, height: searchControlSize)
+                            .contentShape(Circle())
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 22))
+                    .padding(.leading, 16)
+                    .padding(.trailing, showsClearSearch ? 0 : 16)
+                    .frame(maxWidth: .infinity, minHeight: isExpanded ? 44 : searchControlSize)
+                    .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: isExpanded ? 22 : searchControlSize / 2))
                     .glassEffectID("composer", in: glassNamespace)
                     .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
                 } else {
@@ -137,6 +144,7 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
             in: Circle()
         )
         .accessibilityHint(actionHint)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: isSearchFocused)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: hasMessage)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: session.isResponding)
     }
@@ -144,25 +152,30 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
     private let actionSize: CGFloat = 56
 
     private var actionSymbol: String {
+        if isSearchFocused { return "keyboard.chevron.compact.down" }
         guard isExpanded else { return "bubble.left" }
         if session.isResponding { return "stop.fill" }
         return hasMessage ? "arrow.up" : "xmark"
     }
 
     private var actionLabel: String {
+        if isSearchFocused { return "Dismiss keyboard" }
         guard isExpanded else { return session.presentation.title }
         if session.isResponding { return "Stop response" }
         return hasMessage ? "Send message" : "Close chat"
     }
 
     private var actionHint: String {
+        if isSearchFocused { return "Keeps the current search" }
         guard isExpanded else { return "Expands the instruction field. Tap the field to type." }
         if session.isResponding { return "Stops the current reply and keeps any text you are drafting" }
         return hasMessage ? session.presentation.sendHint : "Collapses the instruction field"
     }
 
     private func performAction() {
-        if !isExpanded {
+        if isSearchFocused {
+            isFocused = false
+        } else if !isExpanded {
             // Dismiss search focus before the same field becomes the chat input.
             // Opening chat leaves the keyboard hidden until the field is tapped.
             isFocused = false

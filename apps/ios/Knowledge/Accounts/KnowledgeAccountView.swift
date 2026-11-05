@@ -30,7 +30,21 @@ struct KnowledgeAccountView: View {
                     }
                 }
                 Section {
-                    Button("ChatGPT") { showChatGPT = true }
+                    Button { showChatGPT = true } label: {
+                        HStack {
+                            Text("ChatGPT")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text(library.connections.contains { $0.text("status") == "active" } ? "Connected" : "Not connected")
+                                .foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 } header: {
                     Text("AI connections")
                 }

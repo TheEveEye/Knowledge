@@ -83,6 +83,10 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.post("/imports/:importID/passages/:passageID/review", r => { const b = mutationSchema.extend({ reviewed: z.boolean() }).parse(r.body), passageID = z.string().min(1).max(200).parse((r.params as { passageID: string }).passageID); return importer.acknowledgePassage(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, passageID, b.reviewed); });
     app.post("/imports/:importID/changes", r => { const b = mutationSchema.extend({ changes: z.array(draftChangeSchema).min(1).max(100) }).parse(r.body); return importer.changeDraft(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.changes); });
     app.post("/imports/:importID/changes/:changeID/undo", r => { const b = mutationSchema.parse(r.body); return importer.undoDraftChange(userID(r), parseID(r, "importID"), parseID(r, "changeID"), b.operationID, b.expectedVersion); });
+    app.post("/imports/:importID/existing-facts/:factID/review", r => {
+      const b = z.strictObject({ operationID: uuid, expectedVersion: z.number().int().positive(), reviewed: z.boolean() }).parse(r.body);
+      return importer.acknowledgeExistingFact(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, parseID(r, "factID"), b.reviewed);
+    });
     app.post("/imports/:importID/chat", async (r, reply) => {
       const b = z.strictObject({ operationID: uuid, selection: selectionSchema, messages: chatMessages }).parse(r.body);
       const importID = parseID(r, "importID"); await importer.get(userID(r), importID);

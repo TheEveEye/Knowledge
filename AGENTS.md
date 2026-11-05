@@ -17,6 +17,10 @@
 - Future identity linking must require authenticated, explicit proof of both accounts; never merge users solely because email addresses match.
 - AI-provider connections are separate from Knowledge account identity.
 
+## File editing
+
+- Use Codex's `apply_patch` tool to create, edit, or delete source and documentation files. Do not use Python, shell redirection, or other scripts to rewrite files.
+
 ## UI copy
 
 - Do not add taglines, promotional copy, or unsolicited explanatory text to suffix views, form footers, or other trailing UI anywhere in the app. Keep these areas free of filler; show necessary validation guidance only when it is relevant to the user's input.

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, stat, statfs, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { and, asc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { SourcePassage } from "@knowledge/contracts";
 import { maximumSourceBytes, maximumSourceCharacters } from "@knowledge/contracts";
 import type { Database, Transaction } from "./database.js";
@@ -129,6 +129,16 @@ export class SourceService {
     await ownedSubject(this.db, userId, subjectID);
     const rows = await this.db.select().from(sources).where(and(eq(sources.userId, userId), eq(sources.subjectId, subjectID), cursor ? gt(sources.id, cursor) : undefined)).orderBy(asc(sources.id)).limit(limit + 1);
     return { items: rows.slice(0, limit), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
+  }
+  async readPassages(userId: string, sourceIDs: string[], query: string, segmentIDs: string[], offset: number, limit: number) {
+    if (!sourceIDs.length) return { items: [], nextOffset: null };
+    if (!Number.isSafeInteger(offset) || offset < 0 || query.length > 500 || segmentIDs.length > 24 || (segmentIDs.length && sourceIDs.length !== 1)) throw new DomainError("INVALID_TOOL", "Use one source for specific passage IDs and a valid search offset.");
+    const rows = await this.db.select().from(passages).where(and(eq(passages.userId, userId), inArray(passages.sourceId, sourceIDs),
+      segmentIDs.length ? inArray(passages.id, segmentIDs) : undefined,
+      query.trim() ? sql`${passages.text} ILIKE ${"%" + query.replace(/[\\%_]/g, "\\$&") + "%"}` : undefined))
+      .orderBy(asc(passages.sourceId), asc(passages.ordinal)).offset(offset).limit(limit + 1);
+    return { items: rows.slice(0, limit).map(p => ({ sourceID: p.sourceId, id: p.id, page: p.page, section: p.section, text: p.text,
+      citationURL: "knowledge-source://" + p.sourceId + "/" + encodeURIComponent(p.id) })), nextOffset: rows.length > limit ? offset + limit : null };
   }
   async passages(userId: string, id: string, cursor = -1, limit = 100) {
     await this.get(userId, id);
