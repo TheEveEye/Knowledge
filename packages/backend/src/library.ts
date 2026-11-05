@@ -102,7 +102,7 @@ export async function writeRevision(tx: Transaction, userId: string, subject: ty
   const version = subject.version + 1;
   await tx.update(subjects).set({ revisionId: revisionID, version, updatedAt: new Date() }).where(and(eq(subjects.userId, userId), eq(subjects.id, subject.id)));
   // Organizational changes do not invalidate independently verified knowledge.
-  const changedConcepts = new Set(changes.filter(c => (c.after ?? c.before)?.kind === "concept" && ["name", "aliases", "explanation"].some(field => canonical(c.before?.fields[field] ?? null) !== canonical(c.after?.fields[field] ?? null))).map(c => (c.after ?? c.before)!.id));
+  const changedConcepts = new Set(changes.filter(c => (c.after ?? c.before)?.kind === "concept" && ["name", "aliases", "explanation", "reviewNote"].some(field => canonical(c.before?.fields[field] ?? null) !== canonical(c.after?.fields[field] ?? null))).map(c => (c.after ?? c.before)!.id));
   const changedMaterial = new Set(changes.filter(c => ["fact", "connection"].includes((c.after ?? c.before)!.kind)).map(c => (c.after ?? c.before)!.id));
   for (const record of after) if (["fact", "connection"].includes(record.kind) && [record.fields.conceptID, record.fields.fromConceptID, record.fields.toConceptID].some(id => typeof id === "string" && changedConcepts.has(id))) changedMaterial.add(record.id);
   await tx.update(recallMaterials).set({ revisionId: revisionID }).where(and(eq(recallMaterials.userId, userId), eq(recallMaterials.subjectId, subject.id)));

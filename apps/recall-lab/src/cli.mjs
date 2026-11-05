@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { repo, prompts, hash, save, read, log, sourceDir, locations, validateCandidate, obj, bool, text } from './core.mjs';
+import { repo, prompts, hash, save, read, log, sourceDir, locations, replacePolicies, validateCandidate, obj, bool, text } from './core.mjs';
 import { Codex, Paused } from './codex.mjs';
 import { prepare, answers, episode, score, propose } from './pipeline.mjs';
 const defaultDir = resolve(repo, '.recall-lab');
@@ -227,7 +227,7 @@ async function schedule() {
   const runtime = resolve(durableData, 'runtime'); await mkdir(runtime, { recursive: true, mode: 0o700 });
   await cp(dirname(entry), runtime, { recursive: true });
   const frozen = resolve(durableData, 'frozen-source'); await mkdir(frozen, { recursive: true, mode: 0o700 });
-  for (const file of new Set(['RecallAI.swift', ...Object.values(locations)])) await cp(resolve(sourceDir, file), resolve(frozen, file));
+  for (const file of new Set(Object.values(locations))) await cp(resolve(sourceDir, file), resolve(frozen, file));
   const escape = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
   const argv = [process.execPath, resolve(runtime, 'cli.mjs'), 'resume', '--data', durableData, '--codex', binary];
   const env = { RECALL_REPO_ROOT: repo, RECALL_SOURCE_DIR: frozen, PATH: dirname(process.execPath) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' };
@@ -243,16 +243,9 @@ async function apply() {
   if (JSON.stringify(base.sourceHashes) !== JSON.stringify(current.sourceHashes)) throw new Error('App sources changed; review and merge candidate.json manually.');
   validateCandidate(base, candidate.bodies);
   if (hash(base.bodies) === hash(candidate.bodies)) throw new Error('No improved candidate was promoted.');
-  // An explicit apply command writes only prompt literals, never arbitrary model-generated code.
-  for (const file of new Set(Object.values(locations))) {
-    const path = resolve(sourceDir, file); let source = await readFile(path, 'utf8');
-    for (const [name, location] of Object.entries(locations)) if (location === file) {
-      const pattern = new RegExp('((?:private )?static let ' + name + ' = commonInstructions \\+ """\\n)[\\s\\S]*?(\\n    """)');
-      if (!pattern.test(source)) throw new Error('Canonical prompt marker missing');
-      source = source.replace(pattern, (_, a, b) => a + '\n' + candidate.bodies[name].trim().split('\n').map(l => '    ' + l).join('\n') + b);
-    }
-    await writeFile(path, source);
-  }
+  // Write only JSON string literals in the production policy map.
+  const path = resolve(sourceDir, 'policies.ts');
+  await writeFile(path, replacePolicies(await readFile(path, 'utf8'), candidate.bodies));
   console.log('Applied candidate prompt bodies. Review the diff and update policy versions before shipping.');
 }
 requiredNode();

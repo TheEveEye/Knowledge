@@ -77,7 +77,10 @@ async function prepareActual(client, section, settings, prompts, progressKey) {
       if (!valid) { for (const u of missing) issues[u.key] = 'Return a focused full-target question with unique criterion IDs and exact evidence IDs.'; continue; }
       q.bindings = referenced.map(key => ({ materialID: key, signature: units.find(u => u.key === key).signature, label: units.find(u => u.key === key).snapshot.statement, criterionIDs: q.criteria.map(c => c.id) }));
       const catalog = units.map(u => ({ id: u.materialID, kind: 'fact', claim: u.snapshot.statement, evidence: u.snapshot.evidence.map(e => e.quote), learningPlan: u.snapshot.learningPlan }));
-      const response = await recoverItem(client, 'verification', q.designID, () => client.call('verify', settings.models.generation, instruction(prompts, 'designVerificationInstructions'), { questions: [q], targetCatalog: catalog }, schema.verification(q)), null);
+      const response = await recoverItem(client, 'verification', q.designID, () => client.call('verify', settings.models.generation, instruction(prompts, 'designVerificationInstructions'), { questions: [{ designID: q.designID,
+        visibleTask: { prompt: q.prompt, kind: q.input.kind, options: q.input.options ?? [], unit: q.input.unit ?? null },
+        privateRubric: { ...q, answerKey: { ...q.input, options: [] }, criteria: q.criteria.map(c => ({ ...c,
+          sourceEvidenceIndices: units.find(u => u.key === c.unitKey).snapshot.evidence.flatMap((e, i) => c.evidenceIDs.includes(e.id) ? [i] : []), additionalEvidence: [] })) } }], targetCatalog: catalog }, schema.verification(q)), null);
       if (!response) { for (const key of referenced) issues[key] = 'Verification response exhausted structured-output retries.'; continue; }
       const review = response.reviews[q.designID]; const quality = review.quality;
       const essentials = q.criteria.filter(c => review.criterionEssentials[c.id].essential);

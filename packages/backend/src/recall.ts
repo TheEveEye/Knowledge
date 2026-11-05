@@ -8,11 +8,12 @@ import { AIService } from "./ai.js";
 import { DomainError, canonical, completedOperation, expected, hash, heartbeatOperation, invalidate, jsonArray, jsonObject, mutation, ownedSubject, releaseOperation, requireValue, reserveOperation, stringValue } from "./core.js";
 import { snapshot } from "./library.js";
 import { JobQueue, type ClaimedJob } from "./jobs.js";
-import { jobs, learningEvents, recallMaterials, recallSessions, recallTargets } from "./schema.js";
+import { jobs, learningEvents, recallMaterials, recallSessions, recallTargets, passages } from "./schema.js";
 import { asJSON, selectionSchema, structured } from "./structured.js";
-import { bankSchema, extraDecisionSchema, judgmentSchema, keyed, learningPlanSchema, questionSchema, verificationSchema, type Question } from "./recall-contracts.js";
+import { designBankSchema, extraDecisionSchema, judgmentSchema, keyed, learningPlanSchema, questionSchema, verificationSchema, type Question } from "./recall-contracts.js";
 import { policies } from "./policies.js";
 import { candidateMatch, candidateQuantities, mentionsSubject } from "./recall-candidates.js";
+import { designVersion, bounded, contextIssue, displayPrompt, enrichmentSelection, evidenceID, presentationPriority, repairExample, unitInput, validateDesign, verificationInput } from "./recall-design.js";
 import { objectiveAssessment, renderAnswer } from "./recall-objective.js";
 
 export const schedulerVersion = "fsrs6-retention90-no-fuzz-v1", recallPolicyVersion = "recall-evidence-v21";
@@ -22,7 +23,6 @@ type Unit = { key: string; materialID: string; entity: LibraryEntity; signature:
 type Session = typeof recallSessions.$inferSelect;
 type Target = typeof recallTargets.$inferSelect;
 type ExtraCandidate = { key: string; targetID: string; targetVersion: number; signature: string; claim: string; question: Question };
-const evidenceID = (key: string, evidence: JSONValue) => `${key}-e${hash(evidence).slice(0, 20)}`;
 function extraEvidence(value: JSONValue | undefined, candidate: ExtraCandidate, answer: string) {
   const decision = jsonObject(value ?? {}), parts = jsonObject(decision.decisions ?? {});
   return decision.contextConsistent === true && candidate.question.criteria.every(c => {
@@ -75,12 +75,14 @@ export class RecallService {
     const map = new Map(records.map(r => [r.id, r]));
     return records.filter(r => ["fact", "connection"].includes(r.kind) && !r.isRetired).map(entity => {
       const conceptID = stringValue(entity.fields.conceptID) || stringValue(entity.fields.fromConceptID), concept = map.get(conceptID);
-      const data: JSONObject = { kind: entity.kind, conceptID, conceptName: concept?.fields.name ?? "", statement: entity.fields.statement ?? entity.fields.explanation ?? "", qualifications: entity.fields.qualifications ?? "", reviewNote: entity.fields.reviewNote ?? null,
+      const data: JSONObject = { kind: entity.kind === "fact" ? entity.fields.kind ?? "claim" : "connection", conceptID, conceptName: concept?.fields.name ?? "", statement: entity.fields.statement ?? entity.fields.explanation ?? "", qualifications: entity.fields.qualifications ?? "", reviewNote: entity.fields.reviewNote ?? null,
         evidence: entity.fields.evidence ?? [], relatedConceptIDs: [entity.fields.fromConceptID, entity.fields.toConceptID].filter((s): s is string => typeof s === "string"),
         conceptContext: concept?.fields.explanation ?? "", aliases: concept?.fields.aliases ?? [], classification: entity.fields.kind ?? "" };
       if (entity.kind === "connection") data.conceptName = stringValue(map.get(stringValue(entity.fields.fromConceptID))?.fields.name) + " → " + stringValue(map.get(stringValue(entity.fields.toConceptID))?.fields.name);
+      if (entity.kind === "fact") data.reviewNote = [concept?.fields.reviewNote, entity.fields.reviewNote].filter(v => typeof v === "string" && v.trim()).join("\n") || null;
+      if (entity.kind === "connection") data.qualifications = (entity.fields.isInferred === true ? "Source-based inference; preserve this qualification. " : "") + stringValue(entity.fields.kind);
       // Evidence refreshes must not erase learned performance for unchanged knowledge.
-      const signature = hash({ concept: data.conceptName, aliases: jsonArray(data.aliases).sort(), statement: data.statement, classification: data.classification, qualifications: data.qualifications, reviewNote: data.reviewNote });
+      const signature = hash({ concept: data.conceptName, aliases: jsonArray(data.aliases).sort(), statement: data.statement, classification: data.classification, qualifications: entity.fields.qualifications ?? "", reviewNote: data.reviewNote ?? null });
       return { key: entity.id, materialID: entity.id, entity, signature, snapshot: data };
     });
   }
@@ -107,117 +109,237 @@ export class RecallService {
   }
   async generate(job: ClaimedJob, signal: AbortSignal) {
     const subject = await ownedSubject(this.db, job.userId, job.subjectId), selection = requireValue(job.selection), records = await snapshot(this.db, job.userId, job.subjectId), units = this.units(records);
-    const done = jsonObject(job.checkpoint.materials ?? {}), checkpoint = structuredClone(job.checkpoint);
+    const checkpoint = structuredClone(job.checkpoint), done: JSONObject = {};
     const open = await this.db.select().from(recallSessions).where(and(eq(recallSessions.userId, job.userId), eq(recallSessions.subjectId, job.subjectId), eq(recallSessions.finished, false)));
     const reserved = new Set(open.flatMap(s => jsonArray(s.state.queue).slice(Number(s.state.index ?? 0))));
     const prepared = await this.db.select().from(recallMaterials).where(and(eq(recallMaterials.userId, job.userId), eq(recallMaterials.subjectId, job.subjectId)));
-    for (const unit of units) {
-      if (prepared.some(m => m.id === unit.materialID && m.signature === unit.signature && ["ready", "context", "duplicate"].includes(m.status)) && job.input.regenerateMaterialID !== unit.materialID) done[unit.key] = unit.signature;
-      else if (done[unit.key] === unit.signature) delete done[unit.key];
+    const history = await this.db.select().from(recallTargets).where(and(eq(recallTargets.userId, job.userId), eq(recallTargets.subjectId, job.subjectId)));
+    const exactGroups = new Map<string, Unit[]>(), equivalents = new Map<string, Unit>();
+    for (const u of units) {
+      const identity = hash({ kind: u.entity.kind, conceptID: u.snapshot.conceptID, endpoints: u.snapshot.relatedConceptIDs, statement: stringValue(u.snapshot.statement).trim(), classification: u.snapshot.classification, qualifications: u.snapshot.qualifications, reviewNote: u.snapshot.reviewNote });
+      const group = exactGroups.get(identity) ?? []; group.push(u); exactGroups.set(identity, group);
     }
-    for (let offset = 0; offset < units.length; offset += 6) {
-      signal.throwIfAborted(); const focus = units.slice(offset, offset + 6).filter(u => done[u.key] !== u.signature && !reserved.has(u.key) && (!job.input.regenerateMaterialID || job.input.regenerateMaterialID === u.key));
-      if (!focus.length) continue;
-      const contextIDs = new Set(focus.flatMap(u => [stringValue(u.snapshot.conceptID), ...jsonArray(u.snapshot.relatedConceptIDs)]));
-      const contexts = records.filter(r => r.kind === "concept" && !r.isRetired && contextIDs.has(r.id)).map(r => ({ id: r.id, name: r.fields.name ?? "", explanation: stringValue(r.fields.explanation).slice(0, 8000) }));
-      const unitInput = (u: Unit) => ({ key: u.key, materialID: u.materialID, ...u.snapshot, evidence: jsonArray(u.snapshot.evidence).map(e => ({ id: evidenceID(u.key, e), quote: jsonObject(e).quote ?? "" })) });
-      const planResult = await structured(this.ai, job.userId, selection, "recall_plan", policies.recall_learningPlanInstructions,
-        { focusKeys: focus.map(u => u.key), units: asJSON(focus.map(unitInput)) }, z.strictObject({ plans: keyed(focus.map(u => u.key), learningPlanSchema) }), signal);
-      const plans: JSONObject = {};
-      for (const unit of focus) {
-        const proposal = planResult.plans[unit.key]!;
-        const grounded = proposal.evidenceQuotes.every(quote => jsonArray(unit.snapshot.evidence).some(e => stringValue(jsonObject(e).quote).includes(quote)));
-        const invalidDuplicate = proposal.disposition === "duplicate" && (unit.entity.kind !== "connection" || !focus.some(u => u.key === proposal.equivalentKey && u.entity.kind === "fact"));
-        plans[unit.key] = grounded && !invalidDuplicate ? asJSON(proposal) : { disposition: "practice", objective: "Retrieve this saved claim's essential meaning.", essentialMeanings: [unit.snapshot.statement ?? ""], contextualMeanings: [], optionalPrecision: [], reason: "Preserved for question verification because the proposed eligibility lacked grounded support.", evidenceQuotes: jsonArray(unit.snapshot.evidence).slice(0, 1).map(e => jsonObject(e).quote ?? ""), equivalentKey: null };
-      }
-      const nonPractice = Object.keys(plans).filter(key => jsonObject(plans[key]).disposition !== "practice");
-      if (nonPractice.length) {
-        const verification = await structured(this.ai, job.userId, selection, "recall_plan_review", policies.recall_learningPlanReviewInstructions,
-          { units: asJSON(focus.map(unitInput)), proposals: plans }, z.strictObject({ reviews: keyed(nonPractice, z.strictObject({ approved: z.boolean(), reason: z.string() })) }), signal);
-        for (const key of nonPractice) if (!verification.reviews[key]?.approved) jsonObject(plans[key]).disposition = "practice";
-      }
-      const practice = focus.filter(u => jsonObject(plans[u.key]).disposition === "practice" && !u.snapshot.reviewNote && jsonArray(u.snapshot.evidence).length);
-      const accepted: Question[] = [...new Map(prepared.filter(m => focus.some(u => u.materialID === m.id && u.signature === m.signature) && job.input.regenerateMaterialID !== m.id).flatMap(m => jsonArray(m.bank.questions).map(q => jsonObject(q) as unknown as Question)).filter(q => q.verified && q.criteria.every(c => { const unit = units.find(u => u.key === c.unitKey); return unit && c.evidenceIDs.every(id => jsonArray(unit.snapshot.evidence).some(e => evidenceID(c.unitKey, e) === id)); })).map(q => [q.id, q])).values()], issues: JSONObject = {};
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const missing = practice.filter(u => !accepted.some(q => new Set(q.criteria.map(c => c.unitKey)).size === 1 && q.criteria[0]?.unitKey === u.key));
-        if (!missing.length) break;
-        const generated = await structured(this.ai, job.userId, selection, "recall_design", policies.design_designInstructions,
-          { focusKeys: missing.map(u => u.key), units: asJSON(focus.map(u => ({ ...unitInput(u), learningPlan: plans[u.key] }))), concepts: asJSON(contexts), repairIssues: issues, previousRejectedQuestions: [], includeIntegratedQuestions: attempt === 0, mode: "coverage", existingQuestions: asJSON(accepted), enrichmentKeys: [], requestedFormat: null }, bankSchema, signal);
-        for (const proposed of generated.questions) {
-          const question: Question = { ...proposed, id: randomUUID(), verified: false };
-          try {
-            this.validateQuestion(question, focus, missing.map(u => u.key));
-            await this.verifyQuestion(job, focus, question, signal);
-            accepted.push(question);
-            // Checkpoint each accepted bank before another provider request or repair.
-            await this.install(job, subject.revisionId, focus, plans, accepted, issues);
-          } catch (error) {
-            if (!(error instanceof DomainError) || !["INVALID_QUESTION", "INVALID_AI_RESPONSE"].includes(error.code)) throw error;
-            for (const c of question.criteria) issues[c.unitKey] = error.message;
+    for (const group of exactGroups.values()) {
+      group.sort((a,b) => Number(history.find(t => t.id === b.key)?.memory?.reps ?? 0) - Number(history.find(t => t.id === a.key)?.memory?.reps ?? 0) || a.key.localeCompare(b.key));
+      const canonicalUnit = group[0]!;
+      canonicalUnit.snapshot.evidence = [...new Map(group.flatMap(u => jsonArray(u.snapshot.evidence)).map(e => [hash(e), e])).values()];
+      for (const duplicate of group.slice(1)) equivalents.set(duplicate.key, canonicalUnit);
+    }
+    for (const unit of units) {
+      const saved = prepared.find(m => m.id === unit.materialID && m.signature === unit.signature);
+      if (saved && saved.bank.policyVersion === designVersion && ["ready", "context"].includes(saved.status) && job.input.regenerateMaterialID !== unit.materialID) done[unit.key] = unit.signature;
+      if (saved?.signature === unit.signature) unit.snapshot.learningPlan = saved.snapshot.learningPlan ?? null;
+    }
+    const sourcePassages = units.some(u => u.entity.kind === "connection") ? await this.db.select().from(passages).where(and(eq(passages.userId, job.userId), eq(passages.subjectId, job.subjectId))).orderBy(asc(passages.ordinal)) : [];
+    for (const u of units.filter(u => u.entity.kind === "connection")) {
+      const evidence = jsonArray(u.snapshot.evidence), anchors = [...evidence];
+      let extraBytes = 0;
+      for (const raw of anchors) {
+        const anchor = jsonObject(raw), source = sourcePassages.filter(p => p.sourceId === anchor.sourceID), index = source.findIndex(p => p.id === anchor.segmentID);
+        if (index < 0) continue;
+        for (const direction of [-1, 1]) {
+          let characters = 0;
+          for (let i = index + direction; i >= 0 && i < source.length && characters < 1000; i += direction) {
+            const p = source[i]!, reference = { sourceID: p.sourceId, segmentID: p.id, quote: p.text };
+            characters += p.text.length;
+            const size = Buffer.byteLength(JSON.stringify(reference)); if (extraBytes + size > 6000) break;
+            if (!evidence.some(e => jsonObject(e).sourceID === p.sourceId && jsonObject(e).segmentID === p.id)) { evidence.push(reference); extraBytes += size; }
           }
         }
       }
-      const enrichKeys = practice.filter(u => accepted.some(q => q.criteria.length && q.criteria.every(c => c.unitKey === u.key)) && accepted.filter(q => q.criteria.some(c => c.unitKey === u.key)).length < 3).map(u => u.key);
-      if (enrichKeys.length) {
+      u.snapshot.evidence = evidence;
+    }
+    const pending = units.filter(u => done[u.key] !== u.signature && !reserved.has(u.key) && (!job.input.regenerateMaterialID || job.input.regenerateMaterialID === u.key));
+    const batches: Unit[][] = [];
+    for (const conceptID of [...new Set(pending.map(u => stringValue(u.snapshot.conceptID)))].sort()) {
+      const members = pending.filter(u => u.snapshot.conceptID === conceptID).sort((a,b) => a.key.localeCompare(b.key));
+      for (let i = 0; i < members.length; i += 6) batches.push(members.slice(i, i + 6));
+    }
+    let completed = 0;
+    const controller = new AbortController();
+    signal = AbortSignal.any([signal, controller.signal]);
+    const processBatch = async (sourceFocus: Unit[]) => {
+      const focus = structuredClone(sourceFocus);
+      signal.throwIfAborted();
+      const focusKeys = focus.map(u => u.key), contextIDs = new Set(focus.flatMap(u => [stringValue(u.snapshot.conceptID), ...jsonArray(u.snapshot.relatedConceptIDs).map(stringValue)]));
+      const neighbours = units.filter(u => u.entity.kind === "connection" && jsonArray(u.snapshot.relatedConceptIDs).some(id => contextIDs.has(stringValue(id)))).flatMap(u => jsonArray(u.snapshot.relatedConceptIDs).map(stringValue)).filter(id => !contextIDs.has(id));
+      for (const id of [...new Set(neighbours)].sort().slice(0, 4)) contextIDs.add(id);
+      const topics = new Set(records.filter(r => r.kind === "placement" && contextIDs.has(stringValue(r.fields.conceptID))).map(r => stringValue(r.fields.topicID)));
+      for (const id of [...new Set(records.filter(r => r.kind === "placement" && topics.has(stringValue(r.fields.topicID))).map(r => stringValue(r.fields.conceptID)))].sort().filter(id => !contextIDs.has(id)).slice(0, 4)) contextIDs.add(id);
+      let bytes = Buffer.byteLength(JSON.stringify(focus));
+      const bundle = [...focus];
+      for (const u of units.filter(u => !focusKeys.includes(u.key) && !reserved.has(u.key) && contextIDs.has(stringValue(u.snapshot.conceptID))).sort((a,b) => a.key.localeCompare(b.key))) {
+        const size = Buffer.byteLength(JSON.stringify(u.snapshot)); if (bytes + size > 55_000) continue; bytes += size; bundle.push(structuredClone(u));
+      }
+      const contexts = records.filter(r => r.kind === "concept" && !r.isRetired && contextIDs.has(r.id)).map(r => ({ id: r.id, name: r.fields.name ?? "", aliases: r.fields.aliases ?? [], definition: r.fields.explanation ?? "", statements: units.filter(u => u.snapshot.conceptID === r.id).map(u => u.snapshot.statement) }));
+      const plans: JSONObject = {}, issues: JSONObject = {};
+      for (const u of focus) {
+        const equivalent = equivalents.get(u.key);
+        if (equivalent) plans[u.key] = { version: designVersion, disposition: "duplicate", reason: "Identical saved knowledge shares one practice target.", canonicalMaterialID: equivalent.key, canonicalSignature: equivalent.signature, equivalentKey: equivalent.key };
+      }
+      const eligible = focus.filter(u => !equivalents.has(u.key) && !u.snapshot.reviewNote && jsonArray(u.snapshot.evidence).length);
+      for (const u of focus.filter(u => !eligible.includes(u) && !equivalents.has(u.key))) { plans[u.key] = { disposition: "sourceIssue", reason: u.snapshot.reviewNote ?? "This target has no saved source evidence." }; issues[u.key] = jsonObject(plans[u.key]).reason!; }
+      const toPlan = eligible.filter(u => jsonObject(u.snapshot.learningPlan ?? {}).version !== designVersion || !jsonArray(jsonObject(u.snapshot.learningPlan ?? {}).evidenceQuotes).every(q => jsonArray(u.snapshot.evidence).some(e => stringValue(jsonObject(e).quote).includes(stringValue(q)))) || job.input.regenerateMaterialID === u.key);
+      for (const u of eligible.filter(u => !toPlan.includes(u))) plans[u.key] = u.snapshot.learningPlan!;
+      if (toPlan.length) {
+        const result = await structured(this.ai, job.userId, selection, "recall_plan", policies.recall_learningPlanInstructions,
+          { focusKeys: toPlan.map(u => u.key), units: asJSON(bundle.map(u => unitInput(u))) }, z.strictObject({ plans: keyed(toPlan.map(u => u.key), learningPlanSchema) }), signal);
+        for (const u of toPlan) {
+          const proposal = result.plans[u.key]!, canonical = bundle.find(c => c.key === proposal.equivalentKey);
+          const grounded = proposal.evidenceQuotes.every(q => bounded(q, 1000) && jsonArray(u.snapshot.evidence).some(e => stringValue(jsonObject(e).quote).includes(q)));
+          const duplicateValid = proposal.disposition !== "duplicate" ? proposal.equivalentKey === null : u.entity.kind === "connection" && canonical?.entity.kind === "fact" && !canonical.snapshot.reviewNote && jsonArray(canonical.snapshot.evidence).length > 0 && (result.plans[canonical.key]?.disposition ?? jsonObject(canonical.snapshot.learningPlan ?? {}).disposition) === "practice";
+          plans[u.key] = grounded && duplicateValid && bounded(proposal.reason, 1000) && [...proposal.essentialMeanings, ...proposal.contextualMeanings, ...proposal.optionalPrecision].every(m => bounded(m, 600)) && (proposal.disposition !== "practice" || bounded(proposal.objective, 400) && proposal.essentialMeanings.length > 0)
+            ? { ...asJSON(proposal) as JSONObject, version: designVersion, canonicalMaterialID: canonical?.materialID ?? null, canonicalSignature: canonical?.signature ?? null }
+            : { version: designVersion, disposition: "practice", objective: "Retrieve the essential meaning of this saved claim.", essentialMeanings: [u.snapshot.statement!], contextualMeanings: [], optionalPrecision: [], reason: "Preserve this target for independent question verification.", evidenceQuotes: jsonArray(u.snapshot.evidence).slice(0,1).map(e => jsonObject(e).quote!), equivalentKey: null };
+        }
+        const nonPractice = toPlan.filter(u => jsonObject(plans[u.key]).disposition !== "practice").map(u => u.key);
+        if (nonPractice.length) {
+          const review = await structured(this.ai, job.userId, selection, "recall_plan_review", policies.recall_learningPlanReviewInstructions,
+            { units: asJSON(bundle.map(u => unitInput(u))), proposals: Object.fromEntries(nonPractice.map(k => [k, plans[k]!])) }, z.strictObject({ reviews: keyed(nonPractice, z.strictObject({ approved: z.boolean(), reason: z.string() })) }), signal);
+          for (const key of nonPractice) if (!review.reviews[key]?.approved) plans[key] = { ...jsonObject(plans[key]), disposition: "practice", objective: "Retrieve the essential meaning of this saved claim.", essentialMeanings: [focus.find(u => u.key === key)!.snapshot.statement!], equivalentKey: null, canonicalMaterialID: null, canonicalSignature: null };
+        }
+      }
+      for (const u of bundle) if (plans[u.key]) u.snapshot.learningPlan = plans[u.key]!;
+      // Save eligibility before spending requests on drafts; do not mark uncovered practice as failed yet.
+      await this.install(job, subject.revisionId, focus, plans, [], issues, true);
+      const practice = eligible.filter(u => jsonObject(plans[u.key]).disposition === "practice"), blocked = new Set<string>();
+      const currentBanks = await this.db.select().from(recallMaterials).where(and(eq(recallMaterials.userId, job.userId), eq(recallMaterials.subjectId, job.subjectId)));
+      const accepted: Question[] = [...new Map(currentBanks.filter(m => !history.some(t => t.id === m.id && t.excluded) && bundle.some(u => u.key === m.id && u.signature === m.signature) && job.input.regenerateMaterialID !== m.id).flatMap(m => jsonArray(m.bank.questions).map(q => jsonObject(q) as unknown as Question)).filter(q => q.verified && q.designVersion === designVersion && q.criteria.every(c => bundle.some(u => u.key === c.unitKey && c.evidenceIDs.every(id => jsonArray(u.snapshot.evidence).some(e => evidenceID(u.key,e) === id))))).map(q => [q.id, q])).values()];
+      let rejected: Question[] = [];
+      const diagnostics: JSONObject[] = [];
+      const accept = async (proposed: Question, keys: string[], enrichment: boolean) => {
+        const q = { ...proposed, expectedAnswer: proposed.expectedAnswer.trim() || proposed.criteria.map(c => c.point).join(" "), id: randomUUID(), verified: false, designVersion, preparationModel: selection.model };
+        try {
+          this.validateQuestion(q, bundle, keys); validateDesign(q, bundle, keys, enrichment);
+          await this.verifyQuestion(job, bundle, q, signal, plans);
+          q.targetSignatures = Object.fromEntries([...new Set(q.criteria.map(c => c.unitKey))].map(key => [key, bundle.find(u => u.key === key)!.signature]));
+          diagnostics.push({ stage: "verified", questionID: q.id, prompt: q.prompt, format: q.input.kind });
+          const cited = new Set([...q.criteria.flatMap(c => c.evidenceIDs), ...q.precisionNotes.flatMap(n => n.evidenceIDs)]);
+          q.evidenceCatalog = Object.fromEntries(bundle.flatMap(u => jsonArray(u.snapshot.evidence).filter(e => cited.has(evidenceID(u.key, e))).map(e => [evidenceID(u.key, e), e])));
+          accepted.push(q); for (const key of new Set(q.criteria.map(c => c.unitKey))) delete issues[key];
+          await this.install(job, subject.revisionId, bundle.filter(u => focusKeys.includes(u.key) || accepted.some(q => q.criteria.every(c => c.unitKey === u.key))), plans, accepted, issues, false, diagnostics.slice(-12));
+        } catch (error) {
+          if (!(error instanceof DomainError) || !["INVALID_QUESTION", "INVALID_AI_RESPONSE"].includes(error.code)) throw error;
+          for (const c of q.criteria) issues[c.unitKey] = error.message;
+          diagnostics.push({ stage: "rejected", questionID: q.id, prompt: q.prompt, format: q.input.kind, issue: error.message.slice(0, 4000), review: asJSON(q.verification ?? {}) });
+          rejected.push(q);
+        }
+      };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const missing = practice.filter(u => !blocked.has(u.key) && !accepted.some(q => q.criteria.every(c => c.unitKey === u.key)));
+        if (!missing.length) break;
+        const keys = missing.map(u => u.key), prior = rejected; rejected = [];
+        const patches = prior.filter(q => q.criteria.length > 0 && new Set(q.criteria.map(c => c.unitKey)).size === 1 && keys.includes(q.criteria[0]!.unitKey) && typeof q.verification?.promptRepair === "string");
+        for (const patch of patches) await accept({ ...patch, prompt: patch.verification!.promptRepair as string }, [patch.criteria[0]!.unitKey], false);
+        const draftKeys = keys.filter(k => !patches.some(q => q.criteria[0]!.unitKey === k));
+        if (!draftKeys.length) continue;
+        try {
+          const generated = await structured(this.ai, job.userId, selection, "recall_design", policies.design_designInstructions,
+            { focusKeys: draftKeys, units: asJSON(bundle.map(u => unitInput(u, plans))), concepts: asJSON(contexts), repairIssues: issues,
+              previousRejectedQuestions: asJSON(prior.slice(-6).map(q => repairExample(q, bundle)).filter((_, i, all) => Buffer.byteLength(JSON.stringify(all.slice(0, i + 1))) <= 12_000)), includeIntegratedQuestions: false, mode: "coverage", existingQuestions: [], enrichmentKeys: [], requestedFormat: null }, designBankSchema(draftKeys.length, draftKeys), signal);
+          for (const b of generated.blocked) if (draftKeys.includes(b.key) && bounded(b.reason, 2000)) { blocked.add(b.key); plans[b.key] = { ...jsonObject(plans[b.key]), disposition: "sourceIssue", reason: b.reason }; issues[b.key] = b.reason; }
+          for (const q of generated.questions) await accept(q as Question, draftKeys, false);
+        } catch (error) {
+          if (!(error instanceof DomainError) || error.code !== "INVALID_AI_RESPONSE") throw error;
+          for (const k of draftKeys) issues[k] = error.message;
+        }
+      }
+      for (const u of bundle.filter(u => !focusKeys.includes(u.key))) {
+        const saved = currentBanks.find(m => m.id === u.key && m.signature === u.signature);
+        if (saved) u.snapshot.learningPlan = saved.snapshot.learningPlan ?? null;
+      }
+      const enrichment = enrichmentSelection(bundle, focusKeys, accepted);
+      if (enrichment.keys.length) {
         try {
           const enriched = await structured(this.ai, job.userId, selection, "recall_enrichment", policies.design_designInstructions,
-            { focusKeys: [], units: asJSON(focus.map(u => ({ ...unitInput(u), learningPlan: plans[u.key] }))), concepts: asJSON(contexts), repairIssues: {}, previousRejectedQuestions: [], includeIntegratedQuestions: true, mode: "enrichment", existingQuestions: asJSON(accepted), enrichmentKeys: enrichKeys, requestedFormat: null }, bankSchema, signal, true, 1);
-          for (const proposed of enriched.questions) {
-            const question: Question = { ...proposed, id: randomUUID(), verified: false };
-            if (accepted.some(q => q.prompt === question.prompt && q.input.kind === question.input.kind)) continue;
-            try {
-              this.validateQuestion(question, focus, enrichKeys); await this.verifyQuestion(job, focus, question, signal);
-              accepted.push(question); await this.install(job, subject.revisionId, focus, plans, accepted, issues);
-            } catch (error) { if (!(error instanceof DomainError) || !["INVALID_QUESTION", "INVALID_AI_RESPONSE"].includes(error.code)) throw error; }
-          }
-        } catch (error) { if (!(error instanceof DomainError) || error.code !== "INVALID_AI_RESPONSE") throw error; }
+            { focusKeys: [], units: asJSON(bundle.map(u => unitInput(u, plans))), concepts: asJSON(contexts), repairIssues: {}, previousRejectedQuestions: [], includeIntegratedQuestions: true,
+              mode: "enrichment", existingQuestions: asJSON(accepted.map(q => ({ prompt: q.prompt, expectedAnswer: q.expectedAnswer, requiredMeanings: q.criteria.map(c => c.requiredMeaning), inputKind: q.input.kind }))), enrichmentKeys: enrichment.keys, requestedFormat: enrichment.format }, designBankSchema(1, enrichment.keys, enrichment.format), signal, true, 1);
+          for (const q of enriched.questions) if (!accepted.some(a => a.prompt === q.prompt && a.input.kind === q.input.kind)) await accept(q as Question, enrichment.keys, true);
+        } catch (error) {
+          if (signal.aborted || !(error instanceof DomainError) || ["AI_UNAUTHORIZED", "AI_DISCONNECTED", "AI_LIMIT", "MATERIAL_CHANGED"].includes(error.code)) throw error;
+          // Optional enrichment cannot discard already prepared coverage.
+        }
       }
-      for (const unit of practice) if (!accepted.some(q => q.criteria.some(c => c.unitKey === unit.key))) issues[unit.key] = issues[unit.key] ?? "No verified focused question was produced after bounded repairs. Retry preparation.";
-      await this.install(job, subject.revisionId, focus, plans, accepted, issues);
-      for (const unit of focus) if (jsonObject(plans[unit.key]).disposition !== "practice" || accepted.some(q => new Set(q.criteria.map(c => c.unitKey)).size === 1 && q.criteria[0]?.unitKey === unit.key)) done[unit.key] = unit.signature;
-      checkpoint.materials = done; await this.queue.checkpoint(job, checkpoint, { stage: "preparingRecall", completed: Math.min(offset + 6, units.length), total: units.length });
-    }
+      for (const u of practice) {
+        if (accepted.some(q => q.criteria.every(c => c.unitKey === u.key))) delete issues[u.key];
+        else issues[u.key] ??= "No verified focused question was produced after bounded repairs. Retry preparation.";
+      }
+      await this.install(job, subject.revisionId, bundle.filter(u => focusKeys.includes(u.key) || accepted.some(q => q.criteria.every(c => c.unitKey === u.key))), plans, accepted, issues, false, diagnostics.slice(-12));
+      completed += focus.length; checkpoint.materials = done; await this.queue.checkpoint(job, checkpoint, { stage: "preparingRecall", completed, total: pending.length });
+    };
+    const concurrency = Math.min(16, batches.length);
+    let cursor = 0, failure: unknown;
+    const workers = Array.from({ length: concurrency }, async () => {
+      try {
+        for (;;) { signal.throwIfAborted(); const batch = batches[cursor++]; if (!batch) return; await processBatch(batch); }
+      } catch (error) { failure ??= error; controller.abort(); throw error; }
+    });
+    await Promise.allSettled(workers);
+    if (failure) throw failure;
     await this.queue.complete(job, async () => {});
   }
-  private async verifyQuestion(job: ClaimedJob, focus: Unit[], question: Question, signal: AbortSignal) {
-    const selection = requireValue(job.selection), unitInput = (u: Unit) => ({ key: u.key, materialID: u.materialID, ...u.snapshot, evidence: jsonArray(u.snapshot.evidence).map(e => ({ id: evidenceID(u.key, e), quote: jsonObject(e).quote ?? "" })) });
+  private async verifyQuestion(job: ClaimedJob, focus: Unit[], question: Question, signal: AbortSignal, plans: JSONObject = {}) {
+    const selection = requireValue(job.selection);
     const unitKeys = [...new Set(question.criteria.map(c => c.unitKey))];
     const verdict = await structured(this.ai, job.userId, selection, "recall_verification", policies.design_designVerificationInstructions,
-      { questions: [{ ...asJSON(question) as JSONObject, designID: question.id, bindings: unitKeys.map(key => ({ materialID: key, criterionIDs: question.criteria.filter(c => c.unitKey === key).map(c => c.id) })) }], targetCatalog: asJSON(focus.map(unitInput)) },
+      asJSON(verificationInput(question, focus, plans)) as JSONObject,
       z.strictObject({ reviews: keyed([question.id], verificationSchema(question, unitKeys)) }), signal);
     const review = verdict.reviews[question.id]!;
-    const quality = review.quality, scopeMismatch = review.scopeCheck.validUnderPrompt && !review.scopeCheck.coveredByRubric && review.scopeCheck.sourceSupported;
-    if (review.issues.length || scopeMismatch || review.practiceValue !== "substantive" || !quality.usefulRetrieval || !quality.cueSafe || !quality.manageable || !quality.meaningfulCues || (unitKeys.length === 1 ? !quality.singleTargetCoherent : !quality.focused || !["contrast", "relationship"].includes(quality.combination))) throw new DomainError("INVALID_QUESTION", review.issues.map(i => i.problem).join("; ") || quality.reason);
+    question.verification = { ...review, promptRepair: null };
+    const quality = review.quality;
+    const scopeMismatch = review.scopeCheck.validUnderPrompt && !review.scopeCheck.coveredByRubric && review.scopeCheck.sourceSupported && review.scopeCheck.supportingQuotes.length > 0 && review.scopeCheck.supportingQuotes.every(q => bounded(q, 1000) && focus.some(u => jsonArray(u.snapshot.evidence).some(e => stringValue(jsonObject(e).quote).includes(q))));
+    const substantiveIssues = review.issues.filter(i => i.basis !== "scope" || scopeMismatch);
+    const repairable = substantiveIssues.every(i => ["scope", "presentation"].includes(i.basis)) && (scopeMismatch || substantiveIssues.length > 0 || review.optionalCriteriaRequested);
+    if (repairable && review.promptRepair && bounded(review.promptRepair, 1200) && review.promptRepair !== question.prompt) {
+      question.verification = { ...review, promptRepair: review.promptRepair };
+      if (review.optionalCriteriaRequested && question.input.kind === "text") {
+        question.criteria = question.criteria.filter(c => review.criterionEssentials[c.id]?.essential);
+        question.expectedAnswer = question.criteria.map(c => c.point).join(" ");
+      }
+    }
+    if (!bounded(quality.objective, 400) || unitKeys.length > 1 && (!bounded(quality.comparisonAxis, 400) || !bounded(quality.integrationBenefit, 600))) throw new DomainError("INVALID_QUESTION", "Integration needs one supported comparison axis and a useful retrieval benefit.");
+    if (substantiveIssues.length || scopeMismatch || !quality.usefulRetrieval || !quality.cueSafe || !quality.manageable || !quality.meaningfulCues || (unitKeys.length === 1 ? !quality.singleTargetCoherent : !quality.focused || !["contrast", "relationship"].includes(quality.combination))) throw new DomainError("INVALID_QUESTION", substantiveIssues.map(i => `${i.gate}: ${i.problem} Example: ${i.counterexample} Repair: ${i.repair}`).join("; ") || quality.reason);
     if (question.criteria.some(c => !review.criterionSupport[c.id]?.supported) || unitKeys.some(key => review.coverage[key]?.status !== "complete" || review.coverage[key]!.missingParts.length)) throw new DomainError("INVALID_QUESTION", "The rubric does not fully cover the supported target meaning.");
     const essentialCount = question.criteria.filter(c => review.criterionEssentials[c.id]?.essential).length;
     if (essentialCount < question.criteria.length && (review.optionalCriteriaRequested || question.input.kind !== "text")) throw new DomainError("INVALID_QUESTION", "Align the visible task and keyed controls with essential criteria before verification.");
     if (question.input.kind === "matching" && (new Set(Object.values(review.matchingDimensions)).size !== 1 || question.input.matches.some(pair => canonical(review.matchingAnswers[pair.leftID]) !== canonical([pair.rightID])))) throw new DomainError("INVALID_QUESTION", "Matching needs one unique answer per item on the same semantic dimension.");
-    const visible = [question.prompt, question.givenContext, ...("options" in question.input ? question.input.options.map(o => o.text) : [])].join("\n");
-    const disclosures = review.disclosures.map(disclosure => {
+    const visible = [question.prompt, ...("options" in question.input ? question.input.options.map(o => o.text) : [])].join("\n");
+    const disclosures = review.disclosures.filter(d => !unitKeys.includes(stringValue(jsonObject(plans[d.materialID] ?? focus.find(u => u.key === d.materialID)?.snapshot.learningPlan ?? {}).canonicalMaterialID))).map(disclosure => {
       const unit = focus.find(u => u.materialID === disclosure.materialID);
       if (!unit || unitKeys.includes(disclosure.materialID) || !disclosure.necessary || disclosure.visibleQuotes.some(q => !visible.includes(q)) || disclosure.evidenceQuotes.some(q => !jsonArray(unit.snapshot.evidence).some(e => stringValue(jsonObject(e).quote).includes(q)))) throw new DomainError("INVALID_QUESTION", "Disclosures require necessary visible context and exact supporting evidence for an unassessed target.");
       return { ...disclosure, signature: unit.signature };
     });
-    question.criteria = question.criteria.filter(c => review.criterionEssentials[c.id]?.essential).map(c => ({ ...c, requiredMeaning: review.requiredMeanings[c.id] ?? c.requiredMeaning, acceptedExamples: review.acceptedAnswers[c.id] ?? c.acceptedExamples }));
+    for (const c of question.criteria.filter(c => review.criterionEssentials[c.id]?.essential)) {
+      if (question.input.kind === "text" && review.independentParts[c.id]!.length !== 1) throw new DomainError("INVALID_QUESTION", `Split independently requested meanings in criterion ${c.id} into separate criteria under the same target.`);
+      if (!bounded(review.requiredMeanings[c.id]!, 1000) || !bounded(review.contextualAnswers[c.id]!, 600) || review.acceptedAnswers[c.id]!.some(a => !bounded(a, 400))) throw new DomainError("INVALID_QUESTION", "Use concise reviewed contextual meanings and valid natural answers.");
+      if (review.promptGivens[c.id]!.some(g => !visible.includes(g) && g.trim().toLowerCase() === review.requiredMeanings[c.id]!.trim().toLowerCase())) throw new DomainError("INVALID_QUESTION", "New requested meaning cannot be treated as unseen given context.");
+    }
+    question.criteria = question.criteria.filter(c => review.criterionEssentials[c.id]?.essential).map(c => ({ ...c, requiredMeaning: review.requiredMeanings[c.id]!, requestedPart: review.independentParts[c.id]![0]!, essentialReason: review.criterionEssentials[c.id]!.reason,
+      promptGivens: review.promptGivens[c.id]!.filter(g => visible.includes(g)), acceptedExamples: [...new Set([...review.acceptedAnswers[c.id]!, review.contextualAnswers[c.id]!])].slice(0,3) }));
+    question.practiceValue = review.practiceValue;
     if (!question.criteria.length || unitKeys.some(key => !question.criteria.some(c => c.unitKey === key))) throw new DomainError("INVALID_QUESTION", "Each target requires an essential response criterion.");
     question.precisionNotes = question.precisionNotes.filter(n => !review.omitPrecisionNoteIDs.includes(n.id)); question.verified = true; question.verification = { ...review, disclosures };
     return question;
   }
-  private async install(job: ClaimedJob, revisionID: string, units: Unit[], plans: JSONObject, questions: Question[], issues: JSONObject) {
+  private async install(job: ClaimedJob, revisionID: string, units: Unit[], plans: JSONObject, questions: Question[], issues: JSONObject, planningOnly = false, diagnostics: JSONObject[] = []) {
     await this.queue.fenced(job, async tx => {
       const subject = await ownedSubject(tx, job.userId, job.subjectId, true); if (subject.revisionId !== revisionID) throw new DomainError("MATERIAL_CHANGED", "The subject changed during preparation. Retry to use the latest saved material.", 409);
+      const active = await tx.select().from(recallSessions).where(and(eq(recallSessions.userId, job.userId), eq(recallSessions.subjectId, job.subjectId), eq(recallSessions.finished, false)));
+      const reserved = new Set(active.flatMap(s => jsonArray(s.state.queue).slice(Number(s.state.index ?? 0))));
       for (const unit of units) {
+        if (reserved.has(unit.materialID)) continue;
         const existing = (await tx.select().from(recallMaterials).where(and(eq(recallMaterials.userId, job.userId), eq(recallMaterials.subjectId, job.subjectId), eq(recallMaterials.id, unit.materialID))))[0];
-        const saved = existing?.signature === unit.signature && job.input.regenerateMaterialID !== unit.materialID ? jsonArray(existing.bank.questions).map(q => jsonObject(q) as unknown as Question).filter(q => q.criteria.every(c => c.unitKey !== unit.key || c.evidenceIDs.every(id => jsonArray(unit.snapshot.evidence).some(e => evidenceID(c.unitKey, e) === id)))) : [];
+        const saved = existing?.signature === unit.signature && job.input.regenerateMaterialID !== unit.materialID ? jsonArray(existing.bank.questions).map(q => jsonObject(q) as unknown as Question).filter(q => q.designVersion === designVersion && q.criteria.every(c => c.unitKey !== unit.key || c.evidenceIDs.every(id => jsonArray(unit.snapshot.evidence).some(e => evidenceID(c.unitKey, e) === id)))) : [];
         const combined = [...new Map([...saved, ...questions.filter(q => q.criteria.some(c => c.unitKey === unit.key))].map(q => [q.id, q])).values()];
-        const disposition = stringValue(jsonObject(plans[unit.key]).disposition), sourceIssue = !!unit.snapshot.reviewNote || jsonArray(unit.snapshot.evidence).length === 0;
-        const status = sourceIssue ? "sourceIssue" : disposition !== "practice" ? disposition : combined.some(q => new Set(q.criteria.map(c => c.unitKey)).size === 1 && q.criteria[0]?.unitKey === unit.key) ? "ready" : "failed";
-        const bank: JSONObject = { questions: asJSON(combined), issue: issues[unit.key] ?? null, policyVersion: "recall-design-v13" };
-        await tx.insert(recallMaterials).values({ id: unit.materialID, userId: job.userId, subjectId: job.subjectId, entityId: unit.entity.id, signature: unit.signature, status, snapshot: { ...unit.snapshot, learningPlan: plans[unit.key] ?? null }, bank, revisionId: revisionID })
-          .onConflictDoUpdate({ target: [recallMaterials.userId, recallMaterials.subjectId, recallMaterials.id], set: { signature: unit.signature, status, snapshot: { ...unit.snapshot, learningPlan: plans[unit.key] ?? null }, bank, revisionId: revisionID, updatedAt: new Date() } });
+        const plan = plans[unit.key] ?? unit.snapshot.learningPlan ?? { disposition: "practice" };
+        const disposition = stringValue(jsonObject(plan).disposition), sourceIssue = !!unit.snapshot.reviewNote || jsonArray(unit.snapshot.evidence).length === 0;
+        const status = sourceIssue ? "sourceIssue" : disposition !== "practice" ? disposition : combined.some(q => new Set(q.criteria.map(c => c.unitKey)).size === 1 && q.criteria[0]?.unitKey === unit.key) ? "ready" : planningOnly ? "pending" : "failed";
+        const bank: JSONObject = { questions: asJSON(combined), issue: issues[unit.key] ?? null, policyVersion: designVersion, diagnostics };
+        await tx.insert(recallMaterials).values({ id: unit.materialID, userId: job.userId, subjectId: job.subjectId, entityId: unit.entity.id, signature: unit.signature, status, snapshot: { ...unit.snapshot, learningPlan: plan }, bank, revisionId: revisionID })
+          .onConflictDoUpdate({ target: [recallMaterials.userId, recallMaterials.subjectId, recallMaterials.id], set: { signature: unit.signature, status, snapshot: { ...unit.snapshot, learningPlan: plan }, bank, revisionId: revisionID, updatedAt: new Date() } });
         const old = (await tx.select().from(recallTargets).where(and(eq(recallTargets.userId, job.userId), eq(recallTargets.subjectId, job.subjectId), eq(recallTargets.id, unit.materialID))))[0];
         await tx.insert(recallTargets).values({ id: unit.materialID, userId: job.userId, subjectId: job.subjectId, materialId: unit.materialID, signature: unit.signature, data: bank, retired: false })
-          .onConflictDoUpdate({ target: [recallTargets.userId, recallTargets.subjectId, recallTargets.id], set: { signature: unit.signature, data: bank, retired: false, ...(old && old.signature !== unit.signature ? { memory: null, dueAt: null } : {}), version: sql`${recallTargets.version}+1` } });
+          .onConflictDoUpdate({ target: [recallTargets.userId, recallTargets.subjectId, recallTargets.id], set: { signature: unit.signature, data: bank, retired: false, ...(!planningOnly && status === "ready" && questions.some(q => q.criteria.some(c => c.unitKey === unit.key)) ? { excluded: false } : {}), ...(old && old.signature !== unit.signature ? { memory: null, dueAt: null } : {}), version: sql`${recallTargets.version}+1` } });
       }
       await invalidate(tx, job.userId, "recall", job.subjectId, subject.version);
     });
@@ -265,6 +387,7 @@ export class RecallService {
     const nextDue = usable.map(t => t.dueAt ? new Date(Math.max(t.dueAt.getTime(), t.exposedAt ? t.exposedAt.getTime() + 600_000 : 0)) : null).filter((date): date is Date => date !== null && date > now).sort((a, b) => a.getTime() - b.getTime())[0];
     const overview = { total: scoped.filter(m => !["context", "duplicate", "retired"].includes(m.status)).length, prepared: usable.length, assessed: usable.filter(t => t.memory).length,
       due: due.filter(t => t.dueAt !== null).length, new: due.filter(t => !t.memory).length, issues: targets.filter(t => current.has(t.materialId) && t.excluded).length,
+      materialUpgrade: scoped.filter(m => m.bank.policyVersion !== designVersion && !["retired", "context", "duplicate"].includes(m.status)).length,
       materialPending: scoped.filter(m => ["pending", "stale", "failed"].includes(m.status)).length, materialBlocked: scoped.filter(m => ["blocked", "sourceIssue"].includes(m.status)).length,
       contextMaterials: scoped.filter(m => m.status === "context").length, duplicateMaterials: scoped.filter(m => m.status === "duplicate").length, nextDueAt: nextDue?.toISOString() ?? null,
       scopeName: topicID ? (await snapshot(this.db, userId, subjectID)).find(r => r.id === topicID)?.fields.name ?? "Topic" : subject.name };
@@ -440,14 +563,17 @@ export class RecallService {
       const target = requireValue((await tx.select().from(recallTargets).where(and(eq(recallTargets.userId, session.userId), eq(recallTargets.subjectId, session.subjectId), eq(recallTargets.id, id))))[0]);
       const material = requireValue((await tx.select().from(recallMaterials).where(and(eq(recallMaterials.userId, session.userId), eq(recallMaterials.subjectId, session.subjectId), eq(recallMaterials.id, target.materialId))))[0]);
       if (target.retired || target.excluded || material.status !== "ready" || material.revisionId !== subject.revisionId || target.signature !== material.signature) throw new DomainError("MATERIAL_CHANGED", "A participant in this question changed. Start a new practice session.", 409);
+      if (question.targetSignatures?.[id] && question.targetSignatures[id] !== material.signature) throw new DomainError("MATERIAL_CHANGED", "A bound learning target changed. Prepare Recall again.", 409);
       if (question.criteria.filter(c => c.unitKey === id).some(c => c.evidenceIDs.some(eid => !jsonArray(material.snapshot.evidence).some(e => evidenceID(id, e) === eid)))) throw new DomainError("MATERIAL_CHANGED", "This question's evidence changed. Prepare Recall again.", 409);
       participants.push(target);
     }
     return participants;
   }
   private async selectQuestion(tx: Transaction | Database, session: Session, target: Target) {
-    const questions = verifiedQuestions(target), offset = Number(target.memory?.reps ?? 0) % Math.max(1, questions.length);
-    for (const question of [...questions.slice(offset), ...questions.slice(0, offset)]) {
+    const questions = verifiedQuestions(target).sort((a,b) => presentationPriority(b) - presentationPriority(a) || a.id.localeCompare(b.id));
+    for (const question of questions) {
+      if (contextIssue(question.prompt)) continue;
+      question.prompt = displayPrompt(question.prompt);
       try {
         const participants = await this.participants(tx, session, question);
         for (const raw of jsonArray(jsonObject(asJSON(question.verification ?? {})).disclosures)) {
@@ -491,7 +617,7 @@ export class RecallService {
       const followUp = last?.followUp ? jsonObject(last.followUp) : null;
       const input = followUp ? followUp.input ? (await import("./recall-contracts.js")).answerInputSchema.parse(followUp.input) : { kind: "text" as const } : question.input;
       const rendered = renderAnswer(input, inputValue, answer);
-      turns.push({ prompt: followUp?.prompt ?? [question.givenContext, question.prompt].filter(Boolean).join("\n\n"), kind: followUp?.kind ?? "initial", criterionID: followUp?.criterionID ?? null, answer: rendered, inputValue, input: asJSON(input), submittedAt: new Date().toISOString(), inputKind: input.kind }); episode.turns = turns; episode.assessmentPending = true; delete episode.draft;
+      turns.push({ prompt: followUp?.prompt ?? question.prompt, kind: followUp?.kind ?? "initial", criterionID: followUp?.criterionID ?? null, answer: rendered, inputValue, input: asJSON(input), submittedAt: new Date().toISOString(), inputKind: input.kind }); episode.turns = turns; episode.assessmentPending = true; delete episode.draft;
       const state = { ...locked.state, episode };
       await tx.update(recallSessions).set({ state, version: version + 1, updatedAt: new Date() }).where(eq(recallSessions.id, id));
       await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: "answer", payload: { turn: turns[turns.length - 1]!, question: episode.question ?? null, sessionVersion: version + 1 } });
@@ -511,8 +637,8 @@ export class RecallService {
   private async assessReserved(userId: string, id: string, operationID: string, version: number, signal: AbortSignal, dispute: string | null, disputeScope: "initial" | "conversation", leaseID: string) {
     const session = await this.session(userId, id); expected(session.version, version);
     const target = await this.current(this.db, session), episode = jsonObject(session.state.episode);
-    const { id: questionID, verified: _verified, verification: _verification, ...questionFields } = jsonObject(episode.question);
-    const question = { ...questionSchema.parse(questionFields), id: stringValue(questionID) };
+    const { id: questionID, verified: _verified, verification: _verification, designVersion: _designVersion, preparationModel: _preparationModel, evidenceCatalog: _evidenceCatalog, targetSignatures, ...questionFields } = jsonObject(episode.question);
+    const question = { ...questionSchema.parse(questionFields), id: stringValue(questionID), targetSignatures: jsonObject(targetSignatures) as Record<string, string> };
     const participants = await this.participants(this.db, session, question as Question);
     if (participants.some(p => Number(jsonObject(episode.targetVersions)[p.id]) !== p.version)) throw new DomainError("TARGET_CHANGED", "A target changed on another device. Your answer was kept.", 409);
     const allTurns = jsonArray(episode.turns).map(jsonObject), turns = dispute && disputeScope === "initial" ? allTurns.slice(0, 1) : allTurns, assessments = jsonArray(episode.assessments), ids = question.criteria.map(c => c.id);
@@ -528,8 +654,8 @@ export class RecallService {
       const unit = materials.find(m => m.id === c.unitKey);
       return c.evidenceIDs.flatMap(id => { const evidence = unit ? jsonArray(unit.snapshot.evidence).find(e => evidenceID(c.unitKey, e) === id) : null; return evidence ? [stringValue(jsonObject(evidence).quote).slice(0, 900)] : []; });
     });
-    const gradingCriteria = question.criteria.map(c => ({ id: c.id, task: c.requestedPart, meaning: c.requiredMeaning, given: c.givenQuote ? [c.givenQuote] : [], acceptedAnswers: c.acceptedExamples, evidence: c.evidenceIDs.flatMap(id => { const m = materials.find(m => m.id === c.unitKey), e = m ? jsonArray(m.snapshot.evidence).find(e => evidenceID(c.unitKey, e) === id) : null; return e ? [stringValue(jsonObject(e).quote).slice(0, 900)] : []; }) }));
-    const input: JSONObject = { question: { prompt: [question.givenContext, question.prompt].filter(Boolean).join("\n\n"), criteria: asJSON(gradingCriteria), answerKey: question.input.kind === "text" ? null : asJSON(question.input) },
+    const gradingCriteria = question.criteria.map(c => ({ id: c.id, task: c.requestedPart, meaning: c.requiredMeaning, given: c.promptGivens ?? (c.givenQuote ? [c.givenQuote] : []), acceptedAnswers: c.acceptedExamples, evidence: c.evidenceIDs.flatMap(id => { const m = materials.find(m => m.id === c.unitKey), e = m ? jsonArray(m.snapshot.evidence).find(e => evidenceID(c.unitKey, e) === id) : null; return e ? [stringValue(jsonObject(e).quote).slice(0, 900)] : []; }) }));
+    const input: JSONObject = { question: { prompt: question.prompt, criteria: asJSON(gradingCriteria), answerKey: question.input.kind === "text" ? null : asJSON(question.input) },
       turns: turns.map((t, index) => ({ index, prompt: t.prompt ?? "", kind: t.kind ?? "initial", answer: normalizedAnswer(stringValue(t.answer)), answerFormat: t.inputKind ?? "text" })),
       additionalCandidates: extras.map(e => ({ key: e.key, claim: e.claim, criteria: asJSON(e.question.criteria), expectedAnswer: e.question.expectedAnswer })), terminology: [], followUpsRemaining: remaining, followUpCriterionIDs: ids.filter(i => !used.has(i)), reconsideration: [...jsonArray(episode.disputes), ...(dispute ? [{ reason: dispute, scope: disputeScope }] : [])], reconsiderationScope: dispute ? disputeScope : null, priorAssessment: dispute && assessments.length ? jsonObject(disputeScope === "initial" ? episode.initialOverride ?? assessments[0] : assessments[assessments.length - 1]).decisions ?? null : null };
     let judgment: JSONObject | null = dispute ? null : objective;

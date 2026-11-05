@@ -60,7 +60,16 @@ struct CloudConnectionOverlay: View {
             case .unavailable(let message):
                 ContentUnavailableView { Label("Reconnect to Knowledge", systemImage: "wifi.exclamationmark") }
                 description: { Text(message) }
-                actions: { Button("Try again") { library.start() }.buttonStyle(.borderedProminent) }
+                actions: {
+                    Button { library.start() } label: {
+                        HStack {
+                            if library.isConnecting { ProgressView() }
+                            Text(library.isConnecting ? "Connecting…" : "Try again")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(library.isConnecting)
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity).background(.background)
             case .closed: Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).background(.background)
             }

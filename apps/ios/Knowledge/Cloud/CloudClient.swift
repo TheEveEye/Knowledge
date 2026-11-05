@@ -42,8 +42,12 @@ import Foundation
         }
     }
     func data(_ path: String, method: String = "GET", body: CloudJSON? = nil, bytes: Data? = nil) async throws -> Data {
+        try Task.checkCancellation()
         let request = try request(path, method: method, body: body, bytes: bytes)
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch let error as URLError where error.code == .cancelled { throw CancellationError() }
         try Task.checkCancellation(); try accept(response, data: data)
         guard data.count <= 32 * 1024 * 1024 else { throw KnowledgeAccountError.invalidResponse }
         return data
@@ -66,6 +70,12 @@ import Foundation
     }
     func events(_ path: String = "/api/v1/events", method: String = "GET", body: CloudJSON? = nil,
                 receive: @MainActor (String, CloudJSON) async throws -> Void) async throws {
+        try Task.checkCancellation()
+        do { try await streamEvents(path, method: method, body: body, receive: receive) }
+        catch let error as URLError where error.code == .cancelled { throw CancellationError() }
+    }
+    private func streamEvents(_ path: String, method: String, body: CloudJSON?,
+                              receive: @MainActor (String, CloudJSON) async throws -> Void) async throws {
         var request = try request(path, method: method, body: body); request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {

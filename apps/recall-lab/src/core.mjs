@@ -18,22 +18,25 @@ export const nullable = schema => ({ anyOf: [schema, { type: 'null' }] });
 export const choice = values => ({ type: 'string', enum: values });
 export const obj = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 export const keyed = (keys, value) => obj(Object.fromEntries(keys.map(k => [k, value])));
-export const locations = {
-  learningPlanInstructions: 'RecallLearningPlan.swift', learningPlanReviewInstructions: 'RecallLearningPlan.swift',
-  designInstructions: 'RecallDesignAI.swift', designVerificationInstructions: 'RecallDesignAI.swift', assessmentInstructions: 'RecallAI.swift',
-};
-export const sourceDir = process.env.RECALL_SOURCE_DIR ?? resolve(repo, 'apps/ios/Knowledge/Recall');
+export const locations = Object.fromEntries(['learningPlanInstructions', 'learningPlanReviewInstructions', 'designInstructions', 'designVerificationInstructions', 'assessmentInstructions'].map(name => [name, 'policies.ts']));
+const policyKeys = { learningPlanInstructions: 'recall_learningPlanInstructions', learningPlanReviewInstructions: 'recall_learningPlanReviewInstructions', designInstructions: 'design_designInstructions', designVerificationInstructions: 'design_designVerificationInstructions', assessmentInstructions: 'recall_assessmentInstructions' };
+export const sourceDir = process.env.RECALL_SOURCE_DIR ?? resolve(repo, 'packages/backend/src');
 export async function prompts() {
-  const files = {};
-  for (const file of new Set(['RecallAI.swift', ...Object.values(locations)])) files[file] = await readFile(resolve(sourceDir, file), 'utf8');
-  function body(file, name) {
-    const m = files[file].match(new RegExp('(?:private )?static let ' + name + ' = (?:commonInstructions \\+ )?"""\\n([\\s\\S]*?)\\n    """'));
-    if (!m) throw new Error(`Cannot extract canonical prompt ${name}`);
-    return m[1].split('\n').map(l => l.startsWith('    ') ? l.slice(4) : l).join('\n');
+  const source = await readFile(resolve(sourceDir, 'policies.ts'), 'utf8');
+  const policies = Object.fromEntries([...source.matchAll(/"([^"\n]+)": ("(?:[^"\\]|\\.)*")/g)].map(m => [m[1], JSON.parse(m[2])]));
+  const bodies = Object.fromEntries(Object.entries(policyKeys).map(([name, key]) => {
+    if (typeof policies[key] !== 'string') throw new Error(`Cannot extract production policy ${key}`);
+    return [name, policies[key]];
+  }));
+  return { common: '', bodies, sourceHashes: { 'policies.ts': hash(source) } };
+}
+export function replacePolicies(source, bodies) {
+  for (const [name, key] of Object.entries(policyKeys)) {
+    const pattern = new RegExp('("' + key + '": )' + /"(?:[^"\\]|\\.)*"/.source);
+    if (!pattern.test(source)) throw new Error(`Canonical policy marker missing: ${key}`);
+    source = source.replace(pattern, (_, prefix) => prefix + JSON.stringify(bodies[name]));
   }
-  const common = body('RecallAI.swift', 'commonInstructions');
-  return { common, bodies: Object.fromEntries(Object.entries(locations).map(([name, file]) => [name, body(file, name)])),
-    sourceHashes: Object.fromEntries(Object.entries(files).map(([k, v]) => [k, hash(v)])) };
+  return source;
 }
 export function instruction(bank, name) { return bank.common + '\n' + bank.bodies[name]; }
 export function validateCandidate(base, candidate) {

@@ -89,7 +89,7 @@ struct CloudRecallView: View {
                     if overview.materialBlocked > 0 { Text("\(overview.materialBlocked) learning targets have source issues to review.").foregroundStyle(.secondary) }
                     if overview.contextMaterials + overview.duplicateMaterials > 0 { Text("\(overview.contextMaterials) context-only items · \(overview.duplicateMaterials) equivalent connections").font(.footnote).foregroundStyle(.secondary) }
                 }
-                CloudActionButton(overview.prepared == 0 ? "Prepare Recall" : "Prepare remaining material", key: "recall-prepare-" + subjectID.uuidString, systemImage: "sparkles") {
+                CloudActionButton(dashboard.value("overview").value("materialUpgrade").int > 0 ? "Update question bank" : overview.prepared == 0 ? "Prepare Recall" : "Prepare remaining material", key: "recall-prepare-" + subjectID.uuidString, systemImage: "sparkles") {
                     _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/prepare", fields: ["selection": library.selection(for: "preparation").json])
                 }
             }

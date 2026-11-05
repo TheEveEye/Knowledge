@@ -21,7 +21,7 @@ struct ProficiencyRowBackground: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            Rectangle().fill(.background)
+            Rectangle().fill(Color(uiColor: .secondarySystemGroupedBackground))
             if let value {
                 let fraction = min(1, max(0, value))
                 GeometryReader { geometry in

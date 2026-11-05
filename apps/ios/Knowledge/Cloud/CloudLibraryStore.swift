@@ -7,6 +7,7 @@ import SwiftData
     enum State { case loading, ready, unavailable(String), closed }
     private(set) var state = State.loading
     private(set) var hasLoaded = false
+    private(set) var isConnecting = false
     private(set) var subjects: [CloudSubject] = []
     private(set) var entries: [CloudEntity] = []
     private(set) var sources: [CloudJSON] = []
@@ -36,6 +37,7 @@ import SwiftData
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var operationIDs: [String: UUID] = [:]
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var connectionGeneration = UUID()
     @ObservationIgnored private var refreshGeneration = UUID()
     @ObservationIgnored private var selectionLoaded = false
     @ObservationIgnored private var subjectSnapshots: [UUID: CloudSubjectSnapshot] = [:]
@@ -74,17 +76,34 @@ import SwiftData
     }
     func start() {
         if case .closed = state { return }
+        guard !isConnecting else { return }
+        // An inactive -> active transition (for example, dismissing Control Center)
+        // does not need to replace a healthy foreground connection.
+        if isForeground, eventTask != nil {
+            switch state {
+            case .ready, .loading: return
+            case .unavailable, .closed: break
+            }
+        }
         isForeground = true
+        connectionGeneration = UUID()
         eventTask?.cancel()
+        refreshTask?.cancel()
+        isConnecting = true
         invalidateSubjectSnapshots()
-        let run = generation
+        let run = generation, connection = connectionGeneration
         eventTask = Task { [weak self] in
             guard let self else { return }
-            while !Task.isCancelled, generation == run {
+            defer { if connectionGeneration == connection { eventTask = nil; isConnecting = false } }
+            while !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground {
+                isConnecting = true
                 do {
                     try await refresh()
+                    try Task.checkCancellation()
+                    guard connectionGeneration == connection, isForeground else { return }
+                    isConnecting = false
                     try await client.events { [weak self] event, value in
-                        guard let self, generation == run else { throw CancellationError() }
+                        guard let self, generation == run, connectionGeneration == connection, isForeground else { throw CancellationError() }
                         if event == "unauthorized" { client.account.cloudSessionEnded(userID: client.userID); throw CancellationError() }
                         if event == "reconnect" { throw URLError(.networkConnectionLost) }
                         if event == "invalidate" {
@@ -94,9 +113,17 @@ import SwiftData
                         }
                         _ = value
                     }
-                    if !Task.isCancelled { state = .unavailable("Knowledge lost its server connection. Retry to continue.") }
-                } catch is CancellationError { if Task.isCancelled || generation != run { return } }
-                catch { if generation == run { state = .unavailable(error.localizedDescription) } }
+                    try Task.checkCancellation()
+                    guard generation == run, connectionGeneration == connection, isForeground else { return }
+                    isConnecting = false
+                    state = .unavailable("Knowledge lost its server connection. Retry to continue.")
+                } catch is CancellationError {
+                    if Task.isCancelled || generation != run || connectionGeneration != connection || !isForeground { return }
+                } catch {
+                    guard !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground else { return }
+                    isConnecting = false
+                    state = .unavailable(error.localizedDescription)
+                }
                 do { try await Task.sleep(for: .seconds(3)) } catch { return }
             }
         }
@@ -104,10 +131,14 @@ import SwiftData
     func suspend() {
         if case .closed = state { return }
         isForeground = false
+        isConnecting = false
+        connectionGeneration = UUID()
         for session in chatSessions.values { session.suspend() }
         for controller in recallControllers.values { controller.interrupt(message: "Assessment paused. Your answer was kept; retry when you resume.") }
         refreshGeneration = UUID()
-        eventTask?.cancel(); refreshTask?.cancel(); cancelSubjectReads(); state = .loading
+        eventTask?.cancel(); eventTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        cancelSubjectReads(); state = .loading
     }
     func chat(for subjectID: UUID, importID: String? = nil) -> CloudChatSession {
         let id = importID.flatMap(UUID.init(uuidString:)) ?? subjectID
@@ -126,6 +157,7 @@ import SwiftData
     }
     func close() {
         if case .closed = state { return }
+        isConnecting = false
         generation = UUID(); refreshGeneration = UUID(); eventTask?.cancel(); refreshTask?.cancel(); cancelSubjectReads(); client.close()
         subjectSnapshots = [:]; subjectEpochs = [:]; snapshotEpochs = [:]; subjectReadTimes = [:]; recallMaterials = [:]; requestedMaterials = []; loadedSubjectID = nil
         for session in chatSessions.values { session.close() }
@@ -139,12 +171,16 @@ import SwiftData
         catch { message = "The account cache could not be fully removed." }
     }
     private func scheduleRefresh() {
-        let run = generation
+        let run = generation, connection = connectionGeneration
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(250)); try await self?.refresh() }
             catch is CancellationError { }
-            catch { if self?.generation == run { self?.state = .unavailable(error.localizedDescription) } }
+            catch {
+                if !Task.isCancelled, let self, generation == run, connectionGeneration == connection, isForeground {
+                    state = .unavailable(error.localizedDescription)
+                }
+            }
         }
     }
     func select(_ id: UUID?) {
@@ -159,6 +195,7 @@ import SwiftData
         navigationTask = Task { [weak self] in await self?.refreshForNavigation() }
     }
     func refresh() async throws {
+        try Task.checkCancellation()
         if case .closed = state { throw CancellationError() }
         guard isForeground else { throw CancellationError() }
         let run = generation, refresh = UUID(); refreshGeneration = refresh
@@ -324,11 +361,11 @@ import SwiftData
         guard !busyActions.contains(key) else { return }
         busyActions.insert(key); message = nil
         Task { [weak self] in
-            guard let self else { return }; let run = generation
+            guard let self else { return }; let run = generation, connection = connectionGeneration
             defer { busyActions.remove(key) }
-            do { try await operation(); guard generation == run else { return }; try await refresh() }
+            do { try await operation(); guard generation == run, connectionGeneration == connection else { return }; try await refresh() }
             catch is CancellationError { }
-            catch { if generation == run { if error is URLError { state = .unavailable(error.localizedDescription) }; if let reportError { reportError(error.localizedDescription) } else { message = error.localizedDescription } } }
+            catch { if !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground { if error is URLError { state = .unavailable(error.localizedDescription) }; if let reportError { reportError(error.localizedDescription) } else { message = error.localizedDescription } } }
         }
     }
     func refreshForNavigation() async {
@@ -343,7 +380,7 @@ import SwiftData
             prefetchSubjects()
         }
         catch is CancellationError { }
-        catch { if generation == run, activeSubjectID == selected { state = .unavailable(error.localizedDescription) } }
+        catch { if !Task.isCancelled, generation == run, isForeground, activeSubjectID == selected { state = .unavailable(error.localizedDescription) } }
     }
     func mutate(_ path: String, method: String = "POST", fields: [String: CloudJSON], streaming: Bool = false) async throws -> CloudJSON {
         let run = generation

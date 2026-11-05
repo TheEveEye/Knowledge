@@ -69,7 +69,7 @@ struct LearningMethodGrid: View {
                     }
                     .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
                     .padding(16)
-                    .background(.background, in: cardShape)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: cardShape)
                     .contentShape(cardShape)
                 }
                 .buttonStyle(.plain)

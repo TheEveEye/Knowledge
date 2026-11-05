@@ -68,13 +68,17 @@ import Foundation
         let units = try Dictionary(uniqueKeysWithValues: keys.map { ($0, try material($0, library: library)) })
         let root = try units[targetID] ?? material(targetID, library: library)
         let criteria: [RecallCriterion] = value.value("criteria").array.map { criterion in
-            let evidence = units[criterion.text("unitKey")]?.evidence ?? []
-            return .init(id: criterion.text("id"), point: criterion.text("point"), sourceQuote: evidence.map(\.quote).joined(separator: "\n"),
-                acceptedExamples: criterion.value("acceptedExamples").array.compactMap(\.string), evidenceReferences: evidence,
-                givenQuote: criterion.value("givenQuote").string, requiredMeaning: criterion.value("requiredMeaning").string, requestedPart: criterion.value("requestedPart").string)
+            let evidence = criterion.value("evidenceIDs").array.compactMap { id -> EvidenceReference? in
+                guard let key = id.string, let data = try? JSONEncoder().encode(value.value("evidenceCatalog").value(key)) else { return nil }
+                return try? JSONDecoder().decode(EvidenceReference.self, from: data)
+            }
+            let references = evidence.isEmpty ? units[criterion.text("unitKey")]?.evidence ?? [] : evidence
+            return .init(id: criterion.text("id"), point: criterion.text("point"), sourceQuote: references.map(\.quote).joined(separator: "\n"), essentialReason: criterion.value("essentialReason").string,
+                acceptedExamples: criterion.value("acceptedExamples").array.compactMap(\.string), evidenceReferences: references,
+                givenQuote: criterion.value("givenQuote").string, requiredMeaning: criterion.value("requiredMeaning").string, requestedPart: criterion.value("requestedPart").string, promptGivens: criterion.value("promptGivens").array.compactMap(\.string))
         }
-        var question = RecallQuestion(facet: value.text("facet"), prompt: [value.text("givenContext"), value.text("prompt")].filter { !$0.isEmpty }.joined(separator: "\n\n"),
-            expectedAnswer: value.text("expectedAnswer"), criteria: criteria, acceptableWording: value.text("acceptableWording"), boundary: "", preparationModel: "", rubricVersion: "recall-design-v13", material: root)
+        var question = RecallQuestion(facet: value.text("facet"), prompt: value.text("prompt"),
+            expectedAnswer: value.text("expectedAnswer"), criteria: criteria, acceptableWording: value.text("acceptableWording"), boundary: "", preparationModel: value.text("preparationModel"), rubricVersion: value.value("designVersion").string ?? "recall-design-v13", material: root)
         question.designID = UUID(uuidString: value.text("id")); question.kind = .init(rawValue: value.text("kind")); question.input = try input(value.value("input"))
         question.goal = .init(rawValue: value.text("goal")); question.practiceValue = .init(rawValue: value.text("practiceValue"))
         question.givenContext = value.value("givenContext").string
@@ -85,7 +89,7 @@ import Foundation
                 criterionIDs: value.value("criteria").array.filter { $0.text("unitKey") == key }.map { $0.text("id") },
                 completeCoverage: value.value("verified").flag && value.value("verification").value("coverage").value(key).text("status") == "complete")
         }
-        question.precisionNotes = value.value("precisionNotes").array.map { .init(id: $0.text("id"), materialID: $0.text("unitKey"), text: $0.text("text"), sourceQuote: "") }
+        question.precisionNotes = value.value("precisionNotes").array.map { .init(id: $0.text("id"), materialID: $0.text("unitKey"), text: $0.text("text"), sourceQuote: $0.value("evidenceIDs").array.compactMap { id in value.value("evidenceCatalog").value(id.string ?? "").value("quote").string }.joined(separator: "\n")) }
         return question
     }
     private static func material(_ id: String, library: CloudLibraryStore) throws -> RecallMaterialSnapshot {
@@ -95,9 +99,13 @@ import Foundation
             throw CloudFailure(code: "MATERIAL_CHANGED", message: "This question's saved material is unavailable. Refresh the subject before continuing.")
         }
         let concept = library.entries.first { $0.id == conceptID }
+        let savedEvidence = row.value("snapshot").value("evidence").array.compactMap { value -> EvidenceReference? in
+            guard let data = try? JSONEncoder().encode(value) else { return nil }
+            return try? JSONDecoder().decode(EvidenceReference.self, from: data)
+        }
         return .init(conceptID: conceptID, conceptName: concept?.title ?? "Concept", aliases: concept?.displayAliases ?? [], statement: entity.kind == "fact" ? entity.text("statement") : entity.text("explanation"),
-            kind: entity.kind, qualifications: entity.text("qualifications"), factIDs: entity.kind == "fact" ? [entity.id] : (entity.fields["supportingFactIDs"]?.array ?? []).compactMap { $0.string.flatMap(UUID.init(uuidString:)) },
-            evidence: entity.evidencePresentation.references, reviewNote: entity.fields["reviewNote"]?.string,
+            kind: row.value("snapshot").value("kind").string ?? entity.kind, qualifications: row.value("snapshot").value("qualifications").string ?? entity.text("qualifications"), factIDs: entity.kind == "fact" ? [entity.id] : (entity.fields["supportingFactIDs"]?.array ?? []).compactMap { $0.string.flatMap(UUID.init(uuidString:)) },
+            evidence: savedEvidence.isEmpty ? entity.evidencePresentation.references : savedEvidence, reviewNote: entity.fields["reviewNote"]?.string,
             connectionIDs: entity.kind == "connection" ? [entity.id] : [], relatedConceptIDs: entity.kind == "connection" ? [entity.text("fromConceptID"), entity.text("toConceptID")].compactMap(UUID.init(uuidString:)) : [])
     }
     private static func assessment(_ value: CloudJSON, model: String) throws -> RecallAssessment {
