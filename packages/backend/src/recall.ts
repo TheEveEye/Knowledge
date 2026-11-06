@@ -456,8 +456,44 @@ export class RecallService {
       const target = await this.current(this.db, session), episode = jsonObject(session.state.episode ?? {});
       if (episode.question) await this.participants(this.db, session, episode.question as unknown as Question);
       const question = episode.question ?? asJSON(await this.selectQuestion(this.db, session, target));
-      return { session: sessionDTO(session), targetID: target.id, question, summary };
+      return { session: sessionDTO(session), targetID: target.id, question, summary, upcoming: await this.upcomingQuestions(session, question as unknown as Question) };
     } catch (error) { if (!(error instanceof DomainError) || !["MATERIAL_CHANGED", "QUESTION_UNAVAILABLE", "NOT_FOUND"].includes(error.code)) throw error; return { session: sessionDTO(session), question: null, summary, issue: { code: error.code, message: "Saved material changed. Your answers were kept. Finish this session and prepare Recall again." } }; }
+  }
+  // Read ahead without recording exposure or committing reviews. The session is
+  // at most eight targets; integrated questions can consume several queue items.
+  private async upcomingQuestions(session: Session, current: Question) {
+    const state = structuredClone(session.state), seen = new Set(jsonArray(state.seenTargetIDs)), exposed = new Set<string>();
+    const upcoming: JSONObject[] = [];
+    const episode = jsonObject(state.episode ?? {}), first = jsonObject(jsonArray(episode.assessments)[0] ?? {});
+    const now = new Date(stringValue(jsonObject(jsonArray(episode.turns)[0] ?? {}).submittedAt) || Date.now());
+    if (!episode.disputed && !episode.sourceRevealed) for (const raw of jsonArray(first.additionalCredits)) {
+      const extra = await this.additionalCreditTarget(this.db, session, jsonObject(raw), now);
+      if (extra) seen.add(extra.id);
+    }
+    let previous = current;
+    for (let index = Number(state.index ?? 0) + 1; index < jsonArray(state.queue).length; index++) {
+      for (const criterion of previous.criteria) seen.add(criterion.unitKey);
+      for (const raw of jsonArray(jsonObject(asJSON(previous.verification ?? {})).disclosures)) exposed.add(stringValue(jsonObject(raw).materialID));
+      state.seenTargetIDs = [...seen]; state.index = index;
+      if (seen.has(jsonArray(state.queue)[index]!)) continue;
+      try {
+        const candidate = { ...session, state }, target = await this.current(this.db, candidate);
+        const question = await this.selectQuestion(this.db, candidate, target, exposed);
+        upcoming.push({ index, episode: { targetID: target.id, signature: target.signature, question: asJSON(question), turns: [], assessments: [], sourceRevealed: false, disputed: false, effort: null } });
+        previous = question;
+      } catch (error) {
+        if (!(error instanceof DomainError) || !["MATERIAL_CHANGED", "QUESTION_UNAVAILABLE", "NOT_FOUND"].includes(error.code)) throw error;
+      }
+    }
+    return upcoming;
+  }
+  private async additionalCreditTarget(tx: Transaction | Database, session: Session, credit: JSONObject, now: Date, lock = false) {
+    const query = tx.select().from(recallTargets).where(and(eq(recallTargets.userId, session.userId), eq(recallTargets.subjectId, session.subjectId), eq(recallTargets.id, stringValue(credit.targetID))));
+    const extra = (await (lock ? query.for("update") : query))[0];
+    const material = extra ? (await tx.select().from(recallMaterials).where(and(eq(recallMaterials.userId, session.userId), eq(recallMaterials.subjectId, session.subjectId), eq(recallMaterials.id, extra.materialId))))[0] : null;
+    const subject = await ownedSubject(tx, session.userId, session.subjectId);
+    if (!extra || !material || extra.version !== Number(credit.targetVersion) || extra.signature !== credit.signature || extra.retired || extra.excluded || material.status !== "ready" || material.revisionId !== subject.revisionId || extra.dueAt && extra.dueAt > now || extra.exposedAt && extra.exposedAt.getTime() + 600_000 > now.getTime()) return null;
+    return extra;
   }
   private async sessionSummary(session: Session) {
     const events = await this.db.select().from(learningEvents).where(and(eq(learningEvents.userId, session.userId), eq(learningEvents.subjectId, session.subjectId), eq(learningEvents.sessionId, session.id)));
@@ -569,7 +605,7 @@ export class RecallService {
     }
     return participants;
   }
-  private async selectQuestion(tx: Transaction | Database, session: Session, target: Target) {
+  private async selectQuestion(tx: Transaction | Database, session: Session, target: Target, exposedMaterials: Set<string> = new Set()) {
     const questions = verifiedQuestions(target).sort((a,b) => presentationPriority(b) - presentationPriority(a) || a.id.localeCompare(b.id));
     for (const question of questions) {
       if (contextIssue(question.prompt)) continue;
@@ -580,7 +616,7 @@ export class RecallService {
           const d = jsonObject(raw), disclosed = (await tx.select().from(recallTargets).where(and(eq(recallTargets.userId, session.userId), eq(recallTargets.subjectId, session.subjectId), eq(recallTargets.materialId, stringValue(d.materialID)))))[0];
           if (!disclosed || disclosed.signature !== d.signature || disclosed.retired) throw new DomainError("MATERIAL_CHANGED", "A question context changed.", 409);
         }
-        if (participants.every(p => p.id === target.id || (jsonArray(session.state.queue).includes(p.id) && (!p.dueAt || p.dueAt <= new Date()) && (!p.exposedAt || p.exposedAt.getTime() + 600_000 <= Date.now()) && !jsonArray(session.state.seenTargetIDs).includes(p.id)))) return question;
+        if (participants.every(p => p.id === target.id || (jsonArray(session.state.queue).includes(p.id) && (!p.dueAt || p.dueAt <= new Date()) && !exposedMaterials.has(p.materialId) && (!p.exposedAt || p.exposedAt.getTime() + 600_000 <= Date.now()) && !jsonArray(session.state.seenTargetIDs).includes(p.id)))) return question;
       } catch (error) { if (!(error instanceof DomainError) || !["MATERIAL_CHANGED", "NOT_FOUND"].includes(error.code)) throw error; }
     }
     throw new DomainError("QUESTION_UNAVAILABLE", "No current question is available. Prepare Recall again.", 409);
@@ -762,10 +798,8 @@ export class RecallService {
       if (!skip && !episode.disputed && !episode.sourceRevealed) for (const raw of jsonArray(assessments[0]?.additionalCredits)) {
         const credit = jsonObject(raw), targetID = stringValue(credit.targetID);
         if (seen.has(targetID)) continue;
-        const extra = (await tx.select().from(recallTargets).where(and(eq(recallTargets.userId, userId), eq(recallTargets.subjectId, latest.subjectId), eq(recallTargets.id, targetID))).for("update"))[0];
-        const material = extra ? (await tx.select().from(recallMaterials).where(and(eq(recallMaterials.userId, userId), eq(recallMaterials.subjectId, latest.subjectId), eq(recallMaterials.id, extra.materialId))))[0] : null;
-        const subject = await ownedSubject(tx, userId, latest.subjectId);
-        if (!extra || !material || extra.version !== Number(credit.targetVersion) || extra.signature !== credit.signature || extra.retired || extra.excluded || material.status !== "ready" || material.revisionId !== subject.revisionId || extra.dueAt && extra.dueAt > now || extra.exposedAt && extra.exposedAt.getTime() + 600_000 > now.getTime()) continue;
+        const extra = await this.additionalCreditTarget(tx, latest, credit, now, true);
+        if (!extra) continue;
         const rating = effort === "veryDifficult" ? Rating.Hard : Rating.Good, after = asJSON(scheduler.next(card(extra.memory, now), now, rating).card) as JSONObject;
         await tx.insert(learningEvents).values({ userId, subjectId: latest.subjectId, sessionId: id, targetId: extra.id, kind: "review", relatedEventId: eventID,
           payload: { episode, additionalCredit: credit, rating, recognition: false, supportedCorrect: true, beforeMemory: extra.memory, beforeExposedAt: extra.exposedAt?.toISOString() ?? null, afterMemory: after, afterTargetVersion: extra.version + 1, schedulerVersion, policyVersion: recallPolicyVersion } });

@@ -12,6 +12,8 @@ import SwiftUI
     private(set) var hasStaleInput = false
     private var presentation = CloudJSON.null
     private var formDirty = false
+    private var upcoming: [RecallSessionState] = []
+    private(set) var isPresentingPreloadedQuestion = false
     private var closed = false
     private var generation = UUID()
     @ObservationIgnored private unowned let library: CloudLibraryStore
@@ -35,7 +37,7 @@ import SwiftUI
         case .assessment: "Checking your answer…"
         case .explanation: "Preparing an explanation…"
         case .command, .refresh:
-            commandPath == "/advance" ? "Loading next question…" : commandPath == "/unknown" ? "Saving your answer…" : commandPath == "/undo" ? "Undoing result…" : "Updating session…"
+            commandPath == "/advance" ? "Saving progress…" : commandPath == "/unknown" ? "Saving your answer…" : commandPath == "/undo" ? "Undoing result…" : "Updating session…"
         case nil: "Refreshing session…"
         }
     }
@@ -46,12 +48,15 @@ import SwiftUI
     func refresh(duringRequest: Bool = false) async throws {
         guard !closed else { throw CancellationError() }
         guard duringRequest || !isRequesting else { return }
+        // An unconfirmed advance must retain both its preview and retry command.
+        if !duringRequest, isPresentingPreloadedQuestion, pending != nil { return }
         let run = generation
         let value = try await library.client.json(prefix)
         // Session-only changes do not require downloading the whole question bank
         // again when the confirmed question can use the displayed material.
         if value.value("question") != .null,
-           (try? CloudRecallPresentation.state(value, library: library, sessionID: sessionID)) == nil,
+           ((try? CloudRecallPresentation.state(value, library: library, sessionID: sessionID)) == nil ||
+            (try? CloudRecallPresentation.upcoming(value, library: library, sessionID: sessionID)) == nil),
            let subjectID = UUID(uuidString: value.value("session").text("subjectID")) {
             // An invalidation may supersede the shared material read. Retry the
             // read without treating cancellation of that cache task as grading failure.
@@ -68,23 +73,27 @@ import SwiftUI
         guard value.value("session").value("version").int >= version else { return }
         var updated = try CloudRecallPresentation.state(value, library: library, sessionID: sessionID)
         if formDirty, let previous = state.episode {
-            guard updated.episode?.targetID == previous.targetID, updated.episode?.turns.count == previous.turns.count else {
+            guard updated.episode?.targetID == previous.targetID, updated.episode?.turns.count == previous.turns.count,
+                  updated.episode?.question.designID == previous.question.designID,
+                  updated.episode?.question.prompt == previous.question.prompt,
+                  updated.episode?.nextInput == previous.nextInput else {
                 hasStaleInput = true; error = "This session changed on another device. Your unsent answer is kept here."
                 return
             }
             updated.episode?.draft = previous.draft; updated.episode?.response = previous.response; updated.episode?.effort = previous.effort
         }
-        presentation = value; state = updated
+        upcoming = try CloudRecallPresentation.upcoming(value, library: library, sessionID: sessionID)
+        presentation = value; state = updated; isPresentingPreloadedQuestion = false
         if isRequesting, case .explanation = pending { state.episode?.phase = "awaitingExplanation"; state.episode?.pendingOperation = "explain" }
         if !value.value("issue").text("message").isEmpty { error = value.value("issue").text("message") }
     }
     func setDraft(_ value: String) {
-        guard !isRequesting, state.episode?.phase == "answer" else { return }
+        guard (!isRequesting || isPresentingPreloadedQuestion), !hasStaleInput, state.episode?.phase == "answer" else { return }
         state.episode?.draft = String(value.prefix(8000)); formDirty = true
     }
     func reloadSession() {
         guard !isRequesting, !closed else { return }
-        formDirty = false; hasStaleInput = false; pending = nil; commandPath = nil; isRequesting = true
+        formDirty = false; hasStaleInput = false; pending = nil; commandPath = nil; isPresentingPreloadedQuestion = false; isRequesting = true
         let run = UUID(); generation = run
         task = Task { [weak self] in
             guard let self else { return }
@@ -93,13 +102,13 @@ import SwiftUI
         }
     }
     func setResponse(_ value: RecallResponse) {
-        guard !isRequesting, let episode = state.episode, episode.phase == "answer" else { return }
+        guard (!isRequesting || isPresentingPreloadedQuestion), !hasStaleInput, let episode = state.episode, episode.phase == "answer" else { return }
         state.episode?.response = value; state.episode?.draft = value.rendered(for: episode.nextInput) ?? ""; formDirty = true
     }
     func setEffort(_ value: RecallEffort?) { guard !isRequesting, state.episode?.canAdjustReviewEffort == true else { return }; state.episode?.effort = value }
     func submit(knownUnknown: Bool = false) {
         if knownUnknown { dontKnow(); return }
-        guard !isRequesting, !hasStaleInput, let episode = state.episode, episode.phase == "answer", !episode.draft.trimmed.isEmpty else { return }
+        guard !isRequesting, pending == nil, !hasStaleInput, let episode = state.episode, episode.phase == "answer", !episode.draft.trimmed.isEmpty else { return }
         start(.answer(version: version, answer: episode.draft, value: episode.nextInput.kind == .text ? .string(episode.draft) : CloudRecallPresentation.inputValue(episode.response, for: episode.nextInput)))
     }
     func dontKnow() {
@@ -130,7 +139,8 @@ import SwiftUI
     }
     func close() {
         closed = true; generation = UUID(); task?.cancel(); task = nil; pending = nil; commandPath = nil
-        state = .init(queue: [], episode: nil); presentation = .null; error = nil; isRequesting = false; formDirty = false; hasStaleInput = false
+        state = .init(queue: [], episode: nil); presentation = .null; upcoming = []; isPresentingPreloadedQuestion = false
+        error = nil; isRequesting = false; formDirty = false; hasStaleInput = false
     }
     func skip(problem: String? = nil) {
         guard !isRequesting else { return }
@@ -141,7 +151,16 @@ import SwiftUI
         guard !isRequesting, !reason.trimmed.isEmpty else { return }
         start(.assessment(version: version, dispute: reason, scope: scope.rawValue))
     }
-    func next() { guard !isRequesting else { return }; command("/advance", fields: ["effort": state.episode?.effort.map { .string($0.rawValue) } ?? .null]) }
+    func next() {
+        guard !isRequesting, pending == nil, !hasStaleInput, state.episode?.phase == "feedback" else { return }
+        let effort = state.episode?.effort.map { CloudJSON.string($0.rawValue) } ?? .null
+        let preview = upcoming.first
+        command("/advance", fields: ["effort": effort])
+        if isRequesting, var preview {
+            preview.completed = state.completed + 1
+            state = preview; formDirty = false; isPresentingPreloadedQuestion = true
+        }
+    }
     func explainMore() { guard !isRequesting else { return }; start(.explanation(version: version)) }
     func stopExplanation() {
         interrupt(message: "Explanation stopped."); pending = nil; state.episode?.phase = "feedback"; state.episode?.pendingOperation = "assess"; error = nil
@@ -205,7 +224,8 @@ import SwiftUI
                         guard generation == run else { return }; pending = .refresh
                     case .command(let path, let fields):
                         _ = try await library.mutate(prefix + path, fields: fields)
-                        guard generation == run else { return }; pending = .refresh; formDirty = false
+                        guard generation == run else { return }; pending = .refresh
+                        if !isPresentingPreloadedQuestion { formDirty = false }
                     case .refresh:
                         try await refresh(duringRequest: true)
                         guard generation == run else { return }; pending = nil; commandPath = nil
@@ -216,7 +236,10 @@ import SwiftUI
                 guard generation == run, !closed else { return }
                 usageLimited = (error as? CloudFailure)?.code == "AI_LIMIT" && presentation.value("session").value("state").value("selection").text("funding") == "chatgpt"
                 let message = error is CancellationError ? "Session refresh interrupted. Retry to continue." : error.localizedDescription
-                if (error as? CloudFailure)?.code == "VERSION_CONFLICT" { pending = .refresh; formDirty = false }
+                if (error as? CloudFailure)?.code == "VERSION_CONFLICT" {
+                    pending = .refresh
+                    if !isPresentingPreloadedQuestion { formDirty = false }
+                }
                 // A failed command retains its original version and operation ID
                 // for an idempotent retry. A confirmed command retries only its read.
                 self.error = message
