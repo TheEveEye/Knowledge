@@ -102,8 +102,8 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
             if isHistory { summary }
             else if let episode = controller.state.episode {
                 questionSections(episode)
-                    .disabled((controller.isRequesting && episode.phase == "answer")
-                        || (controller.canRetryRequest && !controller.isRequesting && !episode.phase.hasPrefix("awaiting")))
+                    .disabled(!controller.isPresentingPreloadedQuestion && ((controller.isRequesting && episode.phase == "answer")
+                        || (controller.canRetryRequest && !controller.isRequesting && !episode.phase.hasPrefix("awaiting"))))
             }
             else { summary }
             if !isHistory, let error = controller.error {
@@ -144,7 +144,9 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                     Menu("Session", systemImage: "ellipsis") {
                         Button("Save and leave", systemImage: "pause") { controller.interrupt(message: "Assessment paused. Retry when you resume."); dismiss() }
                         Button("Skip question", systemImage: "forward.end") { answerFocused = false; controller.skip() }
+                            .disabled(controller.isRequesting || controller.canRetryRequest)
                         Button("Question has a problem", systemImage: "flag") { reason = ""; challenge = .question }
+                            .disabled(controller.isRequesting || controller.canRetryRequest)
                     }.disabled(revealingSource || editingAnswer)
                 }
             }
@@ -225,25 +227,26 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 }
                 HStack(spacing: 16) {
                     Button { answerFocused = false; controller.submit() } label: {
-                        Label {
-                            Text("Submit")
-                        } icon: {
-                            if episode.draft.trimmed.isEmpty {
-                                Image(systemName: "arrow.up")
-                            } else {
-                                Image(systemName: "arrow.up").foregroundStyle(.white)
+                        HStack {
+                            if controller.isRequesting { ProgressView(); Text(controller.requestLabel) }
+                            else {
+                                Label {
+                                    Text("Submit")
+                                } icon: {
+                                    Image(systemName: "arrow.up")
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(episode.draft.trimmed.isEmpty || controller.hasStaleInput)
+                    .disabled(episode.draft.trimmed.isEmpty || controller.hasStaleInput || controller.isRequesting || controller.canRetryRequest)
                     Button { answerFocused = false; controller.dontKnow() } label: {
                         Text("I don't know")
                             .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(controller.hasStaleInput)
+                    .disabled(controller.hasStaleInput || controller.isRequesting || controller.canRetryRequest)
                 }
             }
         } else if episode.phase.hasPrefix("awaiting") {

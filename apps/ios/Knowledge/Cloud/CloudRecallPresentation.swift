@@ -2,6 +2,15 @@ import Foundation
 
 /// Explicitly maps the v1 JSON contract into the existing, presentation-only Recall values.
 @MainActor enum CloudRecallPresentation {
+    static func upcoming(_ value: CloudJSON, library: CloudLibraryStore, sessionID: String) throws -> [RecallSessionState] {
+        try value.value("upcoming").array.map { item in
+            var wire = value.object, session = value.value("session").object, raw = session["state"]?.object ?? [:]
+            raw["index"] = item.value("index"); raw["episode"] = item.value("episode"); raw["lastEventID"] = .null
+            session["state"] = .object(raw); session["finished"] = .bool(false)
+            wire["session"] = .object(session); wire["question"] = item.value("episode").value("question")
+            return try state(.object(wire), library: library, sessionID: sessionID)
+        }
+    }
     static func state(_ value: CloudJSON, library: CloudLibraryStore, sessionID: String) throws -> RecallSessionState {
         let session = value.value("session"), raw = session.value("state"), summary = value.value("summary")
         var result = RecallSessionState(queue: [], episode: nil)
