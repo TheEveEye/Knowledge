@@ -87,6 +87,7 @@ struct CloudImportReviewView: View {
             }
         }
         .task(id: importID) {
+            library.beginImportReview(importID)
             loadEditor()
             do {
                 try await library.loadDraft(importID)
@@ -101,6 +102,7 @@ struct CloudImportReviewView: View {
         .onChange(of: library.drafts) { loadEditor(); reconcileSaveJob() }
         .onChange(of: library.jobs) { reconcileSaveJob() }
         .onDisappear {
+            library.endImportReview(importID)
             guard let editor, editor.dirty else { return }
             Task { do { try await editor.flush() } catch is CancellationError { } catch { editor.error = error.localizedDescription } }
         }
@@ -114,7 +116,7 @@ struct CloudImportReviewView: View {
         }
     }
     private func loadEditor() {
-        guard draft.text("status") == "review" else { return }
+        guard draft.text("status") == "review", draft.value("draft") != .null else { return }
         do { if editor == nil { editor = try library.importEditor(for: importID) }; try editor?.synchronize() }
         catch { self.error = error.localizedDescription }
     }

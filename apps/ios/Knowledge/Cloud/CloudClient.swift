@@ -32,7 +32,8 @@ import Foundation
         guard !closed, account.user?.id == userID else { throw CancellationError() }
         guard let response = response as? HTTPURLResponse else { throw KnowledgeAccountError.invalidResponse }
         try account.acceptCloudRenewal(response.value(forHTTPHeaderField: "set-auth-token"), userID: userID)
-        let failure = data.flatMap { try? JSONDecoder().decode(CloudJSON.self, from: $0) }
+        // Successful bodies are decoded once, off the main actor, by the caller.
+        let failure = (200..<300).contains(response.statusCode) ? nil : data.flatMap { try? JSONDecoder().decode(CloudJSON.self, from: $0) }
         if response.statusCode == 401, failure == nil || failure?.text("code") == "UNAUTHORIZED" {
             account.cloudSessionEnded(userID: userID); throw KnowledgeAccountError.unauthorized
         }

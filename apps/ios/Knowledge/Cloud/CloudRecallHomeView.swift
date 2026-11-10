@@ -25,25 +25,50 @@ struct CloudRecallView: View {
         return result
     }
     private var preparationJob: CloudJSON? { library.currentJob(kind: "prepareRecall") }
+    private var isPreparing: Bool { preparationJob.map { ["queued", "running"].contains($0.text("status")) } ?? false }
+    private var needsQuestionBankUpdate: Bool { dashboard.value("overview").value("materialUpgrade").int > 0 }
+    private var preparationTitle: String {
+        if isPreparing { return "Preparing questions…" }
+        if preparationJob != nil || overview.materialBlocked > 0 { return "Review preparation" }
+        return needsQuestionBankUpdate ? "Update question bank" : "Prepare remaining material"
+    }
     var body: some View {
         List {
             RecallOverviewCards(overview: overview) { category = $0 }.listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             Section {
-                if let active { Button("Resume session", systemImage: "play.fill") { sessionID = active.text("id") } }
-                else {
+                if let active {
+                    Button("Resume session", systemImage: "play.fill") { sessionID = active.text("id") }
+                    Button("Finish session", systemImage: "checkmark.circle") { sessionToFinish = active }
+                } else {
                     CloudActionButton("Start Recall", key: "recall-start-" + subjectID.uuidString, systemImage: "brain.head.profile") {
                         let result = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/sessions", fields: ["selection": library.selection(for: "assessment").json, "topicID": topicID.map { .string($0.uuidString.lowercased()) } ?? .null])
                         sessionID = result.value("session").text("id")
                     }.disabled(overview.due + overview.new == 0)
                 }
             }
-            if let active { Section { Button("Finish session", systemImage: "checkmark.circle") { sessionToFinish = active } } }
-            Section { Button("Questions and sources", systemImage: "list.bullet.rectangle") { questions = true } }
-            if overview.prepared == 0 || preparationJob != nil || overview.materialBlocked > 0 { preparation(detailed: false) }
-            if overview.materialPending > 0, overview.prepared > 0, preparationJob == nil {
-                Section { NavigationLink("Prepare remaining material", value: Destination.preparation) }
+            Section {
+                Button { questions = true } label: {
+                    HStack {
+                        Label("Questions and sources", systemImage: "list.bullet.rectangle")
+                        if overview.issues > 0 || overview.materialBlocked > 0 {
+                            Spacer()
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel("Questions needing attention")
+                        }
+                    }
+                }
+                if overview.prepared > 0,
+                   preparationJob != nil || overview.materialPending > 0 || overview.materialBlocked > 0 || needsQuestionBankUpdate {
+                    NavigationLink(value: Destination.preparation) {
+                        HStack {
+                            if isPreparing { ProgressView() }
+                            Label(preparationTitle, systemImage: "sparkles")
+                        }
+                    }
+                }
             }
-            if overview.issues > 0 || overview.materialBlocked > 0 { Section { Button("Questions needing attention", systemImage: "exclamationmark.circle") { questions = true } } }
+            if overview.prepared == 0 { preparation(detailed: false) }
             if let error { Section { Text(error).foregroundStyle(.red) } }
         }
         .navigationTitle("Recall")
@@ -77,7 +102,7 @@ struct CloudRecallView: View {
             }
             Button("Keep practising", role: .cancel) { sessionToFinish = nil }
         } message: { Text("Completed results and any fully graded answer are kept. Unfinished answers won't be graded, and remaining targets can appear in future sessions.") }
-        .task(id: library.invalidationEpoch) { do { try await refresh() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
+        .task(id: library.invalidationID(for: subjectID)) { do { try await refresh() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
         .refreshable { do { try await library.refresh(); try await refresh() } catch { self.error = error.localizedDescription } }
     }
     @ViewBuilder private func preparation(detailed: Bool) -> some View {
@@ -89,7 +114,7 @@ struct CloudRecallView: View {
                     if overview.materialBlocked > 0 { Text("\(overview.materialBlocked) learning targets have source issues to review.").foregroundStyle(.secondary) }
                     if overview.contextMaterials + overview.duplicateMaterials > 0 { Text("\(overview.contextMaterials) context-only items · \(overview.duplicateMaterials) equivalent connections").font(.footnote).foregroundStyle(.secondary) }
                 }
-                CloudActionButton(dashboard.value("overview").value("materialUpgrade").int > 0 ? "Update question bank" : overview.prepared == 0 ? "Prepare Recall" : "Prepare remaining material", key: "recall-prepare-" + subjectID.uuidString, systemImage: "sparkles") {
+                CloudActionButton(needsQuestionBankUpdate ? "Update question bank" : overview.prepared == 0 ? "Prepare Recall" : "Prepare remaining material", key: "recall-prepare-" + subjectID.uuidString, systemImage: "sparkles") {
                     _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/prepare", fields: ["selection": library.selection(for: "preparation").json])
                 }
             }
@@ -100,9 +125,7 @@ struct CloudRecallView: View {
         if dashboard == .null, topicID == nil { dashboard = library.recall }
         async let dashboardRequest = library.client.json(prefix + "/recall" + (topicID.map { "?topicID=" + $0.uuidString.lowercased() } ?? ""))
         async let sessionRequest = library.client.pages(CloudJSON.self, path: prefix + "/recall/sessions")
-        async let materials: Void = library.loadRecallMaterials(for: subjectID, force: true)
         let values = try await (dashboardRequest, sessionRequest)
-        try await materials
         try Task.checkCancellation()
         dashboard = values.0
         sessions = values.1.sorted { $0.text("updatedAt") > $1.text("updatedAt") }

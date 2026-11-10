@@ -23,6 +23,7 @@ import SwiftData
     private(set) var selfHostedEnabled = false
     private(set) var activeSubjectID: UUID?
     private(set) var invalidationEpoch = 0
+    private var subjectInvalidations: [UUID: Int] = [:]
     private(set) var busyActions: Set<String> = []
     var message: String?
     var selection = CloudSelection()
@@ -43,14 +44,18 @@ import SwiftData
     @ObservationIgnored private var subjectSnapshots: [UUID: CloudSubjectSnapshot] = [:]
     @ObservationIgnored private var subjectEpochs: [UUID: UUID] = [:]
     @ObservationIgnored private var snapshotEpochs: [UUID: UUID] = [:]
-    @ObservationIgnored private var subjectReadTimes: [UUID: ContinuousClock.Instant] = [:]
-    @ObservationIgnored private var subjectReads: [UUID: (id: UUID, task: Task<CloudSubjectSnapshot, Error>)] = [:]
-    @ObservationIgnored private var materialReads: [UUID: (id: UUID, task: Task<[CloudJSON], Error>)] = [:]
+    @ObservationIgnored private var subjectReads: [UUID: (id: UUID, reviewingImportID: String?, task: Task<CloudSubjectSnapshot, Error>)] = [:]
+    @ObservationIgnored private var snapshotReviewIDs: [UUID: String] = [:]
+    @ObservationIgnored private var importReview: (id: String, subjectID: UUID)?
+    @ObservationIgnored private var materialReads: [UUID: (id: UUID, includeQuestions: Bool, task: Task<[CloudJSON], Error>)] = [:]
     @ObservationIgnored private var recallMaterials: [UUID: [CloudJSON]] = [:]
-    @ObservationIgnored private var requestedMaterials: Set<UUID> = []
-    @ObservationIgnored private var prefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var materialEpochs: [UUID: UUID] = [:]
+    @ObservationIgnored private var questionMaterialIDs: Set<UUID> = []
+    @ObservationIgnored private var refreshPending = false
+    @ObservationIgnored private var bootstrapRead: (id: UUID, task: Task<CloudLibraryBootstrap, Error>)?
     @ObservationIgnored private var navigationTask: Task<Void, Never>?
     private(set) var loadedSubjectID: UUID?
+    @ObservationIgnored private var displayedRevisionID: UUID?
 
     init(account: KnowledgeAccountStore, userID: UUID) throws {
         let credentials = try account.cloudCredentials()
@@ -68,6 +73,9 @@ import SwiftData
     }
     var ready: Bool { if case .ready = state { true } else { false } }
     var activeSubject: CloudSubject? { subjects.first { $0.id == activeSubjectID } }
+    func invalidationID(for subjectID: UUID?) -> Int {
+        invalidationEpoch &+ (subjectID.flatMap { subjectInvalidations[$0] } ?? 0)
+    }
     func currentJob(importID: String? = nil, kind: String? = nil) -> CloudJSON? {
         jobs.filter { !["completed", "cancelled"].contains($0.text("status")) && (importID == nil || $0.text("importID") == importID) && (kind == nil || $0.text("kind") == kind) }.sorted {
             let left = ["queued", "running"].contains($0.text("status")), right = ["queued", "running"].contains($1.text("status"))
@@ -89,8 +97,8 @@ import SwiftData
         connectionGeneration = UUID()
         eventTask?.cancel()
         refreshTask?.cancel()
+        refreshTask = nil
         isConnecting = true
-        invalidateSubjectSnapshots()
         let run = generation, connection = connectionGeneration
         eventTask = Task { [weak self] in
             guard let self else { return }
@@ -98,6 +106,7 @@ import SwiftData
             while !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground {
                 isConnecting = true
                 do {
+                    invalidateSubjectSnapshots()
                     try await refresh()
                     try Task.checkCancellation()
                     guard connectionGeneration == connection, isForeground else { return }
@@ -107,9 +116,17 @@ import SwiftData
                         if event == "unauthorized" { client.account.cloudSessionEnded(userID: client.userID); throw CancellationError() }
                         if event == "reconnect" { throw URLError(.networkConnectionLost) }
                         if event == "invalidate" {
-                            invalidationEpoch &+= 1
-                            invalidateSubjectSnapshots(UUID(uuidString: value.text("subjectID")))
-                            scheduleRefresh()
+                            if let id = UUID(uuidString: value.text("subjectID")) {
+                                subjectInvalidations[id, default: 0] &+= 1
+                                let resource = value.text("resource")
+                                if resource != "recallSessions" {
+                                    invalidateSubjectSnapshots(id, includeMaterials: !["jobs", "imports", "decisions", "sources"].contains(resource))
+                                }
+                            } else if value.text("resource") == "all" {
+                                invalidationEpoch &+= 1
+                                invalidateSubjectSnapshots()
+                            }
+                            if value.text("resource") != "recallSessions" { scheduleRefresh() }
                         }
                         _ = value
                     }
@@ -159,7 +176,8 @@ import SwiftData
         if case .closed = state { return }
         isConnecting = false
         generation = UUID(); refreshGeneration = UUID(); eventTask?.cancel(); refreshTask?.cancel(); cancelSubjectReads(); client.close()
-        subjectSnapshots = [:]; subjectEpochs = [:]; snapshotEpochs = [:]; subjectReadTimes = [:]; recallMaterials = [:]; requestedMaterials = []; loadedSubjectID = nil
+        bootstrapRead?.task.cancel(); bootstrapRead = nil
+        subjectSnapshots = [:]; subjectEpochs = [:]; snapshotEpochs = [:]; snapshotReviewIDs = [:]; importReview = nil; recallMaterials = [:]; materialEpochs = [:]; questionMaterialIDs = []; subjectInvalidations = [:]; loadedSubjectID = nil
         for session in chatSessions.values { session.close() }
         for editor in importEditors.values { editor.close() }
         for controller in recallControllers.values { controller.close() }
@@ -173,21 +191,30 @@ import SwiftData
     // Confirmed commands schedule a display refresh without making their success
     // depend on a read that a newer server invalidation may cancel.
     func scheduleRefresh() {
+        refreshPending = true
+        guard refreshTask == nil else { return }
         let run = generation, connection = connectionGeneration
-        refreshTask?.cancel()
         refreshTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(250)); try await self?.refresh() }
-            catch is CancellationError { }
-            catch {
-                if !Task.isCancelled, let self, generation == run, connectionGeneration == connection, isForeground {
-                    state = .unavailable(error.localizedDescription)
+            guard let self else { return }
+            defer { if connectionGeneration == connection { refreshTask = nil } }
+            while refreshPending, !Task.isCancelled, generation == run, connectionGeneration == connection, isForeground {
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                    refreshPending = false
+                    try await refresh(forceSubject: false)
+                } catch is CancellationError {
+                    // A newer invalidation may cancel a subject read. Its queued
+                    // refresh still needs to run; don't cancel/restart HTTP work.
+                    if Task.isCancelled { return }
+                } catch {
+                    if generation == run, connectionGeneration == connection, isForeground { state = .unavailable(error.localizedDescription) }
                 }
             }
         }
     }
     func select(_ id: UUID?, loadSnapshot: Bool = true) {
+        importReview = nil
         navigationTask?.cancel()
-        prefetchTask?.cancel(); prefetchTask = nil
         for other in Array(subjectReads.keys) where other != id { subjectReads.removeValue(forKey: other)?.task.cancel() }
         for other in Array(materialReads.keys) where other != id { materialReads.removeValue(forKey: other)?.task.cancel() }
         activeSubjectID = id
@@ -195,6 +222,13 @@ import SwiftData
         else { clearSubject() }
         guard id != nil, ready, loadSnapshot else { return }
         navigationTask = Task { [weak self] in await self?.refreshForNavigation() }
+    }
+    func beginImportReview(_ id: String) {
+        guard let subjectID = activeSubjectID else { return }
+        importReview = (id, subjectID)
+    }
+    func endImportReview(_ id: String) {
+        if importReview?.id == id { importReview = nil }
     }
     /// Publish the requested draft before fetching the rest of its subject.
     func loadDraft(_ id: String) async throws {
@@ -210,39 +244,38 @@ import SwiftData
         } else {
             drafts.append(row)
         }
-        // A snapshot from before this import existed cannot satisfy navigation.
+        // A summary-only snapshot cannot satisfy an open import review.
         if let selected, let snapshot = subjectSnapshots[selected],
-           !snapshot.drafts.contains(where: { $0.text("id") == id }) {
+           snapshotReviewIDs[selected] != id || !snapshot.drafts.contains(where: { $0.text("id") == id }) {
             snapshotEpochs[selected] = nil
         }
     }
-    func refresh() async throws {
+    func refresh(forceSubject: Bool = true) async throws {
         try Task.checkCancellation()
         if case .closed = state { throw CancellationError() }
         guard isForeground else { throw CancellationError() }
         let run = generation, refresh = UUID(); refreshGeneration = refresh
-        async let subjectRequest = client.pages(CloudSubject.self, path: "/api/v1/subjects")
-        async let draftRequest = client.pages(CloudJSON.self, path: "/api/v1/imports")
-        async let preferenceRequest = client.json("/api/v1/preferences")
-        async let connectionRequest = client.json("/api/v1/ai/connections")
-        let (all, allDraftValues, prefs, configuration) = try await (subjectRequest, draftRequest, preferenceRequest, connectionRequest)
-        let payloads = try await CloudCoding.cachePayloads(subjects: all, entries: [])
+        let read: Task<CloudLibraryBootstrap, Error>
+        if let existing = bootstrapRead { read = existing.task }
+        else {
+            let token = UUID()
+            read = Task { [weak self] in
+                guard let self else { throw CancellationError() }
+                defer { if bootstrapRead?.id == token { bootstrapRead = nil } }
+                return try await client.decoded(CloudLibraryBootstrap.self, path: "/api/v1/library")
+            }
+            bootstrapRead = (token, read)
+        }
+        let bootstrap = try await read.value
+        let (all, allDraftValues, prefs, configuration) = (bootstrap.subjects, bootstrap.drafts, bootstrap.preferences, bootstrap.configuration)
         try Task.checkCancellation()
         guard generation == run else { throw CancellationError() }
         guard refreshGeneration == refresh else { return }
         let subjectIDs = Set(all.map(\.id))
-        let context = container.mainContext
-        do {
-            var previous = Dictionary(uniqueKeysWithValues: try context.fetch(FetchDescriptor<CloudCachedRecord>()).filter { $0.kind == "subject" || $0.subjectID.map { !subjectIDs.contains($0) } == true }.map { ($0.key, $0) })
-            for payload in payloads {
-                if let cached = previous.removeValue(forKey: payload.key) { if cached.payload != payload.data { cached.payload = payload.data; cached.subjectID = payload.subjectID; cached.kind = payload.kind } }
-                else { context.insert(CloudCachedRecord(key: payload.key, subjectID: payload.subjectID, kind: payload.kind, payload: payload.data)) }
-            }
-            for cached in previous.values { context.delete(cached) }
-            if context.hasChanges { try context.save() }
-        } catch { context.rollback(); throw error }
+        // Navigation uses confirmed in-memory snapshots. The SwiftData records
+        // had no readers; encoding and saving them delayed every usable screen.
         for id in Set(subjectSnapshots.keys).union(subjectReads.keys).subtracting(subjectIDs) {
-            invalidateSubjectSnapshots(id); subjectSnapshots[id] = nil; recallMaterials[id] = nil; requestedMaterials.remove(id)
+            invalidateSubjectSnapshots(id); subjectSnapshots[id] = nil; snapshotReviewIDs[id] = nil; recallMaterials[id] = nil; questionMaterialIDs.remove(id)
         }
         subjects = all.sorted { $0.createdAt < $1.createdAt }
         allDrafts = allDraftValues.sorted { $0.text("updatedAt") > $1.text("updatedAt") }
@@ -257,31 +290,39 @@ import SwiftData
         // Initial/foreground/reconnect reads must succeed before the library is accessible.
         // Subsequent refreshes leave the confirmed screen visible while requests are running.
         if let selected = activeSubjectID, let subject = subjects.first(where: { $0.id == selected }) {
-            async let snapshot = loadSubject(subject, force: true)
-            async let materials: Void = refreshRequestedMaterials(selected)
+            async let snapshot = loadSubject(subject, force: forceSubject)
             let value = try await snapshot
-            try await materials
             try Task.checkCancellation()
             guard generation == run, refreshGeneration == refresh else { return }
             if activeSubjectID == selected { display(value) }
         }
         guard generation == run, refreshGeneration == refresh else { return }
         state = .ready
-        prefetchSubjects()
         for session in chatSessions.values { session.resumeQueued() }
     }
     private func clearSubject() {
         loadedSubjectID = nil
+        displayedRevisionID = nil
         entries = []; sources = []; drafts = []; jobs = []; decisions = []; recall = .null
     }
     private func display(_ snapshot: CloudSubjectSnapshot) {
+        if loadedSubjectID != snapshot.subject.id || displayedRevisionID != snapshot.subject.revisionID {
+            entries = snapshot.entries
+            displayedRevisionID = snapshot.subject.revisionID
+        }
         loadedSubjectID = snapshot.subject.id
-        entries = snapshot.entries
         sources = snapshot.sources.sorted { $0.text("createdAt") > $1.text("createdAt") }
         // A direct draft read may have finished after this snapshot started.
         let confirmedDrafts = Dictionary(drafts.filter { UUID(uuidString: $0.text("subjectID")) == snapshot.subject.id }.map { ($0.text("id"), $0) }, uniquingKeysWith: { first, _ in first })
         drafts = snapshot.drafts.map { row in
-            if let confirmed = confirmedDrafts[row.text("id")], confirmed.value("version").int > row.value("version").int { return confirmed }
+            if let confirmed = confirmedDrafts[row.text("id")] {
+                if confirmed.value("version").int > row.value("version").int { return confirmed }
+                // A summary read already in flight must not erase the full draft
+                // that the newly opened review fetched at the same version.
+                if importReview?.id == row.text("id"), row.text("status") != "saved",
+                   confirmed.value("version") == row.value("version"),
+                   row.value("draft") == .null, confirmed.value("draft") != .null { return confirmed }
+            }
             return row
         }.sorted { $0.text("updatedAt") > $1.text("updatedAt") }
         jobs = snapshot.jobs; decisions = snapshot.decisions
@@ -290,99 +331,84 @@ import SwiftData
         recall = .object(dashboard)
     }
     private func cancelSubjectReads() {
-        prefetchTask?.cancel(); prefetchTask = nil
+        bootstrapRead?.task.cancel(); bootstrapRead = nil
         navigationTask?.cancel(); navigationTask = nil
         for read in subjectReads.values { read.task.cancel() }
         for read in materialReads.values { read.task.cancel() }
         subjectReads = [:]; materialReads = [:]
     }
-    private func invalidateSubjectSnapshots(_ id: UUID? = nil) {
+    private func invalidateSubjectSnapshots(_ id: UUID? = nil, includeMaterials: Bool = true) {
         let ids = id.map { Set([$0]) } ?? Set(subjectSnapshots.keys).union(subjectReads.keys).union(subjectEpochs.keys)
         for id in ids {
             subjectEpochs[id] = UUID()
             subjectReads.removeValue(forKey: id)?.task.cancel()
-            materialReads.removeValue(forKey: id)?.task.cancel()
-            recallMaterials[id] = nil
+            if includeMaterials {
+                materialEpochs[id] = UUID()
+                materialReads.removeValue(forKey: id)?.task.cancel()
+                recallMaterials[id] = nil
+                questionMaterialIDs.remove(id)
+            }
         }
     }
     private func loadSubject(_ subject: CloudSubject, force: Bool = false) async throws -> CloudSubjectSnapshot {
-        if let read = subjectReads[subject.id] { return try await read.task.value }
+        let reviewingImportID = importReview.flatMap { $0.subjectID == subject.id ? $0.id : nil }
+        if let read = subjectReads[subject.id] {
+            if read.reviewingImportID == reviewingImportID { return try await read.task.value }
+            read.task.cancel(); subjectReads[subject.id] = nil
+        }
         if !force, let snapshot = subjectSnapshots[subject.id], snapshot.subject.version == subject.version,
-           snapshotEpochs[subject.id] == subjectEpochs[subject.id],
-           let readAt = subjectReadTimes[subject.id], readAt.duration(to: .now) < .seconds(2) { return snapshot }
+           snapshotReviewIDs[subject.id] == reviewingImportID,
+           snapshotEpochs[subject.id] == subjectEpochs[subject.id] { return snapshot }
         let id = subject.id, run = generation, token = UUID(), epoch = subjectEpochs[subject.id] ?? UUID()
         subjectEpochs[id] = epoch
         let task = Task<CloudSubjectSnapshot, Error> { [weak self] in
             guard let self else { throw CancellationError() }
             defer { if subjectReads[id]?.id == token { subjectReads[id] = nil } }
-            let snapshot = try await client.subjectSnapshot(subject)
-            let payloads = try await CloudCoding.cachePayloads(subjects: [snapshot.subject], entries: snapshot.entries)
+            let snapshot = try await client.subjectSnapshot(subject, reviewingImportID: reviewingImportID, confirmed: subjectSnapshots[id])
             try Task.checkCancellation()
             guard generation == run, isForeground, subjectEpochs[id] == epoch,
                   subjects.contains(where: { $0.id == id }) else { throw CancellationError() }
-            let context = container.mainContext
-            do {
-                var previous = Dictionary(uniqueKeysWithValues: try context.fetch(FetchDescriptor<CloudCachedRecord>(predicate: #Predicate { $0.subjectID == id })).map { ($0.key, $0) })
-                for payload in payloads {
-                    if let cached = previous.removeValue(forKey: payload.key) { if cached.payload != payload.data { cached.payload = payload.data; cached.kind = payload.kind } }
-                    else { context.insert(CloudCachedRecord(key: payload.key, subjectID: payload.subjectID, kind: payload.kind, payload: payload.data)) }
-                }
-                for cached in previous.values { context.delete(cached) }
-                if context.hasChanges { try context.save() }
-            } catch { context.rollback(); throw error }
-            subjectSnapshots[id] = snapshot; snapshotEpochs[id] = epoch; subjectReadTimes[id] = .now
+            subjectSnapshots[id] = snapshot; snapshotEpochs[id] = epoch
+            snapshotReviewIDs[id] = reviewingImportID
             if let index = subjects.firstIndex(where: { $0.id == id }), subjects[index].version <= snapshot.subject.version { subjects[index] = snapshot.subject }
             return snapshot
         }
-        subjectReads[id] = (token, task)
+        subjectReads[id] = (token, reviewingImportID, task)
         return try await task.value
     }
-    private func prefetchSubjects() {
-        prefetchTask?.cancel()
-        let run = generation
-        prefetchTask = Task { [weak self] in
-            guard let self else { return }
-            // One speculative subject at a time; foreground navigation may join or take priority.
-            let candidates = subjects.filter { $0.id != self.activeSubjectID }
-            for subject in candidates {
-                guard !Task.isCancelled, generation == run, isForeground else { return }
-                if subjectSnapshots[subject.id]?.subject.version == subject.version, snapshotEpochs[subject.id] == subjectEpochs[subject.id] { continue }
-                do { _ = try await loadSubject(subject) }
-                catch { if Task.isCancelled || generation != run { return } }
-            }
-        }
-    }
     /// Large question banks are fetched only once a Recall surface needs them.
-    func loadRecallMaterials(for id: UUID, force: Bool = false) async throws {
+    func loadRecallMaterials(for id: UUID, force: Bool = false, includeQuestions: Bool = false) async throws {
         if case .closed = state { throw CancellationError() }
         guard isForeground else { throw CancellationError() }
-        requestedMaterials.insert(id)
-        guard force || recallMaterials[id] == nil else { return }
-        let run = generation, token = UUID(), epoch = subjectEpochs[id] ?? UUID()
-        subjectEpochs[id] = epoch
+        guard force || recallMaterials[id] == nil || (includeQuestions && !questionMaterialIDs.contains(id)) else { return }
+        if includeQuestions, let read = materialReads[id], !read.includeQuestions {
+            _ = try await read.task.value
+            try Task.checkCancellation()
+            return try await loadRecallMaterials(for: id, includeQuestions: true)
+        }
+        let run = generation, token = UUID(), epoch = materialEpochs[id] ?? UUID()
+        materialEpochs[id] = epoch
         let task: Task<[CloudJSON], Error>
         if let read = materialReads[id] { task = read.task }
         else {
             task = Task { [weak self] in
                 guard let self else { throw CancellationError() }
                 defer { if materialReads[id]?.id == token { materialReads[id] = nil } }
-                let values = try await client.pages(CloudJSON.self, path: "/api/v1/subjects/\(id.uuidString.lowercased())/recall/materials")
+                let values = try await client.pages(CloudJSON.self, path: "/api/v1/subjects/\(id.uuidString.lowercased())/recall/materials?limit=100&includeQuestions=\(includeQuestions)")
                 try Task.checkCancellation()
-                guard generation == run, isForeground, subjectEpochs[id] == epoch else { throw CancellationError() }
+                guard generation == run, isForeground, materialEpochs[id] == epoch else { throw CancellationError() }
                 recallMaterials[id] = values
+                if includeQuestions { questionMaterialIDs.insert(id) } else { questionMaterialIDs.remove(id) }
                 return values
             }
-            materialReads[id] = (token, task)
+            materialReads[id] = (token, includeQuestions, task)
         }
         let values = try await task.value
         try Task.checkCancellation()
-        guard generation == run, subjectEpochs[id] == epoch else { throw CancellationError() }
+        guard generation == run, materialEpochs[id] == epoch else { throw CancellationError() }
         if activeSubjectID == id, loadedSubjectID == id {
             var dashboard = recall.object; dashboard["materials"] = .array(values); recall = .object(dashboard)
         }
-    }
-    private func refreshRequestedMaterials(_ id: UUID) async throws {
-        if requestedMaterials.contains(id) { try await loadRecallMaterials(for: id, force: true) }
     }
     func perform(_ key: String, reportError: (@MainActor @Sendable (String) -> Void)? = nil, operation: @escaping @MainActor @Sendable () async throws -> Void) {
         guard !busyActions.contains(key) else { return }
@@ -402,6 +428,7 @@ import SwiftData
         // Mutations, server events and reconnects invalidate the snapshot's epoch.
         if reuseConfirmedSnapshot, ready,
            let snapshot = subjectSnapshots[selected], snapshot.subject.version == subject.version,
+           snapshotReviewIDs[selected] == importReview?.id,
            snapshotEpochs[selected] == subjectEpochs[selected] {
             display(snapshot)
             return
@@ -412,7 +439,6 @@ import SwiftData
             try Task.checkCancellation()
             guard generation == run, activeSubjectID == selected else { return }
             display(value)
-            prefetchSubjects()
         }
         catch is CancellationError { }
         catch { if !Task.isCancelled, generation == run, isForeground, activeSubjectID == selected { state = .unavailable(error.localizedDescription) } }
@@ -436,7 +462,8 @@ import SwiftData
         }
         catch let failure as CloudFailure { if failure.code == "VERSION_CONFLICT" { try? await refresh() }; throw failure }
         guard generation == run else { throw CancellationError() }; finishOperation(fingerprint)
-        if !path.hasPrefix("/api/v1/ai/"), path != "/api/v1/preferences" {
+        let sessionOnly = path.hasPrefix("/api/v1/recall/sessions/") && ["/answer", "/answer/edit", "/assess", "/explain", "/unknown", "/finish"].contains { path.hasSuffix($0) }
+        if !sessionOnly, !path.hasPrefix("/api/v1/ai/"), path != "/api/v1/preferences" {
             let components = path.split(separator: "/")
             let subjectID = components.count > 3 && components[2] == "subjects" ? UUID(uuidString: String(components[3])) : activeSubjectID
             invalidateSubjectSnapshots(subjectID)

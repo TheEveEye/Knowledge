@@ -57,9 +57,9 @@ struct CloudRecallQuestionLibrary: View {
             .navigationTitle(category?.title ?? "Recall questions")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
         }
-        .task(id: library.invalidationEpoch) {
+        .task(id: library.invalidationID(for: subjectID)) {
             defer { loading = false }
-            do { try await library.loadRecallMaterials(for: subjectID); error = nil }
+            do { try await library.loadRecallMaterials(for: subjectID, includeQuestions: true); error = nil }
             catch is CancellationError { }
             catch { self.error = error.localizedDescription }
         }

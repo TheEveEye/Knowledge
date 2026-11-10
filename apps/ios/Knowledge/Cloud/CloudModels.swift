@@ -60,10 +60,4 @@ nonisolated enum CloudSuggestion {
 }
 nonisolated enum CloudCoding {
     @concurrent static func decode<T: Decodable & Sendable>(_ type: T.Type, data: Data) async throws -> T { try JSONDecoder().decode(type, from: data) }
-    nonisolated struct CachePayload: Sendable { let key: String; let subjectID: UUID; let kind: String; let data: Data }
-    @concurrent static func cachePayloads(subjects: [CloudSubject], entries: [CloudEntity]) async throws -> [CachePayload] {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try subjects.map { .init(key: $0.id.uuidString, subjectID: $0.id, kind: "subject", data: try encoder.encode($0)) }
-            + entries.map { .init(key: $0.id.uuidString, subjectID: $0.subjectID, kind: $0.kind, data: try encoder.encode($0)) }
-    }
 }

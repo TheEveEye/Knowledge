@@ -212,7 +212,8 @@ export class LibraryService {
   }
   async history(userId: string, subjectID: string, cursor?: string, limit = 50) {
     await ownedSubject(this.db, userId, subjectID);
-    const rows = await this.db.select().from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), cursor ? sql`(${revisions.createdAt},${revisions.id}) < (SELECT created_at,id FROM knowledge.subject_revisions WHERE user_id=${userId} AND subject_id=${subjectID} AND id=${cursor})` : undefined)).orderBy(desc(revisions.createdAt), desc(revisions.id)).limit(limit + 1);
+    const rows = await this.db.select({ id: revisions.id, subjectId: revisions.subjectId, parentId: revisions.parentId, operationId: revisions.operationId,
+      origin: revisions.origin, title: revisions.title, summary: revisions.summary, createdAt: revisions.createdAt, undoesRevisionId: revisions.undoesRevisionId }).from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), cursor ? sql`(${revisions.createdAt},${revisions.id}) < (SELECT created_at,id FROM knowledge.subject_revisions WHERE user_id=${userId} AND subject_id=${subjectID} AND id=${cursor})` : undefined)).orderBy(desc(revisions.createdAt), desc(revisions.id)).limit(limit + 1);
     return { items: rows.slice(0, limit).map(r => ({ id: r.id, subjectID: r.subjectId, parentID: r.parentId, operationID: r.operationId, origin: r.origin, title: r.title, summary: r.summary, createdAt: r.createdAt.toISOString(), undoesRevisionID: r.undoesRevisionId })), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   }
   async move(userId: string, subjectID: string, conceptID: string, operationID: string, version: number, topicID: string | null, locked: boolean) {
@@ -233,7 +234,7 @@ export class LibraryService {
     const versions = hashes.length ? await this.db.select().from(entityVersions).where(and(eq(entityVersions.userId, userId), inArray(entityVersions.hash, hashes))) : [];
     const names = Object.fromEntries(versions.filter(v => v.payload.subjectID === subjectID && typeof v.payload.fields.name === "string").map(v => [v.payload.id, stringValue(v.payload.fields.name)]));
     const undone = (await this.db.select({ id: revisions.id }).from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), eq(revisions.undoesRevisionId, revisionID))).limit(1))[0];
-    const undoJob = (await this.db.select().from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.subjectId, subjectID), eq(jobs.kind, "prepareUndo"), sql`${jobs.input}->>'revisionID'=${revisionID}`)).orderBy(desc(jobs.updatedAt), desc(jobs.id)).limit(1))[0];
+    const undoJob = (await this.db.select({ id: jobs.id, version: jobs.version, status: jobs.status, error: jobs.error, progress: jobs.progress }).from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.subjectId, subjectID), eq(jobs.kind, "prepareUndo"), sql`${jobs.input}->>'revisionID'=${revisionID}`)).orderBy(desc(jobs.updatedAt), desc(jobs.id)).limit(1))[0];
     const undoDecision = (await this.db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userId), eq(pendingDecisions.subjectId, subjectID), sql`${pendingDecisions.state}->>'revisionID'=${revisionID}`)).limit(1))[0];
     return { id: r.id, subjectID: r.subjectId, parentID: r.parentId, operationID: r.operationId, origin: r.origin, title: r.title, summary: r.summary, createdAt: r.createdAt.toISOString(), changes: r.changes, undoesRevisionID: r.undoesRevisionId, names,
       isUndone: !!undone, undoDecision: undoDecision?.state ?? null, undoJob: undoJob ? { id: undoJob.id, version: undoJob.version, status: undoJob.status, error: undoJob.error, progress: undoJob.progress } : null };
