@@ -13,6 +13,14 @@
     }
 
     handle /api/* {
+        # JSON only: keep SSE and source downloads streaming without compression.
+        encode {
+            gzip 1
+            minimum_length 1024
+            match {
+                header Content-Type application/json*
+            }
+        }
         # Preserve /api; the Fastify routes include the prefix.
         reverse_proxy api:3000
     }

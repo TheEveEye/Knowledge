@@ -106,6 +106,7 @@ import Observation
     }
 
     private static func decode(_ row: CloudJSON) throws -> ImportDraft {
+        guard row.value("draft") != .null else { throw CloudFailure(code: "DRAFT_UNAVAILABLE", message: "This import draft has not loaded yet.") }
         guard let sourceID = UUID(uuidString: row.text("sourceID")) else { throw CloudFailure(code: "DRAFT_UNAVAILABLE", message: "This import draft is unavailable.") }
         let entries = row.value("draft").value("entries").array
         var result = ImportDraft(sourceID: sourceID, concepts: [], facts: [], connections: [], coverage: [])

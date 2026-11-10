@@ -17,7 +17,7 @@ struct CloudHistoryView: View {
             }
         }.navigationTitle("History")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .task(id: library.invalidationEpoch) { do { revisions = try await library.client.pages(CloudJSON.self, path: "/api/v1/subjects/\(subjectID.uuidString.lowercased())/history").filter { $0.text("origin") != "baseline" }.sorted { $0.text("createdAt") > $1.text("createdAt") }; error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription } }
+            .task(id: library.invalidationID(for: subjectID)) { do { revisions = try await library.client.pages(CloudJSON.self, path: "/api/v1/subjects/\(subjectID.uuidString.lowercased())/history").filter { $0.text("origin") != "baseline" }.sorted { $0.text("createdAt") > $1.text("createdAt") }; error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
 }
 struct CloudRevisionView: View {
@@ -98,7 +98,7 @@ struct CloudRevisionView: View {
                     try await refreshRevision()
                 } }
             } message: { Text("Later edits and information used by later notes will be kept.") }
-            .task(id: library.invalidationEpoch) { do { try await refreshRevision() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
+            .task(id: library.invalidationID(for: subjectID)) { do { try await refreshRevision() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
     private func refreshRevision() async throws {
         let latest = try await library.client.json("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)")

@@ -138,6 +138,22 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
             controller.state.episode?.phase == "answer" && controller.state.episode?.nextInput.kind == .ordering
                 ? .active : .inactive))
         .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !isHistory, controller.state.episode?.phase == "feedback" {
+                Button { controller.next() } label: {
+                    HStack {
+                        if controller.isRequesting, controller.requestAction == "/advance" || controller.requestAction == "/unknown" {
+                            ProgressView(); Text(controller.requestLabel)
+                        } else { Label("Next question", systemImage: "arrow.right") }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.glass(.regular.tint(.accentColor)))
+                .disabled(revealingSource || editingAnswer || controller.isRequesting || controller.canRetryRequest)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+        }
         .toolbar {
             if !isHistory, controller.state.episode != nil {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -210,7 +226,14 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 if turn.kind != .initial { RecallText(source: turn.prompt).font(.headline) }
                 Text(turn.answer).textSelection(.enabled)
                 if let assessment = turn.assessment {
-                    RecallText(source: assessment.feedback).foregroundStyle(.secondary)
+                    // The final assessment lives with the result, rather than
+                    // repeating the reference answer beneath the user's answer.
+                    if episode.phase != "feedback" || turn.id != episode.turns.last?.id {
+                        RecallText(source: assessment.feedback).foregroundStyle(.secondary)
+                    }
+                }
+                if episode.phase == "awaiting", episode.pendingOperation == "assess", turn.id == episode.turns.last?.id {
+                    gradingActions
                 }
             }
         }
@@ -249,7 +272,7 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                     .disabled(controller.hasStaleInput || controller.isRequesting || controller.canRetryRequest)
                 }
             }
-        } else if episode.phase.hasPrefix("awaiting") {
+        } else if episode.phase.hasPrefix("awaiting"), episode.pendingOperation == "explain" {
             Section {
                 if controller.isRequesting {
                     Button { } label: { HStack { ProgressView(); Text(controller.requestLabel) }.frame(maxWidth: .infinity, minHeight: 32) }
@@ -257,20 +280,8 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 } else if controller.error == nil {
                     Button("Retry assessment") { controller.retry() }
                 }
-                if controller.canEditPendingAnswer {
-                    Button {
-                        editingAnswer = true
-                        Task {
-                            defer { editingAnswer = false }
-                            if await controller.stopGradingAndEditAnswerConfirmed() { answerFocused = controller.state.episode?.nextInput.kind == .text }
-                        }
-                    } label: { HStack { if editingAnswer { ProgressView() }; Label("Stop grading", systemImage: "stop.fill") } }.disabled(editingAnswer)
-                } else if episode.pendingOperation == "explain" {
-                    Button(controller.isRequesting ? "Stop" : "Back to feedback") {
-                        controller.stopExplanation()
-                    }
-                } else if controller.isRequesting {
-                    Button("Stop") { controller.interrupt(message: "Assessment stopped. Your answer was kept; retry to continue.") }
+                Button(controller.isRequesting ? "Stop" : "Back to feedback") {
+                    controller.stopExplanation()
                 }
             }
         } else if episode.phase == "feedback" {
@@ -286,10 +297,46 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
         }
     }
 
+    private var gradingActions: some View {
+        HStack(spacing: 16) {
+            Button { controller.retry() } label: {
+                HStack {
+                    if controller.isRequesting { ProgressView() }
+                    Text(controller.isRequesting ? "Checking" : "Retry")
+                }
+                .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(controller.isRequesting || editingAnswer)
+            Button {
+                editingAnswer = true
+                Task {
+                    defer { editingAnswer = false }
+                    if await controller.stopGradingAndEditAnswerConfirmed() {
+                        answerFocused = controller.state.episode?.nextInput.kind == .text
+                    }
+                }
+            } label: {
+                HStack {
+                    if editingAnswer { ProgressView() }
+                    Text("Stop grading")
+                }
+                .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.bordered)
+            .disabled(editingAnswer || !controller.canEditPendingAnswer)
+        }
+    }
+
     @ViewBuilder private func feedbackSections(_ episode: RecallEpisode) -> some View {
         let assessment = episode.feedbackAssessment
         Section(assessment?.outcome.label ?? "Feedback") {
-            if episode.reconsiderationScope != nil, let assessment { RecallText(source: assessment.feedback) }
+            assessmentCriteria(episode, assessment: assessment)
+            DisclosureGroup("Answer details") {
+                RecallText(source: episode.question.expectedAnswer)
+                if let assessment { RecallText(source: assessment.feedback).foregroundStyle(.secondary) }
+            }
+            .id(episode.turns.last?.id)
             if let concern = assessment?.sourceConcern {
                 Label("Question or source concern", systemImage: "exclamationmark.bubble")
                 Text(concern)
@@ -300,11 +347,6 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 Text("This assessment won't count as a recall failure or change your review schedule.").foregroundStyle(.secondary)
             } else if episode.initialAssessment?.outcome != .correct && episode.lastAssessment?.outcome == .correct {
                 Text("You reached the answer after follow-up. The initial recall and supported result are recorded separately.").foregroundStyle(.secondary)
-            }
-            RecallText(source: episode.question.expectedAnswer)
-            ForEach(episode.question.criteria.filter { $0.point.normalizedName != episode.question.expectedAnswer.normalizedName }) { criterion in
-                Label(criterion.point, systemImage: assessment?.metCriterionIDs.contains(criterion.id) == true ? "checkmark.circle"
-                    : (assessment?.partialCriterionIDs?.contains(criterion.id) == true ? "minus.circle" : "circle"))
             }
             if !episode.disputed, let credits = episode.initialAssessment?.additionalRecall?.filter({
                 $0.verificationPolicy == RecallAssessmentPolicy.version && $0.evidenceByCriterion != nil
@@ -342,16 +384,20 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
             }
         }
         Section {
-            Button { controller.next() } label: {
-                HStack {
-                    if controller.isRequesting, controller.requestAction == "/advance" || controller.requestAction == "/unknown" {
-                        ProgressView(); Text(controller.requestLabel)
-                    } else { Label("Next question", systemImage: "arrow.right") }
-                }
-            }
             Button("Explain more", systemImage: "text.bubble") { controller.explainMore() }
             Button("Disagree with assessment", systemImage: "hand.raised") { reason = ""; reconsiderationScope = episode.turns.count > 1 ? .conversation : .initial; challenge = .assessment }
         }.disabled(revealingSource || editingAnswer || controller.isRequesting)
+    }
+
+    @ViewBuilder private func assessmentCriteria(_ episode: RecallEpisode, assessment: RecallAssessment?) -> some View {
+        ForEach(episode.question.criteria) { criterion in
+            Label {
+                RecallText(source: criterion.point)
+            } icon: {
+                Image(systemName: assessment?.metCriterionIDs.contains(criterion.id) == true ? "checkmark.circle"
+                    : (assessment?.partialCriterionIDs?.contains(criterion.id) == true ? "minus.circle" : "circle"))
+            }
+        }
     }
 
     @ViewBuilder private var summary: some View {
