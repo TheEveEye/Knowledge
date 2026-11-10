@@ -6,11 +6,7 @@ import { DomainError, invalidate, mutation, ownedSubject, requireValue } from ".
 import { imports, jobs, sources, workerHeartbeats } from "./schema.js";
 
 export type ClaimedJob = typeof jobs.$inferSelect & { leaseId: string };
-export const jobDisplayColumns = { id: jobs.id, subjectId: jobs.subjectId, importId: jobs.importId,
-  input: sql<JSONObject>`jsonb_build_object('sourceID', ${jobs.input}->'sourceID')`, kind: jobs.kind, status: jobs.status,
-  version: jobs.version, progress: jobs.progress, error: jobs.error, selection: jobs.selection, createdAt: jobs.createdAt, updatedAt: jobs.updatedAt };
-type DisplayJob = Pick<typeof jobs.$inferSelect, keyof typeof jobDisplayColumns>;
-export const jobDTO = (j: DisplayJob): Job => ({ id: j.id, subjectID: j.subjectId, importID: j.importId, sourceID: typeof j.input.sourceID === "string" ? j.input.sourceID : null, kind: j.kind as Job["kind"], status: j.status as Job["status"], version: j.version, progress: j.progress, error: j.error, selection: j.selection, createdAt: j.createdAt.toISOString(), updatedAt: j.updatedAt.toISOString() });
+export const jobDTO = (j: typeof jobs.$inferSelect): Job => ({ id: j.id, subjectID: j.subjectId, importID: j.importId, sourceID: typeof j.input.sourceID === "string" ? j.input.sourceID : null, kind: j.kind as Job["kind"], status: j.status as Job["status"], version: j.version, progress: j.progress, error: j.error, selection: j.selection, createdAt: j.createdAt.toISOString(), updatedAt: j.updatedAt.toISOString() });
 export class JobQueue {
   constructor(readonly db: Database, readonly limit = 2) {}
   async claim(): Promise<ClaimedJob | null> {

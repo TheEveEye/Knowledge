@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { and, asc, desc, eq, gt, ne, sql } from "drizzle-orm";
-import { AIService, ChatService, DomainError, FileStore, ImportService, JobQueue, LibraryService, RecallService, aiRequests, draftChangeSchema, entities, entityKinds, events, expected, imports, invalidate, jobDisplayColumns, jobDTO, jobs, mutation, mutationSchema, ownedSubject, pendingDecisions, preferences, requireValue, selectionSchema, sources as sourceRows, SourceService, uuid, workerHeartbeats } from "@knowledge/backend";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
+import { AIService, ChatService, DomainError, FileStore, ImportService, JobQueue, LibraryService, RecallService, aiRequests, draftChangeSchema, entityKinds, events, expected, importDTO, imports, invalidate, jobDTO, jobs, mutation, mutationSchema, ownedSubject, pendingDecisions, preferences, requireValue, selectionSchema, SourceService, uuid, workerHeartbeats } from "@knowledge/backend";
 import type { Database } from "@knowledge/backend";
 import type pg from "pg";
 import type { JSONObject } from "@knowledge/contracts";
@@ -20,14 +20,6 @@ const chatMessages = z.array(z.strictObject({ role: z.enum(["user", "assistant"]
 const parseID = (r: FastifyRequest, key: string) => uuid.parse((r.params as Record<string, unknown>)[key]);
 const userID = (r: FastifyRequest) => requireValue((r as FastifyRequest & { knowledgeUserID: string | null }).knowledgeUserID);
 const sourceDTO = (s: Awaited<ReturnType<SourceService["get"]>>) => ({ id: s.id, subjectID: s.subjectId, title: s.title, kind: s.kind, digest: s.digest, byteCount: s.byteCount, status: s.status, error: s.error, archived: s.archived, createdAt: s.createdAt.toISOString() });
-// Keep pagination on collection endpoints, without making app startup pay a
-// phone-to-server round trip for every page.
-async function collectPages<T>(read: (cursor?: string) => Promise<{ items: T[]; nextCursor: string | null }>): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  do { const page = await read(cursor); items.push(...page.items); cursor = page.nextCursor ?? undefined; } while (cursor);
-  return items;
-}
 function stream(reply: FastifyReply) {
   const headers: Record<string, string | number | string[]> = {};
   for (const [key, value] of Object.entries(reply.getHeaders())) if (value !== undefined) headers[key] = value;
@@ -56,41 +48,6 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       if (!["GET", "HEAD"].includes(request.method) && (typeof request.headers.origin !== "string" || !config.auth.trustedOrigins.includes(request.headers.origin))) throw new DomainError("INVALID_ORIGIN", "This request origin is not allowed.", 403);
     });
     app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 }, (_request, body, done) => done(null, body));
-    app.get("/library", async r => {
-      const owner = userID(r);
-      const [subjects, drafts, prefs, connections] = await Promise.all([
-        collectPages(cursor => library.list(owner, cursor, 100)),
-        collectPages(cursor => importer.allDrafts(owner, cursor, 100)),
-        db.select().from(preferences).where(eq(preferences.userId, owner)),
-        ai.connections(owner),
-      ]);
-      return { subjects, drafts, preferences: { version: prefs[0]?.version ?? 0, values: prefs[0]?.values ?? {} },
-        configuration: { items: connections, selfHostedEnabled: process.env.CHATGPT_SELF_HOSTED_ENABLED === "true", apiEnabled: !!process.env.OPENAI_API_KEY_FILE || !!process.env.OPENAI_API_KEY } };
-    });
-    app.get("/subjects/:subjectID/snapshot", async r => {
-      const owner = userID(r), id = parseID(r, "subjectID");
-      const { importID, knownRevisionID } = z.strictObject({ importID: uuid.optional(), knownRevisionID: uuid.optional() }).parse(r.query);
-      // One MVCC snapshot includes worker progress and Recall state as well as
-      // the subject revision. Concurrent writes cannot mix versions in this read.
-      return db.transaction(async tx => {
-        const subject = await ownedSubject(tx, owner, id);
-        // Contributions duplicate original wording/evidence already on display
-        // entities. They remain in storage and in the explicit entry/history APIs.
-        const entries = subject.revisionId === knownRevisionID ? undefined : (await tx.select({ record: entities.record }).from(entities).where(and(eq(entities.userId, owner), eq(entities.subjectId, id), ne(entities.kind, "contribution"))).orderBy(asc(entities.id))).map(row => row.record);
-        const sourceValues = await tx.select().from(sourceRows).where(and(eq(sourceRows.userId, owner), eq(sourceRows.subjectId, id))).orderBy(asc(sourceRows.id));
-        // Project display fields in SQL: historical drafts and worker checkpoints
-        // must not even travel from PostgreSQL to the API during navigation.
-        const draftValues = await tx.select({ id: imports.id, subjectID: imports.subjectId, sourceID: imports.sourceId, baseRevisionID: imports.baseRevisionId,
-          version: imports.version, status: imports.status, selection: imports.selection, createdAt: imports.createdAt, updatedAt: imports.updatedAt,
-          draft: sql<JSONObject | null>`CASE WHEN ${imports.id} = ${importID ?? null}::uuid AND ${imports.status} <> 'saved' THEN ${imports.draft} ELSE NULL END`,
-        }).from(imports).where(and(eq(imports.userId, owner), eq(imports.subjectId, id))).orderBy(asc(imports.id));
-        const jobValues = await tx.select(jobDisplayColumns).from(jobs).where(and(eq(jobs.userId, owner), eq(jobs.subjectId, id))).orderBy(asc(jobs.id));
-        const decisionValues = await tx.select({ id: pendingDecisions.id, subjectID: pendingDecisions.subjectId, importID: pendingDecisions.importId, state: pendingDecisions.state, version: pendingDecisions.version }).from(pendingDecisions).where(and(eq(pendingDecisions.userId, owner), eq(pendingDecisions.subjectId, id))).orderBy(asc(pendingDecisions.id));
-        const dashboard = await recall.dashboard(owner, id, null, tx, entries, subject);
-        return { subject: { id: subject.id, name: subject.name, version: subject.version, revisionID: subject.revisionId, createdAt: subject.createdAt.toISOString(), updatedAt: subject.updatedAt.toISOString() },
-          entries: entries ?? null, sources: sourceValues.map(sourceDTO), drafts: draftValues, jobs: jobValues.map(jobDTO), decisions: decisionValues, recall: dashboard };
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
-    });
     app.get("/subjects", async r => { const q = pageSchema.parse(r.query); return library.list(userID(r), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
     app.post("/subjects", async r => { const b = createSchema.parse(r.body); return library.create(userID(r), b.operationID, b.name); });
     app.get("/subjects/:subjectID", r => library.subject(userID(r), parseID(r, "subjectID")));
@@ -112,8 +69,8 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     });
     app.get("/sources/:sourceID", async r => {
       const source = await sources.get(userID(r), parseID(r, "sourceID"));
-      const saved = await db.select({ reviewNotes: sql<unknown>`${imports.draft}->'reviewNotes'` }).from(imports).where(and(eq(imports.userId, userID(r)), eq(imports.subjectId, source.subjectId), eq(imports.sourceId, source.id), eq(imports.status, "saved")));
-      const reviewNotes = [...new Set(saved.flatMap(row => Array.isArray(row.reviewNotes) ? row.reviewNotes.filter((value): value is string => typeof value === "string") : []))];
+      const saved = await db.select({ draft: imports.draft }).from(imports).where(and(eq(imports.userId, userID(r)), eq(imports.subjectId, source.subjectId), eq(imports.sourceId, source.id), eq(imports.status, "saved")));
+      const reviewNotes = [...new Set(saved.flatMap(row => Array.isArray(row.draft.reviewNotes) ? row.draft.reviewNotes.filter((value): value is string => typeof value === "string") : []))];
       return { ...sourceDTO(source), reviewNotes };
     });
     app.get("/sources/:sourceID/passages", r => { const q = pageSchema.parse(r.query); return sources.passages(userID(r), parseID(r, "sourceID"), q.cursor ? z.coerce.number().int().min(-1).parse(q.cursor) : -1, q.limit); });
@@ -121,7 +78,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.get("/subjects/:subjectID/imports", r => { const q = pageSchema.parse(r.query); return importer.list(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
     app.post("/subjects/:subjectID/imports", r => { const b = z.strictObject({ operationID: uuid, sourceID: uuid, selection: selectionSchema }).parse(r.body); return importer.create(userID(r), parseID(r, "subjectID"), b.sourceID, b.selection, b.operationID); });
     app.get("/imports", r => { const q = pageSchema.parse(r.query); return importer.allDrafts(userID(r), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
-    app.get("/imports/:importID", r => importer.display(userID(r), parseID(r, "importID")));
+    app.get("/imports/:importID", async r => importDTO(await importer.get(userID(r), parseID(r, "importID"))));
     app.post("/imports/:importID/recheck", r => { const b = mutationSchema.extend({ selection: selectionSchema }).parse(r.body); return importer.recheck(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.selection); });
     app.post("/imports/:importID/passages/:passageID/review", r => { const b = mutationSchema.extend({ reviewed: z.boolean() }).parse(r.body), passageID = z.string().min(1).max(200).parse((r.params as { passageID: string }).passageID); return importer.acknowledgePassage(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, passageID, b.reviewed); });
     app.post("/imports/:importID/changes", r => { const b = mutationSchema.extend({ changes: z.array(draftChangeSchema).min(1).max(100) }).parse(r.body); return importer.changeDraft(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.changes); });
@@ -132,8 +89,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     });
     app.post("/imports/:importID/chat", async (r, reply) => {
       const b = z.strictObject({ operationID: uuid, selection: selectionSchema, messages: chatMessages }).parse(r.body);
-      const importID = parseID(r, "importID");
-      requireValue((await db.select({ id: imports.id }).from(imports).where(and(eq(imports.userId, userID(r)), eq(imports.id, importID))))[0]);
+      const importID = parseID(r, "importID"); await importer.get(userID(r), importID);
       const controller = new AbortController(); reply.raw.once("close", () => controller.abort()); const emit = stream(reply);
       try { const result = await new ChatService(db, ai).draft(userID(r), importID, b.operationID, b.selection, b.messages, AbortSignal.any([shutdown.signal, controller.signal]), text => emit("delta", { text }), value => emit("draftChanged", value)); emit("completed", result); }
       catch (error) { emit("failed", { code: error instanceof DomainError ? error.code : "CHAT_FAILED", message: error instanceof DomainError ? error.message : "The conversation was interrupted. Completed changes were kept." }); }
@@ -143,11 +99,11 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.post("/imports/:importID/save", r => { const b = mutationSchema.extend({ choices: z.record(z.string(), z.enum(["current", "incoming"])).default({}), expectedSubjectVersion: z.number().int().positive().nullable().default(null) }).parse(r.body); return importer.save(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.choices, b.expectedSubjectVersion); });
     app.delete("/imports/:importID", r => { const b = mutationSchema.parse(r.body); return importer.delete(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion); });
     app.get("/subjects/:subjectID/decisions", async r => { const subjectID = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), subjectID); const rows = await db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userID(r)), eq(pendingDecisions.subjectId, subjectID), q.cursor ? gt(pendingDecisions.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(pendingDecisions.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(d => ({ id: d.id, subjectID: d.subjectId, importID: d.importId, state: d.state, version: d.version })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
-    app.get("/jobs/:jobID", async r => jobDTO(requireValue((await db.select(jobDisplayColumns).from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.id, parseID(r, "jobID")))))[0])));
-    app.get("/subjects/:subjectID/jobs", async r => { const id = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), id); const rows = await db.select(jobDisplayColumns).from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.subjectId, id), q.cursor ? gt(jobs.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(jobs.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(jobDTO), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
+    app.get("/jobs/:jobID", async r => jobDTO(requireValue((await db.select().from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.id, parseID(r, "jobID")))))[0])));
+    app.get("/subjects/:subjectID/jobs", async r => { const id = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), id); const rows = await db.select().from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.subjectId, id), q.cursor ? gt(jobs.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(jobs.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(jobDTO), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
     app.post("/jobs/:jobID/control", r => { const b = mutationSchema.extend({ action: z.enum(["pause", "resume", "retry", "cancel"]), selection: selectionSchema.nullable().default(null) }).parse(r.body); return queue.control(userID(r), parseID(r, "jobID"), b.operationID, b.expectedVersion, b.action, b.selection); });
     app.get("/subjects/:subjectID/recall", r => { const q = z.strictObject({ topicID: uuid.optional() }).parse(r.query); return recall.dashboard(userID(r), parseID(r, "subjectID"), q.topicID ?? null); });
-    app.get("/subjects/:subjectID/recall/materials", r => { const q = pageSchema.extend({ includeQuestions: z.enum(["true", "false"]).default("true") }).parse(r.query); return recall.materials(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit, q.includeQuestions === "true"); });
+    app.get("/subjects/:subjectID/recall/materials", r => { const q = pageSchema.parse(r.query); return recall.materials(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
     app.post("/subjects/:subjectID/chat", async (r, reply) => {
       const b = z.strictObject({ selection: selectionSchema, messages: chatMessages }).parse(r.body);
       const subjectID = parseID(r, "subjectID"); await ownedSubject(db, userID(r), subjectID);
@@ -162,12 +118,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.get("/subjects/:subjectID/recall/sessions", r => { const q = pageSchema.parse(r.query); return recall.sessions(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
     app.post("/subjects/:subjectID/recall/sessions", r => { const b = z.strictObject({ operationID: uuid, selection: selectionSchema, topicID: uuid.nullable().default(null) }).parse(r.body); return recall.newSession(userID(r), parseID(r, "subjectID"), b.operationID, b.selection, b.topicID); });
     app.get("/recall/sessions/:sessionID", r => recall.presentation(userID(r), parseID(r, "sessionID")));
-    app.post("/recall/sessions/:sessionID/answer", async r => {
-      const b = mutationSchema.extend({ answer: z.string().min(1).max(20_000), inputValue: z.json().default(null) }).parse(r.body);
-      const userId = userID(r), sessionID = parseID(r, "sessionID");
-      const result = await recall.answer(userId, sessionID, b.operationID, b.expectedVersion, b.answer, b.inputValue as JSONObject);
-      return { ...result, presentation: await recall.presentation(userId, sessionID) };
-    });
+    app.post("/recall/sessions/:sessionID/answer", r => { const b = mutationSchema.extend({ answer: z.string().min(1).max(20_000), inputValue: z.json().default(null) }).parse(r.body); return recall.answer(userID(r), parseID(r, "sessionID"), b.operationID, b.expectedVersion, b.answer, b.inputValue as JSONObject); });
     app.post("/recall/sessions/:sessionID/answer/edit", r => { const b = mutationSchema.parse(r.body); return recall.editPendingAnswer(userID(r), parseID(r, "sessionID"), b.operationID, b.expectedVersion); });
     app.post("/recall/sessions/:sessionID/unknown", r => { const b = mutationSchema.parse(r.body); return recall.selfReportUnknown(userID(r), parseID(r, "sessionID"), b.operationID, b.expectedVersion); });
     app.post("/recall/sessions/:sessionID/report", r => { const b = mutationSchema.extend({ reason: z.string().trim().min(1).max(2000) }).parse(r.body); return recall.reportQuestion(userID(r), parseID(r, "sessionID"), b.operationID, b.expectedVersion, b.reason); });
@@ -183,11 +134,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.post("/recall/sessions/:sessionID/assess", async (r, reply) => {
       const b = mutationSchema.extend({ dispute: z.string().min(1).max(3000).nullable().default(null), disputeScope: z.enum(["initial", "conversation"]).default("initial") }).parse(r.body);
       const controller = new AbortController(); reply.raw.once("close", () => controller.abort());
-      const assess = async () => {
-        const userId = userID(r), sessionID = parseID(r, "sessionID");
-        const result = await recall.assess(userId, sessionID, b.operationID, b.expectedVersion, AbortSignal.any([shutdown.signal, controller.signal]), b.dispute, b.disputeScope);
-        return { ...result, presentation: await recall.presentation(userId, sessionID) };
-      };
+      const assess = () => recall.assess(userID(r), parseID(r, "sessionID"), b.operationID, b.expectedVersion, AbortSignal.any([shutdown.signal, controller.signal]), b.dispute, b.disputeScope);
       if (!r.headers.accept?.includes("text/event-stream")) return assess();
       const emit = stream(reply);
       try { emit("completed", await assess()); }

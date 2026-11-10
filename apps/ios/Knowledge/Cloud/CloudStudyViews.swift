@@ -138,8 +138,8 @@ struct CloudConceptRecallSection: View {
                 }
             }
         }
-        .task(id: library.invalidationID(for: concept.subjectID)) {
-            do { try await library.loadRecallMaterials(for: concept.subjectID) }
+        .task(id: library.invalidationEpoch) {
+            do { try await library.loadRecallMaterials(for: concept.subjectID, force: true) }
             catch is CancellationError { }
             catch { library.message = error.localizedDescription }
         }

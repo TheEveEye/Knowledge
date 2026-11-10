@@ -1,7 +1,7 @@
 import Foundation
 
 /// Server-confirmed data for navigation. Files, history and Recall question banks load separately.
-nonisolated struct CloudSubjectSnapshot: Decodable, Sendable {
+nonisolated struct CloudSubjectSnapshot: Sendable {
     let subject: CloudSubject
     let entries: [CloudEntity]
     let sources: [CloudJSON]
@@ -12,38 +12,25 @@ nonisolated struct CloudSubjectSnapshot: Decodable, Sendable {
 }
 
 extension CloudClient {
-    func subjectSnapshot(_ subject: CloudSubject, reviewingImportID: String? = nil, confirmed: CloudSubjectSnapshot? = nil) async throws -> CloudSubjectSnapshot {
-        var parameters: [String] = []
-        if let reviewingImportID {
-            guard let id = UUID(uuidString: reviewingImportID) else { throw KnowledgeAccountError.invalidResponse }
-            parameters.append("importID=" + id.uuidString.lowercased())
+    func subjectSnapshot(_ subject: CloudSubject) async throws -> CloudSubjectSnapshot {
+        var expected = subject
+        // A concurrent library edit may change the version while pages are being read.
+        for _ in 0..<2 {
+            let prefix = "/api/v1/subjects/" + subject.id.uuidString.lowercased()
+            async let entries = pages(CloudEntity.self, path: prefix + "/entries")
+            async let sources = pages(CloudJSON.self, path: prefix + "/sources")
+            async let drafts = pages(CloudJSON.self, path: prefix + "/imports")
+            async let jobs = pages(CloudJSON.self, path: prefix + "/jobs")
+            async let decisions = pages(CloudJSON.self, path: prefix + "/decisions")
+            async let recall = json(prefix + "/recall")
+            let values = try await (entries, sources, drafts, jobs, decisions, recall)
+            let after = try await decoded(CloudSubject.self, path: prefix)
+            if after.version == expected.version {
+                return .init(subject: after, entries: values.0, sources: values.1, drafts: values.2,
+                             jobs: values.3, decisions: values.4, recall: values.5)
+            }
+            expected = after
         }
-        if let confirmed, confirmed.subject.id == subject.id { parameters.append("knownRevisionID=" + confirmed.subject.revisionID.uuidString.lowercased()) }
-        let query = parameters.isEmpty ? "" : "?" + parameters.joined(separator: "&")
-        let value = try await decoded(CloudSubjectSnapshotResponse.self, path: "/api/v1/subjects/" + subject.id.uuidString.lowercased() + "/snapshot" + query)
-        guard value.subject.id == subject.id else { throw KnowledgeAccountError.invalidResponse }
-        let entries: [CloudEntity]
-        if let returned = value.entries { entries = returned }
-        else if let confirmed, confirmed.subject.id == value.subject.id, confirmed.subject.revisionID == value.subject.revisionID { entries = confirmed.entries }
-        else { throw KnowledgeAccountError.invalidResponse }
-        return .init(subject: value.subject, entries: entries, sources: value.sources, drafts: value.drafts, jobs: value.jobs, decisions: value.decisions, recall: value.recall)
+        throw CloudFailure(code: "CHANGED", message: "This subject changed while loading. Retry to refresh.")
     }
-}
-
-/// Entries may be omitted only after the server confirms the caller's revision.
-private nonisolated struct CloudSubjectSnapshotResponse: Decodable, Sendable {
-    let subject: CloudSubject
-    let entries: [CloudEntity]?
-    let sources: [CloudJSON]
-    let drafts: [CloudJSON]
-    let jobs: [CloudJSON]
-    let decisions: [CloudJSON]
-    let recall: CloudJSON
-}
-
-nonisolated struct CloudLibraryBootstrap: Decodable, Sendable {
-    let subjects: [CloudSubject]
-    let drafts: [CloudJSON]
-    let preferences: CloudJSON
-    let configuration: CloudJSON
 }

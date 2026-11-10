@@ -48,9 +48,6 @@ import SwiftUI
         guard duringRequest || !isRequesting else { return }
         let run = generation
         let value = try await library.client.json(prefix)
-        try await applyPresentation(value, run: run)
-    }
-    private func applyPresentation(_ value: CloudJSON, run: UUID) async throws {
         // Session-only changes do not require downloading the whole question bank
         // again when the confirmed question can use the displayed material.
         if value.value("question") != .null,
@@ -186,18 +183,7 @@ import SwiftUI
         else { commandPath = nil }
         let run = UUID(); generation = run
         if case .explanation = operation { state.episode?.phase = "awaitingExplanation"; state.episode?.pendingOperation = "explain" }
-        else if case .answer(_, let answer, _) = operation {
-            if var episode = state.episode, episode.phase == "answer" {
-                // Show the submitted answer before the save request completes.
-                // Retries keep this turn until the server replaces it on refresh.
-                let turn = RecallTurn(id: UUID(), prompt: episode.nextPrompt,
-                    kind: episode.turns.isEmpty ? .initial : (episode.lastAssessment?.followUpKind ?? .clarification),
-                    answer: answer, submittedAt: .now, input: episode.nextInput, response: episode.response)
-                episode.turns.append(turn)
-                episode.phase = "awaiting"; episode.pendingOperation = "assess"
-                state.episode = episode
-            }
-        }
+        else if case .answer = operation { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
         else if case .assessment = operation { state.episode?.phase = "awaiting"; state.episode?.pendingOperation = "assess" }
         task = Task { [weak self] in
             guard let self else { return }
@@ -210,20 +196,10 @@ import SwiftUI
                         let result = try await library.mutate(prefix + "/answer", fields: ["expectedVersion": .number(version), "answer": .string(answer), "inputValue": value])
                         guard generation == run else { return }
                         formDirty = false; pending = .assessment(version: result.value("version").int, dispute: nil, scope: "initial")
-                        if result.value("presentation") != .null {
-                            try await applyPresentation(result.value("presentation"), run: run)
-                        } else {
-                            // Compatibility with servers that return only the receipt.
-                            try await refresh(duringRequest: true)
-                        }
+                        try await refresh(duringRequest: true)
                     case .assessment(let version, let dispute, let scope):
-                        let result = try await library.mutate(prefix + "/assess", fields: ["expectedVersion": .number(version), "dispute": dispute.map { .string($0) } ?? .null, "disputeScope": .string(scope)], streaming: true)
+                        _ = try await library.mutate(prefix + "/assess", fields: ["expectedVersion": .number(version), "dispute": dispute.map { .string($0) } ?? .null, "disputeScope": .string(scope)], streaming: true)
                         guard generation == run else { return }; pending = .refresh; formDirty = false
-                        if result.value("presentation") != .null {
-                            // Keep read-only recovery if applying a confirmed result fails.
-                            try await applyPresentation(result.value("presentation"), run: run)
-                            guard generation == run else { return }; pending = nil; commandPath = nil
-                        }
                     case .explanation(let version):
                         _ = try await library.mutate(prefix + "/explain", fields: ["expectedVersion": .number(version)], streaming: true)
                         guard generation == run else { return }; pending = .refresh
@@ -273,7 +249,7 @@ struct CloudRecallSessionScreen: View {
         }
         .navigationTitle(isHistory ? "Session summary" : "Recall")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: library.invalidationID(for: library.activeSubjectID)) {
+        .task(id: library.invalidationEpoch) {
             do {
                 let current = library.recallController(for: sessionID)
                 try await current.refresh(); controller = current

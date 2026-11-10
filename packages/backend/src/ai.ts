@@ -206,9 +206,6 @@ export class AIService {
     }, 15_000);
     try {
       const body: JSONObject = { model: selection.model, instructions, input, store: false, stream: true };
-      // Only API-funded Recall grading opts into the premium service tier.
-      const fastGrading = selection.funding === "api" && (kind === "recall_assessment" || kind === "recall_extra_verify");
-      if (fastGrading) body.service_tier = "fast";
       if (selection.reasoning !== "automatic") body.reasoning = { effort: selection.reasoning };
       if (schema) body.text = { format: { type: "json_schema", name: "knowledge_" + kind.replace(/\W/g, "_"), strict: true, schema } };
       if (tools?.length) { body.tools = tools; body.include = ["reasoning.encrypted_content"]; }
@@ -258,7 +255,6 @@ export class AIService {
       }
       if (!completed) throw new DomainError("INCOMPLETE_AI_RESPONSE", "The AI stream ended before completion. Retry this step.");
       if (completed.status !== undefined && completed.status !== "completed") throw new DomainError("INCOMPLETE_AI_RESPONSE", "The AI response did not complete.");
-      if (fastGrading) process.stderr.write(JSON.stringify({ event: "ai_service_tier", requestID, kind, model: selection.model, requestedTier: "fast", servedTier: completed.service_tier ?? null }) + "\n");
       // Some streams finalize items separately and omit them from response.completed.
       // Preserve tool calls/reasoning as well as text, just as the native adapter does.
       const output = jsonArray(completed.output);

@@ -20,11 +20,7 @@ import { affectedEntries, inferenceInput, sourceReviewBatch, type ReviewPassage,
 export interface DraftEntry { record: LibraryEntity; selected: boolean; reviewReason: string | null; mergeTargetID: string | null; acceptMerge: boolean; original: JSONObject; mergeDecisionLocked?: boolean }
 export interface DraftState { entries: DraftEntry[]; coverage: JSONValue[]; updates: JSONValue[]; reviewNotes: string[]; reviewedPassageIDs?: string[]; existingFactReviews?: JSONValue[] }
 const draftJSON = (draft: DraftState) => asJSON(draft) as JSONObject;
-// Worker checkpoints never belong in a client response.
-const importDisplayColumns = { id: imports.id, subjectId: imports.subjectId, sourceId: imports.sourceId, baseRevisionId: imports.baseRevisionId,
-  version: imports.version, status: imports.status, draft: sql<JSONObject>`CASE WHEN ${imports.status} = 'saved' THEN '{}'::jsonb ELSE ${imports.draft} END`,
-  selection: imports.selection, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
-export const importDTO = (row: Pick<typeof imports.$inferSelect, keyof typeof importDisplayColumns>) => ({ id: row.id, subjectID: row.subjectId, sourceID: row.sourceId, baseRevisionID: row.baseRevisionId, version: row.version, status: row.status, draft: row.status === "saved" ? {} : row.draft, selection: row.selection, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
+export const importDTO = (row: typeof imports.$inferSelect) => ({ id: row.id, subjectID: row.subjectId, sourceID: row.sourceId, baseRevisionID: row.baseRevisionId, version: row.version, status: row.status, draft: row.draft, checkpoint: row.checkpoint, selection: row.selection, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
 const entry = (subjectID: string, kind: LibraryEntity["kind"], id: string, fields: JSONObject, reviewReason: string | null = null): DraftEntry => ({ record: { id, subjectID, kind, fields, protectedFields: [], isRetired: false, redirectID: null }, selected: !reviewReason, reviewReason, mergeTargetID: null, acceptMerge: false, original: structuredClone(fields) });
 function unique(ids: string[], label: string) { if (new Set(ids).size !== ids.length) throw new DomainError("INVALID_EXTRACTION", `Duplicate ${label} IDs.`); }
 // Reconciliation/review can exclude a prerequisite after extraction selected its
@@ -146,18 +142,17 @@ function retainFactReviews(draft: DraftState, reviews: { factID: string; reason:
 export class ImportService {
   constructor(readonly db: Database, readonly ai: AIService, readonly queue: JobQueue) {}
   async get(userId: string, id: string) { return requireValue((await this.db.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))))[0]); }
-  async display(userId: string, id: string) { return importDTO(requireValue((await this.db.select(importDisplayColumns).from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))))[0])); }
   async list(userId: string, subjectID: string, cursor?: string, limit = 50) {
     await ownedSubject(this.db, userId, subjectID);
-    const rows = await this.db.select(importDisplayColumns).from(imports).where(and(eq(imports.userId, userId), eq(imports.subjectId, subjectID), cursor ? gt(imports.id, cursor) : undefined)).orderBy(asc(imports.id)).limit(limit + 1);
+    const rows = await this.db.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.subjectId, subjectID), cursor ? gt(imports.id, cursor) : undefined)).orderBy(asc(imports.id)).limit(limit + 1);
     return { items: rows.slice(0, limit).map(importDTO), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   }
   async allDrafts(userId: string, cursor?: string, limit = 50) {
-    const rows = await this.db.select({ draft: { id: imports.id, subjectId: imports.subjectId, sourceId: imports.sourceId, version: imports.version, status: imports.status, updatedAt: imports.updatedAt }, title: sources.title }).from(imports)
+    const rows = await this.db.select({ draft: imports, title: sources.title }).from(imports)
       .innerJoin(sources, and(eq(sources.userId, imports.userId), eq(sources.subjectId, imports.subjectId), eq(sources.id, imports.sourceId)))
       .where(and(eq(imports.userId, userId), ne(imports.status, "saved"), cursor ? gt(imports.id, cursor) : undefined)).orderBy(asc(imports.id)).limit(limit + 1);
     const page = rows.slice(0, limit), ids = page.map(r => r.draft.id);
-    const work = ids.length ? await this.db.select({ importId: jobs.importId, status: jobs.status, progress: jobs.progress }).from(jobs).where(and(eq(jobs.userId, userId), inArray(jobs.importId, ids))).orderBy(desc(jobs.updatedAt)) : [];
+    const work = ids.length ? await this.db.select().from(jobs).where(and(eq(jobs.userId, userId), inArray(jobs.importId, ids))).orderBy(desc(jobs.updatedAt)) : [];
     return { items: page.map(({ draft, title }) => {
       const job = work.find(j => j.importId === draft.id && !["completed", "cancelled"].includes(j.status));
       return { id: draft.id, subjectID: draft.subjectId, sourceID: draft.sourceId, version: draft.version, status: draft.status, updatedAt: draft.updatedAt.toISOString(), sourceTitle: title,

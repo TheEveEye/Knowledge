@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import { createEmptyCard, fsrs, Rating, type CardInput, type Grade } from "ts-fsrs";
 import { z } from "zod";
 import type { AISelection, JSONObject, JSONValue, LibraryEntity } from "@knowledge/contracts";
@@ -8,7 +8,7 @@ import { AIService } from "./ai.js";
 import { DomainError, canonical, completedOperation, expected, hash, heartbeatOperation, invalidate, jsonArray, jsonObject, mutation, ownedSubject, releaseOperation, requireValue, reserveOperation, stringValue } from "./core.js";
 import { snapshot } from "./library.js";
 import { JobQueue, type ClaimedJob } from "./jobs.js";
-import { entities, jobs, learningEvents, recallMaterials, recallSessions, recallTargets, passages } from "./schema.js";
+import { jobs, learningEvents, recallMaterials, recallSessions, recallTargets, passages } from "./schema.js";
 import { asJSON, selectionSchema, structured } from "./structured.js";
 import { designBankSchema, extraDecisionSchema, judgmentSchema, keyed, learningPlanSchema, questionSchema, verificationSchema, type Question } from "./recall-contracts.js";
 import { policies } from "./policies.js";
@@ -30,7 +30,7 @@ function extraEvidence(value: JSONValue | undefined, candidate: ExtraCandidate, 
     return part.status === "met" && part.completionTurn === 0 && part.missingMeaning === null && quotes.length > 0 && quotes.length <= 3 && quotes.every(q => typeof q === "string" && q.trim().length > 0 && q.length <= 400 && answer.includes(q));
   });
 }
-const sessionDTO = (s: Pick<Session, "id" | "subjectId" | "version" | "finished" | "state" | "updatedAt">) => ({ id: s.id, subjectID: s.subjectId, version: s.version, finished: s.finished, state: s.state, updatedAt: s.updatedAt.toISOString() });
+const sessionDTO = (s: Session) => ({ id: s.id, subjectID: s.subjectId, version: s.version, finished: s.finished, state: s.state, updatedAt: s.updatedAt.toISOString() });
 function card(memory: JSONObject | null, now: Date): CardInput { return memory ? { ...memory, due: new Date(stringValue(memory.due)), ...(memory.last_review ? { last_review: new Date(stringValue(memory.last_review)) } : {}) } as unknown as CardInput : createEmptyCard(now); }
 function verifiedQuestions(target: Target): Question[] { return jsonArray(target.data.questions).map(q => jsonObject(q) as unknown as Question).filter(q => q.verified); }
 function normalizedAnswer(answer: string) { return answer.trim().replace(/[?？]+$/u, "").trim(); }
@@ -344,53 +344,34 @@ export class RecallService {
       await invalidate(tx, job.userId, "recall", job.subjectId, subject.version);
     });
   }
-  private async scopeConcepts(tx: Database | Transaction, userId: string, subjectID: string, topicID: string | null, loadedRecords?: LibraryEntity[]) {
+  private async scopeConcepts(tx: Database | Transaction, userId: string, subjectID: string, topicID: string | null) {
     if (!topicID) return null;
-    const records = loadedRecords ?? await snapshot(tx, userId, subjectID), included = new Set([topicID]);
+    const records = await snapshot(tx, userId, subjectID), included = new Set([topicID]);
     if (!records.some(r => r.id === topicID && r.kind === "topic" && !r.isRetired)) throw new DomainError("NOT_FOUND", "This topic is unavailable.", 404);
     let changed = true;
     while (changed) { changed = false; for (const r of records) if (r.kind === "topic" && !r.isRetired && typeof r.fields.parentID === "string" && included.has(r.fields.parentID) && !included.has(r.id)) { included.add(r.id); changed = true; } }
     return new Set(records.filter(r => r.kind === "placement" && !r.isRetired && typeof r.fields.topicID === "string" && included.has(r.fields.topicID)).map(r => stringValue(r.fields.conceptID)));
   }
-  async dashboard(userId: string, subjectID: string, topicID: string | null = null, read: Database | Transaction = this.db, subjectRecords?: LibraryEntity[], confirmedSubject?: Awaited<ReturnType<typeof ownedSubject>>) {
-    const subject = confirmedSubject ?? await ownedSubject(read, userId, subjectID), materials = await read.select({ id: recallMaterials.id, entityId: recallMaterials.entityId, revisionId: recallMaterials.revisionId, status: recallMaterials.status,
-      snapshot: sql<JSONObject>`jsonb_build_object('conceptID', ${recallMaterials.snapshot}->'conceptID', 'relatedConceptIDs', ${recallMaterials.snapshot}->'relatedConceptIDs',
-        'learningPlan', jsonb_build_object('canonicalMaterialID', ${recallMaterials.snapshot}->'learningPlan'->'canonicalMaterialID', 'equivalentKey', ${recallMaterials.snapshot}->'learningPlan'->'equivalentKey'))`,
-      bank: sql<JSONObject>`jsonb_build_object('policyVersion', ${recallMaterials.bank}->'policyVersion')` }).from(recallMaterials).where(and(eq(recallMaterials.userId, userId), eq(recallMaterials.subjectId, subjectID)));
-    const targets = await read.select({ id: recallTargets.id, materialId: recallTargets.materialId, excluded: recallTargets.excluded, memory: recallTargets.memory,
-      dueAt: recallTargets.dueAt, exposedAt: recallTargets.exposedAt }).from(recallTargets).where(and(eq(recallTargets.userId, userId), eq(recallTargets.subjectId, subjectID), eq(recallTargets.retired, false)));
-    const records = subjectRecords ?? (await read.select({ record: sql<LibraryEntity>`${entities.record} || jsonb_build_object('fields', jsonb_build_object(
-      'name', ${entities.record}->'fields'->'name', 'parentID', ${entities.record}->'fields'->'parentID',
-      'conceptID', ${entities.record}->'fields'->'conceptID', 'topicID', ${entities.record}->'fields'->'topicID'))` }).from(entities)
-      .where(and(eq(entities.userId, userId), eq(entities.subjectId, subjectID), inArray(entities.kind, ["concept", "topic", "placement"])))).map(r => r.record);
-    const concepts = records.filter(r => r.kind === "concept" && !r.isRetired);
-    const conceptIDs = await this.scopeConcepts(read, userId, subjectID, topicID, records), scoped = materials.filter(m => !conceptIDs || conceptIDs.has(stringValue(m.snapshot.conceptID)) || jsonArray(m.snapshot.relatedConceptIDs).some(id => typeof id === "string" && conceptIDs.has(id)));
+  async dashboard(userId: string, subjectID: string, topicID: string | null = null) {
+    const subject = await ownedSubject(this.db, userId, subjectID), materials = await this.db.select().from(recallMaterials).where(and(eq(recallMaterials.userId, userId), eq(recallMaterials.subjectId, subjectID)));
+    const targets = await this.db.select().from(recallTargets).where(and(eq(recallTargets.userId, userId), eq(recallTargets.subjectId, subjectID), eq(recallTargets.retired, false)));
+    const conceptIDs = await this.scopeConcepts(this.db, userId, subjectID, topicID), scoped = materials.filter(m => !conceptIDs || conceptIDs.has(stringValue(m.snapshot.conceptID)) || jsonArray(m.snapshot.relatedConceptIDs).some(id => typeof id === "string" && conceptIDs.has(id)));
     const current = new Set(scoped.filter(m => m.status === "ready" && m.revisionId === subject.revisionId).map(m => m.id));
     const now = new Date(), usable = targets.filter(t => current.has(t.materialId) && !t.excluded);
     const due = usable.filter(t => (!t.dueAt || t.dueAt <= now) && (!t.exposedAt || t.exposedAt.getTime() + 600_000 <= now.getTime()));
-    const scores = await this.scores(userId, subjectID, usable, read);
+    const scores = await this.scores(userId, subjectID, usable);
+    const records = await snapshot(this.db, userId, subjectID), concepts = records.filter(r => r.kind === "concept" && !r.isRetired);
     type Proficiency = { units: number; assessedTargets: number; targetSlots: number; readinessSum: number };
     const empty = (): Proficiency => ({ units: 0, assessedTargets: 0, targetSlots: 0, readinessSum: 0 });
     const sum = (values: Proficiency[]) => values.reduce((result, value) => ({ units: result.units + value.units, assessedTargets: result.assessedTargets + value.assessedTargets, targetSlots: result.targetSlots + value.targetSlots, readinessSum: result.readinessSum + value.readinessSum }), empty());
     const materialScores = new Map<string, Proficiency>();
-    const targetByMaterial = new Map<string, typeof usable[number]>();
-    for (const target of usable) if (!targetByMaterial.has(target.materialId)) targetByMaterial.set(target.materialId, target);
     for (const material of materials.filter(m => m.revisionId === subject.revisionId && !["retired", "context", "duplicate"].includes(m.status))) {
-      const target = targetByMaterial.get(material.id), score = target ? scores[target.id] : null;
+      const target = usable.find(t => t.materialId === material.id), score = target ? scores[target.id] : null;
       materialScores.set(material.id, { units: 1, assessedTargets: typeof score === "number" ? 1 : 0, targetSlots: 1, readinessSum: typeof score === "number" ? score : 0 });
     }
     const proficiencyByConcept: Record<string, Proficiency> = {};
-    const materialsByConcept = new Map<string, typeof materials>();
-    for (const material of materials) {
-      if (material.revisionId !== subject.revisionId) continue;
-      const ids = new Set([material.snapshot.conceptID, ...jsonArray(material.snapshot.relatedConceptIDs)].filter((id): id is string => typeof id === "string"));
-      for (const id of ids) {
-        const values = materialsByConcept.get(id);
-        if (values) values.push(material); else materialsByConcept.set(id, [material]);
-      }
-    }
     for (const concept of concepts) {
-      const relevant = materialsByConcept.get(concept.id) ?? [];
+      const relevant = materials.filter(m => m.revisionId === subject.revisionId && (m.snapshot.conceptID === concept.id || jsonArray(m.snapshot.relatedConceptIDs).includes(concept.id)));
       const unitIDs = new Set(relevant.flatMap(m => m.status === "duplicate" ? [stringValue(jsonObject(m.snapshot.learningPlan).canonicalMaterialID) || stringValue(jsonObject(m.snapshot.learningPlan).equivalentKey)] : [m.id]));
       let value = sum([...unitIDs].flatMap(id => materialScores.has(id) ? [materialScores.get(id)!] : []));
       if (!value.units && !relevant.some(m => ["context", "duplicate"].includes(m.status))) value = { units: 1, assessedTargets: 0, targetSlots: 1, readinessSum: 0 };
@@ -409,40 +390,26 @@ export class RecallService {
       materialUpgrade: scoped.filter(m => m.bank.policyVersion !== designVersion && !["retired", "context", "duplicate"].includes(m.status)).length,
       materialPending: scoped.filter(m => ["pending", "stale", "failed"].includes(m.status)).length, materialBlocked: scoped.filter(m => ["blocked", "sourceIssue"].includes(m.status)).length,
       contextMaterials: scoped.filter(m => m.status === "context").length, duplicateMaterials: scoped.filter(m => m.status === "duplicate").length, nextDueAt: nextDue?.toISOString() ?? null,
-      scopeName: topicID ? records.find(r => r.id === topicID)?.fields.name ?? "Topic" : subject.name };
+      scopeName: topicID ? (await snapshot(this.db, userId, subjectID)).find(r => r.id === topicID)?.fields.name ?? "Topic" : subject.name };
     return { subjectID, due: due.length, total: usable.length, unassessed: usable.filter(t => !t.memory).length, proficiency: scores, proficiencyByConcept, proficiencyByTopic, overview };
   }
-  async materials(userId: string, subjectID: string, cursor?: string, limit = 50, includeQuestions = true) {
+  async materials(userId: string, subjectID: string, cursor?: string, limit = 50) {
     const subject = await ownedSubject(this.db, userId, subjectID);
-    const rows = await this.db.select({ material: { id: recallMaterials.id, entityId: recallMaterials.entityId, status: recallMaterials.status, signature: recallMaterials.signature,
-      snapshot: recallMaterials.snapshot, revisionId: recallMaterials.revisionId,
-      bank: includeQuestions ? recallMaterials.bank : sql<JSONObject>`jsonb_build_object('issue', ${recallMaterials.bank}->'issue')` },
-      target: { id: recallTargets.id, version: recallTargets.version, excluded: recallTargets.excluded, dueAt: recallTargets.dueAt, memory: recallTargets.memory, exposedAt: recallTargets.exposedAt,
-        issue: sql<JSONValue>`${recallTargets.data}->'reportedIssue'` } }).from(recallMaterials).leftJoin(recallTargets, and(eq(recallTargets.userId, recallMaterials.userId), eq(recallTargets.subjectId, recallMaterials.subjectId), eq(recallTargets.materialId, recallMaterials.id)))
+    const rows = await this.db.select({ material: recallMaterials, target: recallTargets }).from(recallMaterials).leftJoin(recallTargets, and(eq(recallTargets.userId, recallMaterials.userId), eq(recallTargets.subjectId, recallMaterials.subjectId), eq(recallTargets.materialId, recallMaterials.id)))
       .where(and(eq(recallMaterials.userId, userId), eq(recallMaterials.subjectId, subjectID), cursor ? gt(recallMaterials.id, cursor) : undefined)).orderBy(asc(recallMaterials.id)).limit(limit + 1);
     return { items: rows.slice(0, limit).map(({ material: m, target }) => {
       const available = !target?.exposedAt || target.exposedAt.getTime() + 600_000 <= Date.now();
       return { id: m.id, entityID: m.entityId, status: m.status, signature: m.signature, snapshot: m.snapshot, current: m.revisionId === subject.revisionId && !["stale", "pending", "retired"].includes(m.status), bank: m.bank,
-        target: target ? { id: target.id, version: target.version, excluded: target.excluded, dueAt: target.dueAt, memory: target.memory, assessed: !!target.memory, isNew: !target.memory && available, due: !!target.dueAt && target.dueAt <= new Date() && available, issue: target.issue ?? null } : null };
+        target: target ? { id: target.id, version: target.version, excluded: target.excluded, dueAt: target.dueAt, memory: target.memory, assessed: !!target.memory, isNew: !target.memory && available, due: !!target.dueAt && target.dueAt <= new Date() && available, issue: target.data.reportedIssue ?? null } : null };
     }), nextCursor: rows.length > limit ? rows[limit - 1]!.material.id : null };
   }
-  private async scores(userId: string, subjectID: string, targets: Pick<Target, "id" | "memory">[], read: Database | Transaction = this.db) {
-    if (!targets.length) return {};
-    const events = await read.select({ id: learningEvents.id, targetId: learningEvents.targetId, kind: learningEvents.kind, relatedEventId: learningEvents.relatedEventId,
-      payload: sql<JSONObject>`jsonb_build_object('rating', ${learningEvents.payload}->'rating', 'recognition', ${learningEvents.payload}->'recognition',
-        'afterMemory', ${learningEvents.payload}->'afterMemory', 'supportedCorrect', ${learningEvents.payload}->'supportedCorrect')` }).from(learningEvents)
-      .where(and(eq(learningEvents.userId, userId), eq(learningEvents.subjectId, subjectID))).orderBy(desc(learningEvents.createdAt));
+  private async scores(userId: string, subjectID: string, targets: Target[]) {
+    const events = await this.db.select().from(learningEvents).where(and(eq(learningEvents.userId, userId), eq(learningEvents.subjectId, subjectID))).orderBy(desc(learningEvents.createdAt));
     const undone = new Set(events.filter(e => e.kind === "undo").map(e => e.relatedEventId));
-    const latest = new Map<string, typeof events[number]>(), scheduledEvents = new Map<string, typeof events[number]>();
-    for (const event of events) {
-      if (event.kind !== "review" || undone.has(event.id)) continue;
-      if (!latest.has(event.targetId)) latest.set(event.targetId, event);
-      if (typeof event.payload.rating === "number" && !scheduledEvents.has(event.targetId)) scheduledEvents.set(event.targetId, event);
-    }
     const result: JSONObject = {};
     for (const target of targets) {
-      const last = latest.get(target.id);
-      const scheduled = scheduledEvents.get(target.id);
+      const last = events.find(e => e.targetId === target.id && e.kind === "review" && !undone.has(e.id));
+      const scheduled = events.find(e => e.targetId === target.id && e.kind === "review" && !undone.has(e.id) && typeof e.payload.rating === "number");
       if (!target.memory || !scheduled || canonical(scheduled.payload.afterMemory) !== canonical(target.memory)) { result[target.id] = null; continue; }
       const rating = scheduled.payload.rating, recognized = scheduled.payload.recognition === true;
       let readiness = Number(scheduler.retrievability(card(target.memory, new Date()), new Date()));
@@ -474,13 +441,7 @@ export class RecallService {
     });
   }
   async session(userId: string, id: string) { return requireValue((await this.db.select().from(recallSessions).where(and(eq(recallSessions.userId, userId), eq(recallSessions.id, id))))[0]); }
-  async sessions(userId: string, subjectID: string, cursor?: string, limit = 50) {
-    await ownedSubject(this.db, userId, subjectID);
-    const rows = await this.db.select({ id: recallSessions.id, subjectId: recallSessions.subjectId, version: recallSessions.version, finished: recallSessions.finished,
-      state: sql<JSONObject>`jsonb_build_object('topicID', ${recallSessions.state}->'topicID')`, updatedAt: recallSessions.updatedAt }).from(recallSessions)
-      .where(and(eq(recallSessions.userId, userId), eq(recallSessions.subjectId, subjectID), cursor ? gt(recallSessions.id, cursor) : undefined)).orderBy(asc(recallSessions.id)).limit(limit + 1);
-    return { items: rows.slice(0, limit).map(sessionDTO), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
-  }
+  async sessions(userId: string, subjectID: string, cursor?: string, limit = 50) { await ownedSubject(this.db, userId, subjectID); const rows = await this.db.select().from(recallSessions).where(and(eq(recallSessions.userId, userId), eq(recallSessions.subjectId, subjectID), cursor ? gt(recallSessions.id, cursor) : undefined)).orderBy(asc(recallSessions.id)).limit(limit + 1); return { items: rows.slice(0, limit).map(sessionDTO), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null }; }
   private async current(tx: Transaction | Database, session: Session) {
     const id = stringValue(jsonArray(session.state.queue)[Number(session.state.index ?? 0)]);
     const target = requireValue((await tx.select().from(recallTargets).where(and(eq(recallTargets.userId, session.userId), eq(recallTargets.subjectId, session.subjectId), eq(recallTargets.id, id))))[0]);
