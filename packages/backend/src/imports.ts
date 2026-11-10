@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { and, asc, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
-import type { AISelection, JSONObject, JSONValue, LibraryEntity, SourcePassage } from "@knowledge/contracts";
+import type { AISelection, ImportDraft, ImportDraftSummary, ImportEntryChange, JSONObject, JSONValue, LibraryEntity, Page, SourcePassage } from "@knowledge/contracts";
 import type { Database } from "./database.js";
 import { AIService } from "./ai.js";
 import { DomainError, canonical, expected, invalidate, jsonArray, jsonObject, mutation, normalizeName, ownedSubject, requireValue, stringValue } from "./core.js";
@@ -24,7 +24,7 @@ const draftJSON = (draft: DraftState) => asJSON(draft) as JSONObject;
 const importDisplayColumns = { id: imports.id, subjectId: imports.subjectId, sourceId: imports.sourceId, baseRevisionId: imports.baseRevisionId,
   version: imports.version, status: imports.status, draft: sql<JSONObject>`CASE WHEN ${imports.status} = 'saved' THEN '{}'::jsonb ELSE ${imports.draft} END`,
   selection: imports.selection, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
-export const importDTO = (row: Pick<typeof imports.$inferSelect, keyof typeof importDisplayColumns>) => ({ id: row.id, subjectID: row.subjectId, sourceID: row.sourceId, baseRevisionID: row.baseRevisionId, version: row.version, status: row.status, draft: row.status === "saved" ? {} : row.draft, selection: row.selection, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
+export const importDTO = (row: Pick<typeof imports.$inferSelect, keyof typeof importDisplayColumns>): ImportDraft => ({ id: row.id, subjectID: row.subjectId, sourceID: row.sourceId, baseRevisionID: row.baseRevisionId, version: row.version, status: row.status as ImportDraft["status"], draft: row.status === "saved" ? {} : row.draft, selection: row.selection, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
 const entry = (subjectID: string, kind: LibraryEntity["kind"], id: string, fields: JSONObject, reviewReason: string | null = null): DraftEntry => ({ record: { id, subjectID, kind, fields, protectedFields: [], isRetired: false, redirectID: null }, selected: !reviewReason, reviewReason, mergeTargetID: null, acceptMerge: false, original: structuredClone(fields) });
 function unique(ids: string[], label: string) { if (new Set(ids).size !== ids.length) throw new DomainError("INVALID_EXTRACTION", `Duplicate ${label} IDs.`); }
 // Reconciliation/review can exclude a prerequisite after extraction selected its
@@ -147,12 +147,12 @@ export class ImportService {
   constructor(readonly db: Database, readonly ai: AIService, readonly queue: JobQueue) {}
   async get(userId: string, id: string) { return requireValue((await this.db.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))))[0]); }
   async display(userId: string, id: string) { return importDTO(requireValue((await this.db.select(importDisplayColumns).from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))))[0])); }
-  async list(userId: string, subjectID: string, cursor?: string, limit = 50) {
+  async list(userId: string, subjectID: string, cursor?: string, limit = 50): Promise<Page<ImportDraft>> {
     await ownedSubject(this.db, userId, subjectID);
     const rows = await this.db.select(importDisplayColumns).from(imports).where(and(eq(imports.userId, userId), eq(imports.subjectId, subjectID), cursor ? gt(imports.id, cursor) : undefined)).orderBy(asc(imports.id)).limit(limit + 1);
     return { items: rows.slice(0, limit).map(importDTO), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   }
-  async allDrafts(userId: string, cursor?: string, limit = 50) {
+  async allDrafts(userId: string, cursor?: string, limit = 50): Promise<Page<ImportDraftSummary>> {
     const rows = await this.db.select({ draft: { id: imports.id, subjectId: imports.subjectId, sourceId: imports.sourceId, version: imports.version, status: imports.status, updatedAt: imports.updatedAt }, title: sources.title }).from(imports)
       .innerJoin(sources, and(eq(sources.userId, imports.userId), eq(sources.subjectId, imports.subjectId), eq(sources.id, imports.sourceId)))
       .where(and(eq(imports.userId, userId), ne(imports.status, "saved"), cursor ? gt(imports.id, cursor) : undefined)).orderBy(asc(imports.id)).limit(limit + 1);
@@ -161,7 +161,7 @@ export class ImportService {
     return { items: page.map(({ draft, title }) => {
       const job = work.find(j => j.importId === draft.id && !["completed", "cancelled"].includes(j.status));
       return { id: draft.id, subjectID: draft.subjectId, sourceID: draft.sourceId, version: draft.version, status: draft.status, updatedAt: draft.updatedAt.toISOString(), sourceTitle: title,
-        processing: !!job && ["queued", "running"].includes(job.status), jobStatus: job?.status ?? null, activity: job ? stringValue(job.progress.stage) || job.status : draft.status };
+        processing: !!job && ["queued", "running"].includes(job.status), jobStatus: job?.status as ImportDraftSummary["jobStatus"] ?? null, activity: job ? stringValue(job.progress.stage) || job.status : draft.status };
     }), nextCursor: rows.length > limit ? rows[limit - 1]!.draft.id : null };
   }
   async create(userId: string, subjectID: string, sourceID: string, selection: AISelection, operationID: string) {
@@ -217,7 +217,7 @@ export class ImportService {
       await invalidate(tx, userId, "imports", row.subjectId, version + 1); return { version: version + 1 };
     });
   }
-  async edit(userId: string, id: string, operationID: string, version: number, changes: { id: string; selected?: boolean | undefined; name?: string | undefined; fields?: JSONObject | undefined; acceptMerge?: boolean | undefined; resolutionAction?: "apply" | "undo" | "dismiss" | "restore" | undefined }[]) {
+  async edit(userId: string, id: string, operationID: string, version: number, changes: ImportEntryChange[]) {
     return mutation(this.db, userId, operationID, { action: "editDraft", id, version, changes }, async tx => {
       const initial = await this.get(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
       const row = requireValue((await tx.select().from(imports).where(and(eq(imports.userId, userId), eq(imports.id, id))).for("update"))[0]); expected(row.version, version);

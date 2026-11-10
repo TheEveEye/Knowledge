@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import Observation
-import SwiftData
 
 @MainActor @Observable final class CloudLibraryStore {
     enum State { case loading, ready, unavailable(String), closed }
@@ -31,7 +30,6 @@ import SwiftData
     private var chatSessions: [UUID: CloudChatSession] = [:]
     private var importEditors: [String: CloudImportEditor] = [:]
     private var recallControllers: [String: CloudRecallController] = [:]
-    let container: ModelContainer
     let client: CloudClient
     @ObservationIgnored private let folder: URL
     @ObservationIgnored private var eventTask: Task<Void, Never>?
@@ -65,9 +63,6 @@ import SwiftData
         let originKey = SHA256.hash(data: Data(credentials.origin.utf8)).map { String(format: "%02x", $0) }.joined()
         folder = root.appendingPathComponent("KnowledgeCloud-v1", isDirectory: true).appendingPathComponent(originKey, isDirectory: true).appendingPathComponent(userID.uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        let schema = Schema([CloudCachedRecord.self])
-        container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: folder.appendingPathComponent("cache.store"), cloudKitDatabase: .none))
-        container.mainContext.autosaveEnabled = false
         let operationFile = folder.appendingPathComponent("pending-operations.json")
         if FileManager.default.fileExists(atPath: operationFile.path) { operationIDs = try JSONDecoder().decode([String: UUID].self, from: Data(contentsOf: operationFile)) }
     }
@@ -185,7 +180,7 @@ import SwiftData
         importEditors = [:]
         chatSessions = [:]
         subjects = []; entries = []; sources = []; drafts = []; allDrafts = []; jobs = []; decisions = []; connections = []; models = []; preferences = .null; recall = .null; operationIDs = [:]; hasLoaded = false; state = .closed
-        do { try container.mainContext.delete(model: CloudCachedRecord.self); try container.mainContext.save(); try FileManager.default.removeItem(at: folder) }
+        do { try FileManager.default.removeItem(at: folder) }
         catch { message = "The account cache could not be fully removed." }
     }
     // Confirmed commands schedule a display refresh without making their success
@@ -272,8 +267,7 @@ import SwiftData
         guard generation == run else { throw CancellationError() }
         guard refreshGeneration == refresh else { return }
         let subjectIDs = Set(all.map(\.id))
-        // Navigation uses confirmed in-memory snapshots. The SwiftData records
-        // had no readers; encoding and saving them delayed every usable screen.
+        // Navigation uses confirmed in-memory snapshots.
         for id in Set(subjectSnapshots.keys).union(subjectReads.keys).subtracting(subjectIDs) {
             invalidateSubjectSnapshots(id); subjectSnapshots[id] = nil; snapshotReviewIDs[id] = nil; recallMaterials[id] = nil; questionMaterialIDs.remove(id)
         }

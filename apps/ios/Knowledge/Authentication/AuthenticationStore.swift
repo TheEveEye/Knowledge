@@ -12,7 +12,6 @@ final class AuthenticationStore {
     private(set) var state: AuthenticationState = .restoring
     private(set) var accounts: [StoredChatGPTAccount] = []
     private(set) var message: String?
-    private(set) var planWelcomeAccountID: String?
     private var operationInProgress = false
 
     @ObservationIgnored private let storage = KeychainCredentialStore()
@@ -125,9 +124,6 @@ final class AuthenticationStore {
                 if selected == nil { try storage.setPendingRegistrationClientID(nil) }
                 upsert(account)
                 try activate(account)
-                if account.credentials?.planEnabled == true && existing?.credentials?.planEnabled != true {
-                    showPlanWelcomeIfNeeded(account.clientID)
-                }
             } catch {
                 guard operationID == attempt else { return }
                 restorePreviousAccount(previousID)
@@ -138,56 +134,6 @@ final class AuthenticationStore {
             if operationID == attempt { operationTask = nil; operationInProgress = false }
         }
         await operationTask?.value
-    }
-
-    func selectAccount(_ clientID: String) async {
-        if pendingSignOutID != nil { await signOut(); guard pendingSignOutID == nil else { return } }
-        guard !isBusy, let saved = accounts.first(where: { $0.clientID == clientID }) else { return }
-        guard saved.credentials?.idToken != nil else {
-            await signIn(accountID: clientID)
-            return
-        }
-        let attempt = UUID()
-        operationID = attempt
-        let previousID = activeID
-        state = .signingIn
-        operationInProgress = true
-        message = nil
-        defer { if operationID == attempt { operationInProgress = false } }
-        do {
-            let account = try await resumedAccount(saved)
-            guard operationID == attempt else { return }
-            try activate(account)
-        } catch {
-            guard operationID == attempt else { return }
-            restorePreviousAccount(previousID)
-            message = safeMessage(error)
-            if let authError = error as? AuthenticationError, authError.isTerminalRefreshError {
-                await signIn(accountID: clientID)
-            }
-        }
-    }
-
-    /// Future AI requests can obtain a scoped token without exposing it to views.
-    func authorizedAccessToken() async throws -> String {
-        guard !signingOut, let account = activeAccount, account.credentials?.planEnabled == true else {
-            throw AuthenticationError.sessionExpired
-        }
-        let attempt = operationID
-        let renewed = try await resumedAccount(account)
-        guard operationID == attempt, activeID == renewed.clientID, !signingOut,
-              renewed.credentials?.planEnabled == true,
-              let token = renewed.credentials?.accessToken else { throw AuthenticationError.sessionExpired }
-        return token
-    }
-
-    /// Save while foregrounded so existing credentials also have background-compatible
-    /// Keychain protection before a long import needs to persist a rotating refresh token.
-    func prepareForBackgroundProcessing() throws {
-        guard !signingOut, let account = activeAccount, account.credentials?.planEnabled == true else {
-            throw AuthenticationError.sessionExpired
-        }
-        try storage.saveAccount(account)
     }
 
     private func resumedAccount(_ account: StoredChatGPTAccount) async throws -> StoredChatGPTAccount {
@@ -255,7 +201,6 @@ final class AuthenticationStore {
         operationInProgress = false
         browser.cancel()
         message = nil
-        planWelcomeAccountID = nil
         let signingOutID = activeID ?? pendingSignOutID ?? (try? storage.activeAccountID())
         pendingSignOutID = signingOutID
         activeID = nil
@@ -298,26 +243,7 @@ final class AuthenticationStore {
         }
     }
 
-    func sceneDidEnterBackground() {
-        guard state == .signingIn || operationInProgress else { return }
-        operationID = UUID()
-        operationTask?.cancel()
-        operationTask = nil
-        operationInProgress = false
-        browser.cancel()
-        state = activeID == nil ? .signedOut : .signedIn
-        message = AuthenticationError.backgrounded.localizedDescription
-    }
-
     func dismissMessage() { message = nil }
-    func dismissPlanWelcome() { planWelcomeAccountID = nil }
-
-    private func showPlanWelcomeIfNeeded(_ clientID: String) {
-        let key = "ChatGPTPlanWelcome.\(clientID)"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
-        planWelcomeAccountID = clientID
-    }
 
     private func activate(_ account: StoredChatGPTAccount) throws {
         try storage.setActiveAccountID(account.clientID)

@@ -18,31 +18,41 @@ export const nullable = schema => ({ anyOf: [schema, { type: 'null' }] });
 export const choice = values => ({ type: 'string', enum: values });
 export const obj = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 export const keyed = (keys, value) => obj(Object.fromEntries(keys.map(k => [k, value])));
-export const locations = Object.fromEntries(['learningPlanInstructions', 'learningPlanReviewInstructions', 'designInstructions', 'designVerificationInstructions', 'assessmentInstructions'].map(name => [name, 'policies.ts']));
+export const policyFile = 'policies.json';
 const policyKeys = { learningPlanInstructions: 'recall_learningPlanInstructions', learningPlanReviewInstructions: 'recall_learningPlanReviewInstructions', designInstructions: 'design_designInstructions', designVerificationInstructions: 'design_designVerificationInstructions', assessmentInstructions: 'recall_assessmentInstructions' };
+export const locations = Object.fromEntries(Object.keys(policyKeys).map(name => [name, policyFile]));
 export const sourceDir = process.env.RECALL_SOURCE_DIR ?? resolve(repo, 'packages/backend/src');
+function parsePolicies(source) {
+  const policies = JSON.parse(source);
+  if (!policies || typeof policies !== 'object' || Array.isArray(policies)
+    || Object.values(policies).some(lines => !Array.isArray(lines) || lines.some(line => typeof line !== 'string'))) {
+    throw new Error('Canonical policies must be an object of prompt line arrays');
+  }
+  return policies;
+}
 export async function prompts() {
-  const source = await readFile(resolve(sourceDir, 'policies.ts'), 'utf8');
-  const policies = Object.fromEntries([...source.matchAll(/"([^"\n]+)": ("(?:[^"\\]|\\.)*")/g)].map(m => [m[1], JSON.parse(m[2])]));
+  const source = await readFile(resolve(sourceDir, policyFile), 'utf8');
+  const policies = parsePolicies(source);
   const bodies = Object.fromEntries(Object.entries(policyKeys).map(([name, key]) => {
-    if (typeof policies[key] !== 'string') throw new Error(`Cannot extract production policy ${key}`);
-    return [name, policies[key]];
+    if (!Array.isArray(policies[key])) throw new Error(`Cannot extract production policy ${key}`);
+    return [name, policies[key].join('\n')];
   }));
-  return { common: '', bodies, sourceHashes: { 'policies.ts': hash(source) } };
+  return { common: '', bodies, sourceHashes: { [policyFile]: hash(source) } };
 }
 export function replacePolicies(source, bodies) {
+  const policies = parsePolicies(source);
   for (const [name, key] of Object.entries(policyKeys)) {
-    const pattern = new RegExp('("' + key + '": )' + /"(?:[^"\\]|\\.)*"/.source);
-    if (!pattern.test(source)) throw new Error(`Canonical policy marker missing: ${key}`);
-    source = source.replace(pattern, (_, prefix) => prefix + JSON.stringify(bodies[name]));
+    if (!Object.hasOwn(policies, key)) throw new Error(`Canonical policy missing: ${key}`);
+    if (typeof bodies[name] !== 'string') throw new Error(`Prompt body missing: ${name}`);
+    policies[key] = bodies[name].split('\n');
   }
-  return source;
+  return JSON.stringify(policies, null, 2) + '\n';
 }
 export function instruction(bank, name) { return bank.common + '\n' + bank.bodies[name]; }
 export function validateCandidate(base, candidate) {
   if (Object.keys(candidate).sort().join() !== Object.keys(base.bodies).sort().join()) throw new Error('Prompt keys changed');
   for (const [key, value] of Object.entries(candidate)) {
     if (typeof value !== 'string' || value.length < 200 || value.length > Math.min(14000, Math.ceil(base.bodies[key].length * 1.10) + 300)) throw new Error('Invalid prompt length');
-    if (/"""|\\\(|\u0000/.test(value)) throw new Error('Unsafe Swift prompt literal');
+    if (value.includes('\u0000')) throw new Error('Invalid prompt content');
   }
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
-import type { EntityChange, EntityKind, JSONObject, LibraryEntity, Subject } from "@knowledge/contracts";
+import type { EntityChange, EntityKind, JSONObject, LibraryEntity, Page, Revision, RevisionSummary, Subject } from "@knowledge/contracts";
 import type { Database, Transaction } from "./database.js";
 import { DomainError, canonical, expected, hash, invalidate, jsonArray, jsonObject, mutation, normalizeName, ownedSubject, requireValue, stringValue } from "./core.js";
 import { entities, entityLinks, entityVersions, fileCleanup, imports, jobs, learningEvents, operations, passages, pendingDecisions, recallMaterials, recallSessions, recallTargets, revisions, sources, subjects } from "./schema.js";
@@ -138,7 +138,7 @@ export class LibraryService {
       return writeRevision(tx, userId, subject, operationID, before, after, "edit", "Undid an AI suggestion");
     });
   }
-  async list(userId: string, cursor?: string, limit = 50) {
+  async list(userId: string, cursor?: string, limit = 50): Promise<Page<Subject>> {
     const rows = await this.db.select().from(subjects).where(and(eq(subjects.userId, userId), cursor ? gt(subjects.id, cursor) : undefined)).orderBy(asc(subjects.id)).limit(limit + 1);
     return { items: rows.slice(0, limit).map(subjectDTO), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   }
@@ -210,7 +210,7 @@ export class LibraryService {
       return writeRevision(tx, userId, subject, operationID, before, after, "manual", "Edited " + record.kind);
     });
   }
-  async history(userId: string, subjectID: string, cursor?: string, limit = 50) {
+  async history(userId: string, subjectID: string, cursor?: string, limit = 50): Promise<Page<RevisionSummary>> {
     await ownedSubject(this.db, userId, subjectID);
     const rows = await this.db.select({ id: revisions.id, subjectId: revisions.subjectId, parentId: revisions.parentId, operationId: revisions.operationId,
       origin: revisions.origin, title: revisions.title, summary: revisions.summary, createdAt: revisions.createdAt, undoesRevisionId: revisions.undoesRevisionId }).from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), cursor ? sql`(${revisions.createdAt},${revisions.id}) < (SELECT created_at,id FROM knowledge.subject_revisions WHERE user_id=${userId} AND subject_id=${subjectID} AND id=${cursor})` : undefined)).orderBy(desc(revisions.createdAt), desc(revisions.id)).limit(limit + 1);
@@ -227,7 +227,7 @@ export class LibraryService {
       return writeRevision(tx, userId, subject, operationID, before, after, "manual", "Moved a concept");
     });
   }
-  async revision(userId: string, subjectID: string, revisionID: string) {
+  async revision(userId: string, subjectID: string, revisionID: string): Promise<Revision> {
     const r = requireValue((await this.db.select().from(revisions).where(and(eq(revisions.userId, userId), eq(revisions.subjectId, subjectID), eq(revisions.id, revisionID))))[0]);
     const ids = new Set(r.changes.flatMap(change => [change.before, change.after].flatMap(record => record ? ["conceptID", "fromConceptID", "toConceptID", "topicID", "parentID"].flatMap(field => typeof record.fields[field] === "string" ? [record.fields[field] as string] : []) : [])));
     const hashes = Object.entries(r.manifest).filter(([key]) => ids.has(key.slice(key.indexOf("/") + 1))).map(([, hash]) => hash);
@@ -237,7 +237,7 @@ export class LibraryService {
     const undoJob = (await this.db.select({ id: jobs.id, version: jobs.version, status: jobs.status, error: jobs.error, progress: jobs.progress }).from(jobs).where(and(eq(jobs.userId, userId), eq(jobs.subjectId, subjectID), eq(jobs.kind, "prepareUndo"), sql`${jobs.input}->>'revisionID'=${revisionID}`)).orderBy(desc(jobs.updatedAt), desc(jobs.id)).limit(1))[0];
     const undoDecision = (await this.db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userId), eq(pendingDecisions.subjectId, subjectID), sql`${pendingDecisions.state}->>'revisionID'=${revisionID}`)).limit(1))[0];
     return { id: r.id, subjectID: r.subjectId, parentID: r.parentId, operationID: r.operationId, origin: r.origin, title: r.title, summary: r.summary, createdAt: r.createdAt.toISOString(), changes: r.changes, undoesRevisionID: r.undoesRevisionId, names,
-      isUndone: !!undone, undoDecision: undoDecision?.state ?? null, undoJob: undoJob ? { id: undoJob.id, version: undoJob.version, status: undoJob.status, error: undoJob.error, progress: undoJob.progress } : null };
+      isUndone: !!undone, undoDecision: undoDecision?.state ?? null, undoJob: undoJob ? { id: undoJob.id, version: undoJob.version, status: undoJob.status as NonNullable<Revision["undoJob"]>["status"], error: undoJob.error, progress: undoJob.progress } : null };
 
   }
   async undo(userId: string, subjectID: string, revisionID: string, operationID: string, version: number, choices: Record<string, "current" | "incoming"> = {}) {

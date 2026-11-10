@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { and, eq, gt, gte, sql } from "drizzle-orm";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import type pg from "pg";
-import type { AISelection, JSONObject, JSONValue, Model } from "@knowledge/contracts";
+import type { AIConnection, AISelection, JSONObject, JSONValue, Model } from "@knowledge/contracts";
 import type { Database } from "./database.js";
 import { DomainError, completedOperation, expected, hash, invalidate, jsonArray, jsonObject, mutation, requireValue, stringValue } from "./core.js";
 import { aiConnections, aiRequests, jobs, operations, serverState } from "./schema.js";
@@ -53,7 +53,7 @@ export class AIService {
     await this.db.insert(serverState).values({ key: "chatgptHostID", value: "urn:uuid:" + randomUUID() }).onConflictDoNothing();
     return requireValue((await this.db.select().from(serverState).where(eq(serverState.key, "chatgptHostID")))[0]).value;
   }
-  async connections(userId: string) {
+  async connections(userId: string): Promise<AIConnection[]> {
     return (await this.db.select().from(aiConnections).where(eq(aiConnections.userId, userId))).map(c => {
       let identity: { name: string | null; email: string | null } | null = null;
       if (c.credentials && c.status === "active") {
@@ -64,7 +64,7 @@ export class AIService {
           identity = { name: typeof claims.name === "string" ? claims.name : null, email: typeof claims.email === "string" ? claims.email : null };
         } catch { /* An unreadable identity must not hide the connection's disconnect action. */ }
       }
-      return { id: c.id, version: c.version, label: c.label, provider: c.provider, status: c.status, revocationPending: c.status === "disconnected" && !!c.credentials, createdAt: c.createdAt.toISOString(), identity };
+      return { id: c.id, version: c.version, label: c.label, provider: c.provider as AIConnection["provider"], status: c.status, revocationPending: c.status === "disconnected" && !!c.credentials, createdAt: c.createdAt.toISOString(), identity };
     });
   }
   async handoff(userId: string, operationID: string, value: { clientID: string; label: string; accessToken: string; refreshToken: string; idToken: string; expiresAt: number; scopes: string[] }) {

@@ -1,11 +1,11 @@
 import { z } from "zod";
-import type { AISelection, JSONObject, JSONValue } from "@knowledge/contracts";
+import type { AISelection, JSONObject, JSONValue, Mutation } from "@knowledge/contracts";
 import { AIService } from "./ai.js";
 import { retainAIRejection } from "./ai-diagnostics.js";
 import { DomainError, hash } from "./core.js";
 export const uuid = z.uuid().transform(s => s.toLowerCase());
 export const selectionSchema = z.strictObject({ funding: z.enum(["chatgpt", "api"]), connectionID: z.uuid().nullable(), model: z.string().min(1).max(120), reasoning: z.enum(["automatic", "low", "medium", "high", "xhigh", "max"]) });
-export const mutationSchema = z.strictObject({ operationID: uuid, expectedVersion: z.number().int().positive() });
+export const mutationSchema = z.strictObject({ operationID: uuid, expectedVersion: z.number().int().positive() }) satisfies z.ZodType<Mutation>;
 export async function structured<T extends z.ZodType>(ai: AIService, userId: string, selection: AISelection, kind: string,
   instructions: string, input: JSONObject, schema: T, signal: AbortSignal, background = true, maximumAttempts = 3, delta?: (text: string) => Promise<void>, validate?: (value: z.output<T>) => void): Promise<z.output<T>> {
   let issues = "";
@@ -52,7 +52,6 @@ export function reconciliationBatchSchema(conceptIDs: string[]) {
     .transform(value => ({ ...value, decisions: Object.entries(value.decisions).map(([conceptID, d]) => ({ conceptID, ...d })) }));
 }
 export const topicOutlineSchema = z.strictObject({ topics: z.array(z.strictObject({ id: text, name: text, parentTopicID: nullableText })).max(60), updates: z.array(proposalSchema) });
-export const topicAssignmentSchema = z.strictObject({ placements: z.array(z.strictObject({ conceptID: text, topicID: nullableText, reviewReason: nullableText })) });
 export function topicAssignmentBatchSchema(conceptIDs: string[], topicIDs: string[]) {
   const placement = z.strictObject({ topicID: topicIDs.length ? z.enum(topicIDs as [string, ...string[]]).nullable() : z.null(), reviewReason: nullableText });
   return z.strictObject({ placements: z.strictObject(Object.fromEntries(conceptIDs.map(id => [id, placement]))) })

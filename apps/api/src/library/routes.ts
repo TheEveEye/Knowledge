@@ -4,7 +4,7 @@ import { and, asc, desc, eq, gt, ne, sql } from "drizzle-orm";
 import { AIService, ChatService, DomainError, FileStore, ImportService, JobQueue, LibraryService, RecallService, aiRequests, draftChangeSchema, entities, entityKinds, events, expected, imports, invalidate, jobDisplayColumns, jobDTO, jobs, mutation, mutationSchema, ownedSubject, pendingDecisions, preferences, requireValue, selectionSchema, sources as sourceRows, SourceService, uuid, workerHeartbeats } from "@knowledge/backend";
 import type { Database } from "@knowledge/backend";
 import type pg from "pg";
-import type { JSONObject } from "@knowledge/contracts";
+import type { AccountPreferences, APIError, ImportDraft, Invalidation, JSONObject, LibraryBootstrap, Page, PendingDecision, Source, SubjectSnapshot } from "@knowledge/contracts";
 import type { Authentication } from "../auth/auth.js";
 import { authHeaders, forwardHeaders } from "../auth/routes.js";
 import type { Config } from "../config.js";
@@ -19,7 +19,7 @@ const chatMessages = z.array(z.strictObject({ role: z.enum(["user", "assistant"]
   .transform(messages => messages.filter(m => m.content.trim().length > 0));
 const parseID = (r: FastifyRequest, key: string) => uuid.parse((r.params as Record<string, unknown>)[key]);
 const userID = (r: FastifyRequest) => requireValue((r as FastifyRequest & { knowledgeUserID: string | null }).knowledgeUserID);
-const sourceDTO = (s: Awaited<ReturnType<SourceService["get"]>>) => ({ id: s.id, subjectID: s.subjectId, title: s.title, kind: s.kind, digest: s.digest, byteCount: s.byteCount, status: s.status, error: s.error, archived: s.archived, createdAt: s.createdAt.toISOString() });
+const sourceDTO = (s: Awaited<ReturnType<SourceService["get"]>>): Source => ({ id: s.id, subjectID: s.subjectId, title: s.title, kind: s.kind as Source["kind"], digest: s.digest, byteCount: s.byteCount, status: s.status as Source["status"], error: s.error, archived: s.archived, createdAt: s.createdAt.toISOString() });
 // Keep pagination on collection endpoints, without making app startup pay a
 // phone-to-server round trip for every page.
 async function collectPages<T>(read: (cursor?: string) => Promise<{ items: T[]; nextCursor: string | null }>): Promise<T[]> {
@@ -43,11 +43,11 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
   parent.register(async app => {
     app.decorateRequest("knowledgeUserID", null);
     app.setErrorHandler((error, request, reply) => {
-      if (error instanceof DomainError) return reply.code(error.statusCode).send({ code: error.code, message: error.message, requestID: request.id });
-      if (error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") return reply.code(413).send({ code: "SOURCE_TOO_LARGE", message: "Choose a file of at most 25 MiB.", requestID: request.id });
-      if (error instanceof z.ZodError) return reply.code(400).send({ code: "INVALID_REQUEST", message: "The request did not match the required format.", requestID: request.id });
+      if (error instanceof DomainError) return reply.code(error.statusCode).send({ code: error.code, message: error.message, requestID: request.id } satisfies APIError);
+      if (error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") return reply.code(413).send({ code: "SOURCE_TOO_LARGE", message: "Choose a file of at most 25 MiB.", requestID: request.id } satisfies APIError);
+      if (error instanceof z.ZodError) return reply.code(400).send({ code: "INVALID_REQUEST", message: "The request did not match the required format.", requestID: request.id } satisfies APIError);
       request.log.error({ requestID: request.id, code: "APPLICATION_FAILURE" }, "Application request failed");
-      return reply.code(500).send({ code: "INTERNAL_ERROR", message: "The operation could not be completed.", requestID: request.id });
+      return reply.code(500).send({ code: "INTERNAL_ERROR", message: "The operation could not be completed.", requestID: request.id } satisfies APIError);
     });
     app.addHook("onRequest", async (request, reply) => {
       const session = await auth.api.getSession({ headers: authHeaders(request, config), returnHeaders: true }); forwardHeaders(session.headers, reply);
@@ -56,7 +56,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       if (!["GET", "HEAD"].includes(request.method) && (typeof request.headers.origin !== "string" || !config.auth.trustedOrigins.includes(request.headers.origin))) throw new DomainError("INVALID_ORIGIN", "This request origin is not allowed.", 403);
     });
     app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 }, (_request, body, done) => done(null, body));
-    app.get("/library", async r => {
+    app.get("/library", async (r): Promise<LibraryBootstrap> => {
       const owner = userID(r);
       const [subjects, drafts, prefs, connections] = await Promise.all([
         collectPages(cursor => library.list(owner, cursor, 100)),
@@ -67,7 +67,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       return { subjects, drafts, preferences: { version: prefs[0]?.version ?? 0, values: prefs[0]?.values ?? {} },
         configuration: { items: connections, selfHostedEnabled: process.env.CHATGPT_SELF_HOSTED_ENABLED === "true", apiEnabled: !!process.env.OPENAI_API_KEY_FILE || !!process.env.OPENAI_API_KEY } };
     });
-    app.get("/subjects/:subjectID/snapshot", async r => {
+    app.get("/subjects/:subjectID/snapshot", async (r): Promise<SubjectSnapshot> => {
       const owner = userID(r), id = parseID(r, "subjectID");
       const { importID, knownRevisionID } = z.strictObject({ importID: uuid.optional(), knownRevisionID: uuid.optional() }).parse(r.query);
       // One MVCC snapshot includes worker progress and Recall state as well as
@@ -88,7 +88,9 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
         const decisionValues = await tx.select({ id: pendingDecisions.id, subjectID: pendingDecisions.subjectId, importID: pendingDecisions.importId, state: pendingDecisions.state, version: pendingDecisions.version }).from(pendingDecisions).where(and(eq(pendingDecisions.userId, owner), eq(pendingDecisions.subjectId, id))).orderBy(asc(pendingDecisions.id));
         const dashboard = await recall.dashboard(owner, id, null, tx, entries, subject);
         return { subject: { id: subject.id, name: subject.name, version: subject.version, revisionID: subject.revisionId, createdAt: subject.createdAt.toISOString(), updatedAt: subject.updatedAt.toISOString() },
-          entries: entries ?? null, sources: sourceValues.map(sourceDTO), drafts: draftValues, jobs: jobValues.map(jobDTO), decisions: decisionValues, recall: dashboard };
+          entries: entries ?? null, sources: sourceValues.map(sourceDTO),
+          drafts: draftValues.map(draft => ({ ...draft, status: draft.status as ImportDraft["status"], createdAt: draft.createdAt.toISOString(), updatedAt: draft.updatedAt.toISOString() })),
+          jobs: jobValues.map(jobDTO), decisions: decisionValues, recall: dashboard };
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     });
     app.get("/subjects", async r => { const q = pageSchema.parse(r.query); return library.list(userID(r), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
@@ -142,7 +144,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.patch("/imports/:importID", r => { const b = mutationSchema.extend({ changes: z.array(z.strictObject({ id: uuid, selected: z.boolean().optional(), name: z.string().min(1).max(240).optional(), fields: object.optional(), acceptMerge: z.boolean().optional(), resolutionAction: z.enum(["apply", "undo", "dismiss", "restore"]).optional() })).max(2000) }).parse(r.body); return importer.edit(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.changes); });
     app.post("/imports/:importID/save", r => { const b = mutationSchema.extend({ choices: z.record(z.string(), z.enum(["current", "incoming"])).default({}), expectedSubjectVersion: z.number().int().positive().nullable().default(null) }).parse(r.body); return importer.save(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion, b.choices, b.expectedSubjectVersion); });
     app.delete("/imports/:importID", r => { const b = mutationSchema.parse(r.body); return importer.delete(userID(r), parseID(r, "importID"), b.operationID, b.expectedVersion); });
-    app.get("/subjects/:subjectID/decisions", async r => { const subjectID = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), subjectID); const rows = await db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userID(r)), eq(pendingDecisions.subjectId, subjectID), q.cursor ? gt(pendingDecisions.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(pendingDecisions.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(d => ({ id: d.id, subjectID: d.subjectId, importID: d.importId, state: d.state, version: d.version })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
+    app.get("/subjects/:subjectID/decisions", async (r): Promise<Page<PendingDecision>> => { const subjectID = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), subjectID); const rows = await db.select().from(pendingDecisions).where(and(eq(pendingDecisions.userId, userID(r)), eq(pendingDecisions.subjectId, subjectID), q.cursor ? gt(pendingDecisions.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(pendingDecisions.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(d => ({ id: d.id, subjectID: d.subjectId, importID: d.importId, state: d.state, version: d.version })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
     app.get("/jobs/:jobID", async r => jobDTO(requireValue((await db.select(jobDisplayColumns).from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.id, parseID(r, "jobID")))))[0])));
     app.get("/subjects/:subjectID/jobs", async r => { const id = parseID(r, "subjectID"), q = pageSchema.parse(r.query); await ownedSubject(db, userID(r), id); const rows = await db.select(jobDisplayColumns).from(jobs).where(and(eq(jobs.userId, userID(r)), eq(jobs.subjectId, id), q.cursor ? gt(jobs.id, uuid.parse(q.cursor)) : undefined)).orderBy(asc(jobs.id)).limit(q.limit + 1); return { items: rows.slice(0, q.limit).map(jobDTO), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }; });
     app.post("/jobs/:jobID/control", r => { const b = mutationSchema.extend({ action: z.enum(["pause", "resume", "retry", "cancel"]), selection: selectionSchema.nullable().default(null) }).parse(r.body); return queue.control(userID(r), parseID(r, "jobID"), b.operationID, b.expectedVersion, b.action, b.selection); });
@@ -205,7 +207,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.delete("/ai/connections/:connectionID", r => { const b = mutationSchema.parse(r.body); return ai.disconnect(userID(r), parseID(r, "connectionID"), b.operationID, b.expectedVersion); });
     app.post("/ai/models", async r => ({ items: await ai.models(userID(r), selectionSchema.parse(r.body)) }));
     app.get("/ai/usage", async r => ({ items: await db.select({ id: aiRequests.id, funding: aiRequests.funding, model: aiRequests.model, status: aiRequests.status, inputTokens: aiRequests.inputTokens, outputTokens: aiRequests.outputTokens, createdAt: aiRequests.createdAt }).from(aiRequests).where(eq(aiRequests.userId, userID(r))).orderBy(desc(aiRequests.createdAt)).limit(100) }));
-    app.get("/preferences", async r => { const row = (await db.select().from(preferences).where(eq(preferences.userId, userID(r))))[0]; return { version: row?.version ?? 0, values: row?.values ?? {} }; });
+    app.get("/preferences", async (r): Promise<AccountPreferences> => { const row = (await db.select().from(preferences).where(eq(preferences.userId, userID(r))))[0]; return { version: row?.version ?? 0, values: row?.values ?? {} }; });
     app.put("/preferences", async r => { const b = z.strictObject({ operationID: uuid, expectedVersion: z.number().int().nonnegative(), values: object }).parse(r.body), owner = userID(r);
       return mutation(db, owner, b.operationID, { action: "preferences", ...b }, async tx => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${owner + ":preferences"}, 0))`);
@@ -229,7 +231,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
           const active = await auth.api.getSession({ headers: authHeaders(r, config) });
           if (active?.user.id !== owner) { emit("unauthorized", {}); controller.abort(); return; }
           const rows = await db.select().from(events).where(and(eq(events.userId, owner), gt(events.id, cursor))).orderBy(asc(events.id)).limit(100);
-          for (const e of rows) { cursor = e.id; emit("invalidate", { id: String(e.id), resource: e.resource, subjectID: e.subjectId, version: e.version }); }
+          for (const e of rows) { cursor = e.id; emit("invalidate", { id: String(e.id), resource: e.resource, subjectID: e.subjectId, version: e.version } satisfies Invalidation); }
           if (!rows.length) emit("heartbeat", {});
         } catch { emit("reconnect", {}); controller.abort(); }
         finally { busy = false; }

@@ -1,5 +1,4 @@
 import Foundation
-import SwiftData
 
 nonisolated struct TopicRecord: Codable, Sendable, Equatable, Identifiable {
     let id: UUID

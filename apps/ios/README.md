@@ -8,7 +8,7 @@ A verified Knowledge email/password account is required. Existing registration, 
 
 The permanent Knowledge user UUID owns subjects, source documents, saved concepts/facts/connections, organization, import drafts, history, Recall questions, sessions, answers, memory state, and model preferences. AI connections are separate permissions. Changing a ChatGPT connection does not change Knowledge ownership.
 
-`KnowledgeApp` opens `CloudAuthenticationRootView`. After Knowledge authentication, `CloudLibraryStore` creates an account-scoped cache directory under `Library/Caches/KnowledgeCloud-v1/<origin-hash>/<user-UUID>/`. Confirmed display snapshots stay in memory; the retained SwiftData container is no longer populated because its records had no readers. The old shared library is never opened, converted, or uploaded. Existing development content is intentionally abandoned; existing server accounts remain intact.
+`KnowledgeApp` opens `CloudAuthenticationRootView`. After Knowledge authentication, `CloudLibraryStore` creates an account-scoped cache directory under `Library/Caches/KnowledgeCloud-v1/<origin-hash>/<user-UUID>/` for pending-operation metadata and downloaded source files. Confirmed display snapshots stay in memory; the app does not create or open a SwiftData container. Obsolete account cache database files are removed with the account directory on sign-out. The old shared library is never opened, converted, or uploaded. Existing development content is intentionally abandoned; existing server accounts remain intact.
 
 Library content becomes available only after a successful server refresh. The client refreshes on sign-in, foregrounding, subject navigation, confirmed changes, and SSE invalidation. SSE reconnects trigger authoritative refetches. A connection failure covers library views and library sheets with retry UI, preserving unsent form input underneath. There is no offline library mode or offline mutation queue.
 
@@ -24,7 +24,7 @@ Background suspension cancels foreground reads and the event stream silently. On
 
 Changes use asynchronous `/api/v1` commands and appear saved only after server confirmation. Forms retain their starting resource version, so a refresh cannot silently turn stale input into an overwrite. Uncertain mutations retain operation IDs in account-scoped cache metadata; retries reuse the same ID. Raw uploads use a content fingerprint. The metadata stores no request bodies or provider credentials.
 
-Sign-out cancels URLSession requests and event streams, clears displayed account state and session-only chats, deletes cached records/files, and discards the account container. Closed clients reject late responses. Server jobs continue across app termination and Knowledge sign-out; Pause, Cancel, and provider disconnection are separate controls.
+Sign-out cancels URLSession requests and event streams, clears displayed account state and session-only chats, and deletes the account cache directory. Closed clients reject late responses. Server jobs continue across app termination and Knowledge sign-out; Pause, Cancel, and provider disconnection are separate controls.
 
 ## Native flows
 

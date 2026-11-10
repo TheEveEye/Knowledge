@@ -3,6 +3,8 @@
 
 # Xcode build output
 **/DerivedData/
+**/xcuserdata/
+*.xcuserstate
 
 # Generated build output and dependencies
 **/.build/

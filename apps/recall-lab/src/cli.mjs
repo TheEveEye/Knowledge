@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { repo, prompts, hash, save, read, log, sourceDir, locations, replacePolicies, validateCandidate, obj, bool, text } from './core.mjs';
+import { repo, prompts, hash, save, read, log, sourceDir, locations, policyFile, replacePolicies, validateCandidate, obj, bool, text } from './core.mjs';
 import { Codex, Paused } from './codex.mjs';
 import { prepare, answers, episode, score, propose } from './pipeline.mjs';
 const defaultDir = resolve(repo, '.recall-lab');
@@ -21,7 +21,7 @@ async function loadState() { return read(resolve(dir, 'state.json')); }
 async function report(state) {
   const lines = ['# Recall Lab', '', `Status: ${state.status}`, `Updated: ${new Date().toISOString()}`, `Stopped by: ${new Date(state.hardStopAt).toISOString()}`,
     state.budgetAuthorized === false ? 'No automatic spending window authorized.' : state.budgetKind === 'validation' ? 'Budget: one small foreground validation, at most ten minutes; automatic resumption disabled.' : `Allowance windows authorized: ${state.budgetKind === 'current_window' ? 'current window only' : '2'}; reset: ${new Date(state.firstResetAt).toISOString()}`, '',
-    'This is a prompt-level simulation using canonical iOS instructions and compatible request contracts. It does not execute the Swift UI, persistence, scheduling, all native controls, extra-credit or all runtime guard logic. Findings are proposals, not verified human learning outcomes.', '',
+    'This is a prompt-level simulation using canonical backend instructions and compatible request contracts. It does not execute the Swift UI, persistence, scheduling, all native controls, extra-credit or all runtime guard logic. Findings are proposals, not verified human learning outcomes.', '',
     '| Round | Coverage | Observations | False accept | False reject | Unfair question | Penalty | Candidate promoted |', '|---|---|---|---|---|---|---|---|'];
   for (const r of state.rounds) lines.push(`| ${r.index} | ${r.score.ready}/${r.score.requested} | ${r.score.observations} | ${r.score.falseAcceptance} | ${r.score.falseRejection} | ${r.score.questionUnfair} | ${r.score.penalty.toFixed(3)} | ${r.promoted ?? false} |`);
   if (state.progress) lines.push('', `Current checkpoint: round ${state.progress.round}, ${state.progress.banks} prepared sections, ${state.progress.episodes} reviewed interactions, ${state.progress.skipped} skipped items.`);
@@ -131,7 +131,7 @@ async function run(client, once = false) {
       if (!skipped && (findings.length || priorFindings.length) && index % 2 === 1 && !args.includes('--small')) {
         let proposed;
         try { proposed = await propose(client, current, [...findings, ...priorFindings], state); }
-        catch (error) { if (!/prompt length|Prompt keys|Unsafe Swift/.test(error.message)) throw error;
+        catch (error) { if (!/prompt length|Prompt keys|prompt content/.test(error.message)) throw error;
           await log(dir, 'candidate_rejected', { reason: error.message }); proposed = null;
         }
         if (proposed) {
@@ -243,8 +243,8 @@ async function apply() {
   if (JSON.stringify(base.sourceHashes) !== JSON.stringify(current.sourceHashes)) throw new Error('App sources changed; review and merge candidate.json manually.');
   validateCandidate(base, candidate.bodies);
   if (hash(base.bodies) === hash(candidate.bodies)) throw new Error('No improved candidate was promoted.');
-  // Write only JSON string literals in the production policy map.
-  const path = resolve(sourceDir, 'policies.ts');
+  // Update only the five candidate prompt arrays in the canonical policy data.
+  const path = resolve(sourceDir, policyFile);
   await writeFile(path, replacePolicies(await readFile(path, 'utf8'), candidate.bodies));
   console.log('Applied candidate prompt bodies. Review the diff and update policy versions before shipping.');
 }

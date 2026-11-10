@@ -1,5 +1,4 @@
 import Foundation
-import SwiftData
 
 nonisolated struct CloudSubject: Codable, Identifiable, Sendable, Hashable {
     let id: UUID
@@ -50,13 +49,6 @@ nonisolated enum CloudSuggestion {
             rationale: value.text("rationale"), evidence: value.value("evidence").array.compactMap { guard let id = UUID(uuidString: $0.text("sourceID")) else { return nil }; return .init(sourceID: id, segmentID: $0.text("segmentID"), quote: $0.text("quote")) },
             model: value.text("model"), status: .init(rawValue: value.text("status")) ?? .pending, previousName: value.value("previousName").string, changedLibraryName: value.value("changedLibraryName").flag)
     }
-}
-@Model final class CloudCachedRecord {
-    @Attribute(.unique) var key: String
-    var subjectID: UUID?
-    var kind: String
-    var payload: Data
-    init(key: String, subjectID: UUID?, kind: String, payload: Data) { self.key = key; self.subjectID = subjectID; self.kind = kind; self.payload = payload }
 }
 nonisolated enum CloudCoding {
     @concurrent static func decode<T: Decodable & Sendable>(_ type: T.Type, data: Data) async throws -> T { try JSONDecoder().decode(type, from: data) }

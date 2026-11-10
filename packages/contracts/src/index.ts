@@ -25,11 +25,16 @@ export interface Source {
   error: string | null; archived: boolean; createdAt: string;
   reviewNotes?: string[];
 }
-export interface Revision {
+export interface RevisionSummary {
   id: string; subjectID: string; parentID: string | null; operationID: string;
   origin: string; title: string; summary: string; createdAt: string;
-  changes: EntityChange[]; undoesRevisionID: string | null;
+  undoesRevisionID: string | null;
+}
+export interface Revision extends RevisionSummary {
+  changes: EntityChange[];
   names?: Record<string, string>;
+  isUndone: boolean; undoDecision: JSONObject | null;
+  undoJob: Pick<Job, "id" | "version" | "status" | "error" | "progress"> | null;
 }
 export interface EntityChange { before: LibraryEntity | null; after: LibraryEntity | null }
 export const jobKinds = ["extract", "import", "prepareRecall", "prepareCommit", "prepareUndo"] as const;
@@ -42,7 +47,7 @@ export interface Job {
 }
 export interface ImportDraft {
   id: string; subjectID: string; sourceID: string; baseRevisionID: string; version: number;
-  status: "processing" | "review" | "saved"; draft: JSONObject; checkpoint: JSONObject;
+  status: "processing" | "review" | "saved"; draft: JSONObject;
   selection: AISelection; createdAt: string; updatedAt: string;
 }
 export interface APIError { code: string; message: string; requestID?: string }
@@ -51,17 +56,17 @@ export interface Model { id: string; name: string; reasoning: string[] }
 export interface AIConnection { id: string; version: number; label: string; provider: "chatgpt"; status: string; revocationPending: boolean; createdAt: string; identity?: { name: string | null; email: string | null } | null }
 export interface AccountPreferences { version: number; values: JSONObject }
 export interface ImportEntryChange {
-  id: string; selected?: boolean; name?: string; fields?: JSONObject; acceptMerge?: boolean;
-  resolutionAction?: "apply" | "undo" | "dismiss" | "restore";
+  id: string; selected?: boolean | undefined; name?: string | undefined; fields?: JSONObject | undefined; acceptMerge?: boolean | undefined;
+  resolutionAction?: "apply" | "undo" | "dismiss" | "restore" | undefined;
 }
 export interface ImportDraftSummary { id: string; subjectID: string; sourceID: string; version: number; status: string; updatedAt: string; sourceTitle: string; processing: boolean; jobStatus: JobStatus | null; activity: string }
 export interface PendingDecision { id: string; subjectID: string; importID: string | null; state: JSONObject; version: number }
 export interface RecallSession { id: string; subjectID: string; version: number; finished: boolean; state: JSONObject; updatedAt: string }
 export interface RecallSessionSummary { completed: number; independent: number; supported: number; needsPractice: number; skipped: number; additionalRecalled: number }
-export interface RecallSessionPresentation { session: RecallSession; question: JSONObject | null; summary: RecallSessionSummary; targetID?: string; issue?: { code: string; message: string } }
+export interface RecallSessionPresentation { session: RecallSession; question: JSONObject | null; summary: RecallSessionSummary; targetID?: string; upcoming?: JSONObject[]; issue?: { code: string; message: string } }
 export interface RecallOverview {
   total: number; prepared: number; assessed: number; due: number; new: number; issues: number;
-  materialPending: number; materialBlocked: number; contextMaterials: number; duplicateMaterials: number;
+  materialUpgrade: number; materialPending: number; materialBlocked: number; contextMaterials: number; duplicateMaterials: number;
   nextDueAt: string | null; scopeName: string;
 }
 export interface RecallProficiency { units: number; assessedTargets: number; targetSlots: number; readinessSum: number }
@@ -76,4 +81,14 @@ export interface RecallMaterialDisplay {
 export interface RecallDashboard {
   subjectID: string; due: number; total: number; unassessed: number; proficiency: Record<string, number | null>;
   proficiencyByConcept: Record<string, RecallProficiency>; proficiencyByTopic: Record<string, RecallProficiency>; overview: RecallOverview;
+}
+export interface LibraryBootstrap {
+  subjects: Subject[]; drafts: ImportDraftSummary[]; preferences: AccountPreferences;
+  configuration: { items: AIConnection[]; selfHostedEnabled: boolean; apiEnabled: boolean };
+}
+/** Navigation includes a draft body only for the import currently under review. */
+export interface SubjectImport extends Omit<ImportDraft, "draft"> { draft: JSONObject | null }
+export interface SubjectSnapshot {
+  subject: Subject; entries: LibraryEntity[] | null; sources: Source[];
+  drafts: SubjectImport[]; jobs: Job[]; decisions: PendingDecision[]; recall: RecallDashboard;
 }

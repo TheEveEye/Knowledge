@@ -50,7 +50,7 @@ The filtered entry query took 1.436 ms, used 300 shared buffer hits, and sorted 
 
 Successful HTTP responses previously decoded their entire body into dynamic JSON on the main actor during response acceptance, then decoded again through `CloudCoding`. Successful acceptance now handles headers/status only; the body is decoded once on the concurrent executor. Error-body handling and session renewal remain.
 
-Every subject read also encoded all entries again and fetched/upserted/deleted/saved SwiftData cache records on the main actor before returning the snapshot. Static reference review found no consumers of those records. Those writes and their encoding pass are removed. The retained cache schema/container needs no migration, still isolates accounts, and is purged on sign-out. Pending-operation metadata remains unchanged. No offline access was added.
+Every subject read also encoded all entries again and fetched/upserted/deleted/saved SwiftData cache records on the main actor before returning the snapshot. Static reference review found no consumers of those records. Those writes and their encoding pass are removed. The subsequent cleanup also removes the unused cache schema/container; no study data migration is needed. The account-scoped directory still holds pending-operation metadata and downloaded files and is purged on sign-out, including any obsolete cache database files. No offline access was added.
 
 Speculative downloads of every other subject are removed. Confirmed in-memory snapshots are reused while connected until invalidated, rather than expiring after two seconds. Reconnect/foreground and explicit refresh retain fresh server reads. Revision-confirmed metadata responses reuse the existing entries array without publishing it again to SwiftUI. Question banks no longer block subject refreshes after a Recall screen has once been opened.
 
@@ -64,4 +64,4 @@ The backend must precede the new client because the previous snapshot route reje
 
 The deployment built contracts/backend/API/worker with Node 24 on the Pi, created a 5.5 MB database/source backup before running the existing migration command, retained the previous release for rollback, and left PostgreSQL's existing container and volumes in place. API and worker health checks passed; public `/api/status` reports revision `e492a4184285-dirty-8544fbffd10a`, and `/api/ready` returns ready. Caddy is running the deployed configuration, and the public gateway responds successfully. No manual app/API feature testing or phone installation was performed.
 
-`docs/Cloud-Library.md` was intentionally left unchanged; its older prefetch/two-second-cache description is superseded by this report and the iOS README.
+The navigation description in `docs/Cloud-Library.md` now matches this report and the iOS README.

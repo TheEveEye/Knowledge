@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 
 struct CloudAuthenticationRootView: View {
     @Environment(KnowledgeAccountStore.self) private var account
@@ -11,7 +10,7 @@ struct CloudAuthenticationRootView: View {
             if account.isRestoring { ProgressView("Signing in to Knowledge…") }
             else if let user = account.user {
                 if let library, library.client.userID == user.id {
-                    CloudOnlineLibraryView().environment(library).modelContainer(library.container).id(user.id)
+                    CloudOnlineLibraryView().environment(library).id(user.id)
                 } else if let cacheError {
                     ContentUnavailableView { Label("Library unavailable", systemImage: "exclamationmark.triangle") }
                     description: { Text(cacheError) }
