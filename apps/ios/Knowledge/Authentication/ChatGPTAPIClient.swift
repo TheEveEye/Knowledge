@@ -30,54 +30,10 @@ final class ChatGPTAPIClient {
             "redirect_uri": authorization.redirectURI.absoluteString,
             "resource": ChatGPTConfiguration.resource
         ])
-        return try tokenResponse(data, previous: nil, requireIdentity: true)
-    }
-
-    func refresh(_ account: StoredChatGPTAccount) async throws -> ChatGPTCredentials {
-        guard validClientID(account.clientID), let previous = account.credentials,
-              let token = previous.refreshToken, !token.isEmpty else { throw AuthenticationError.sessionExpired }
-        let data = try await postForm(to: discovery().tokenEndpoint, fields: [
-            "grant_type": "refresh_token", "client_id": account.clientID,
-            "refresh_token": token, "resource": ChatGPTConfiguration.resource
-        ])
-        return try tokenResponse(data, previous: previous, requireIdentity: false)
-    }
-
-    func revoke(_ account: StoredChatGPTAccount) async throws {
-        guard let token = (account.pendingRefresh ?? account.credentials)?.refreshToken, !token.isEmpty else {
-            if account.credentials?.accessToken != nil { throw AuthenticationError.invalidResponse }
-            return
-        }
-        guard validClientID(account.clientID), let endpoint = try await discovery().revocationEndpoint else {
-            throw AuthenticationError.invalidResponse
-        }
-        let fields = ["token": token, "token_type_hint": "refresh_token", "client_id": account.clientID]
-        for attempt in 0..<3 {
-            do {
-                _ = try await postForm(to: endpoint, fields: fields)
-                return
-            } catch let error as AuthenticationError {
-                guard attempt < 2, case .http(let status, _) = error,
-                      status == 0 || (500...599).contains(status) else { throw error }
-                do { try await Task.sleep(for: .seconds(attempt + 1)) }
-                catch { throw AuthenticationError.canceled }
-            }
-        }
+        return try tokenResponse(data)
     }
 
     func verifyIdentity(idToken: String, clientID: String, nonce: String?) async throws -> ChatGPTIdentity {
-        try await verifiedIdentity(idToken: idToken, clientID: clientID, nonce: nonce, receivedAt: nil)
-    }
-
-    func verifyRefreshedIdentity(idToken: String, clientID: String, receivedAt: Date?) async throws -> ChatGPTIdentity {
-        if let receivedAt {
-            let timestamp = receivedAt.timeIntervalSince1970
-            guard timestamp.isFinite, timestamp > 0, receivedAt <= .now else { throw AuthenticationError.invalidIdentity }
-        }
-        return try await verifiedIdentity(idToken: idToken, clientID: clientID, nonce: nil, receivedAt: receivedAt)
-    }
-
-    private func verifiedIdentity(idToken: String, clientID: String, nonce: String?, receivedAt: Date?) async throws -> ChatGPTIdentity {
         guard validClientID(clientID), idToken.utf8.count <= 65_536,
               let header = try? tokenHeader(idToken), header.alg == "RS256",
               header.crit?.isEmpty != false, header.b64 != false,
@@ -99,7 +55,7 @@ final class ChatGPTAPIClient {
             throw AuthenticationError.invalidIdentity
         }
         try Task.checkCancellation()
-        let timestamp = (receivedAt ?? .now).timeIntervalSince1970
+        let timestamp = Date.now.timeIntervalSince1970
         guard payload.iss == provider.issuer,
               payload.aud.values.contains(clientID), !payload.sub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               payload.exp.isFinite, payload.iat.isFinite,
@@ -187,21 +143,20 @@ final class ChatGPTAPIClient {
         return (result.0, response)
     }
 
-    private func tokenResponse(_ data: Data, previous: ChatGPTCredentials?, requireIdentity: Bool) throws -> ChatGPTCredentials {
+    private func tokenResponse(_ data: Data) throws -> ChatGPTCredentials {
         guard let response = try? JSONDecoder().decode(TokenFields.self, from: data),
-              let scope = response.scope ?? previous?.scopes.joined(separator: " ") else {
+              let scope = response.scope else {
             throw AuthenticationError.invalidResponse
         }
         let scopes = Array(Set(scope.split(whereSeparator: \.isWhitespace).map(String.init))).sorted()
-        if requireIdentity && (response.idToken?.isEmpty != false) { throw AuthenticationError.invalidIdentity }
-        if response.idToken?.isEmpty == true { throw AuthenticationError.invalidIdentity }
-        let requiresAccess = previous != nil || scopes.contains("offline_access") || scopes.contains(ChatGPTConfiguration.planScope)
+        guard response.idToken?.isEmpty == false else { throw AuthenticationError.invalidIdentity }
+        let requiresAccess = scopes.contains("offline_access") || scopes.contains(ChatGPTConfiguration.planScope)
         let access = response.accessToken
         var expiry: Date?
         if let access, !access.isEmpty {
             guard response.tokenType?.lowercased() == "bearer", let expires = response.expiresIn,
                   expires.isFinite, expires > 0, expires <= 31_536_000,
-                  (!scopes.contains("offline_access") && previous == nil) || response.refreshToken?.isEmpty == false else {
+                  !scopes.contains("offline_access") || response.refreshToken?.isEmpty == false else {
                 throw AuthenticationError.invalidResponse
             }
             expiry = Date.now.addingTimeInterval(expires)

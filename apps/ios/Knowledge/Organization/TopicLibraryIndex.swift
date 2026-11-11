@@ -8,7 +8,7 @@ nonisolated struct TopicLibraryNode: Identifiable {
     var conceptCount: Int { conceptIDs.count + children.reduce(0) { $0 + $1.conceptCount } }
 }
 
-/// Pure presentation index shared by browsing, counts, search paths, and tests.
+/// Pure presentation index shared by browsing, counts, and search paths.
 nonisolated struct TopicLibraryIndex {
     let roots: [TopicLibraryNode]
     let unsortedIDs: [UUID]

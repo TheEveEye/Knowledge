@@ -93,8 +93,7 @@ struct CloudRevisionView: View {
             .confirmationDialog("Undo this import?", isPresented: $confirmUndo, titleVisibility: .visible) {
                 Button("Undo import", role: .destructive) { library.perform(undoKey) {
                     guard let subject = library.activeSubject else { return }
-                    let response = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)/undo", fields: ["expectedVersion": reviewVersion == .null ? .number(subject.version) : reviewVersion, "choices": .object(choices)])
-                    _ = response
+                    _ = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/history/\(revisionID)/undo", fields: ["expectedVersion": reviewVersion == .null ? .number(subject.version) : reviewVersion, "choices": .object(choices)])
                     try await refreshRevision()
                 } }
             } message: { Text("Later edits and information used by later notes will be kept.") }

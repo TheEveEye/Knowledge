@@ -31,15 +31,6 @@ nonisolated enum AuthenticationError: Error, LocalizedError, Equatable {
         case .http: "ChatGPT is temporarily unavailable. Please try again."
         }
     }
-
-    var isTerminalRefreshError: Bool {
-        let terminal = ["invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"]
-        switch self {
-        case .sessionExpired: return true
-        case .oauth(let code), .http(_, let code?): return terminal.contains(code)
-        default: return false
-        }
-    }
 }
 
 nonisolated struct ChatGPTIdentity: Codable, Sendable, Equatable {
@@ -48,8 +39,6 @@ nonisolated struct ChatGPTIdentity: Codable, Sendable, Equatable {
     let name: String?
     let email: String?
     let picture: String?
-
-    var displayName: String { name ?? email ?? "ChatGPT account" }
 }
 
 nonisolated struct ChatGPTCredentials: Codable, Sendable, Equatable {

@@ -19,40 +19,12 @@ final class KeychainCredentialStore {
         return value
     }
 
-    func loadAccounts() throws -> [StoredChatGPTAccount] {
-        var query = baseQuery()
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
-        query[kSecReturnAttributes as String] = true
-        query[kSecReturnData as String] = true
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return [] }
-        guard status == errSecSuccess else { throw AuthenticationError.storage(status) }
-        guard let items = result as? [[String: Any]] else { throw AuthenticationError.storage(errSecDecode) }
-        var accounts: [StoredChatGPTAccount] = []
-        for item in items {
-            guard let key = item[kSecAttrAccount as String] as? String else { throw AuthenticationError.storage(errSecDecode) }
-            guard key.hasPrefix(accountPrefix) else { continue }
-            guard let data = item[kSecValueData as String] as? Data,
-                  let account = try? JSONDecoder().decode(StoredChatGPTAccount.self, from: data),
-                  account.clientID == String(key.dropFirst(accountPrefix.count)), validClientID(account.clientID) else {
-                // Leave corrupt or unavailable storage in place for recovery.
-                throw AuthenticationError.storage(errSecDecode)
-            }
-            accounts.append(account)
-        }
-        return accounts.sorted {
-            $0.label == $1.label ? $0.clientID < $1.clientID : $0.label.localizedStandardCompare($1.label) == .orderedAscending
-        }
-    }
-
     func saveAccount(_ account: StoredChatGPTAccount) throws {
         guard validClientID(account.clientID) else { throw AuthenticationError.storage(errSecParam) }
         guard let data = try? JSONEncoder().encode(account) else { throw AuthenticationError.storage(errSecParam) }
         try write(data, account: accountPrefix + account.clientID)
     }
 
-    func activeAccountID() throws -> String? { try readClientID("active-account") }
     func setActiveAccountID(_ clientID: String?) throws { try writeClientID(clientID, account: "active-account") }
 
     func pendingRegistrationClientID() throws -> String? { try readClientID("pending-registration") }

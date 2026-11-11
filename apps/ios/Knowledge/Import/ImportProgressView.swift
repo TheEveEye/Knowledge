@@ -7,7 +7,6 @@ struct ImportProgressView: View {
     var isRunning = true
     var error: String? = nil
     var serverStatus: String? = nil
-    var backgroundNotice: String? = nil
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showDetails = false
 
@@ -15,10 +14,6 @@ struct ImportProgressView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if typeSize.isAccessibilitySize { summaryContent }
-                if isRunning, let backgroundNotice {
-                    Label(backgroundNotice, systemImage: "info.circle")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
                 if let error {
                     Text(error).font(.callout).foregroundStyle(.secondary)
                 } else if progress.batches.contains(where: { $0.state == .failed }) {
@@ -28,41 +23,12 @@ struct ImportProgressView: View {
                         Button("View details") { showDetails = true }
                     }
                 }
-                if showsConnectionFeedback { connectionFeedback }
-                if !progress.topicOverviewReady || progress.topicOverview.isEmpty {
-                    if !progress.sourceSections.isEmpty { sourceOverview }
-                    else if !isRunning {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Your draft is kept").font(.headline)
-                            Text("Resume when you’re ready. Your completed work is saved.")
-                                .font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Topic outline").font(.headline).accessibilityAddTraits(.isHeader)
-                            if !isRunning {
-                                Text("Resume to finish grouping your notes. Your completed work is saved.")
-                                    .font(.callout).foregroundStyle(.secondary)
-                            }
-                        }
-                        ForEach(progress.topicOverview.prefix(6)) { topic in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(topic.name).font(.headline)
-                                if !topic.examples.isEmpty {
-                                    Text(topic.examples.joined(separator: " · "))
-                                        .font(.subheadline).foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-                            .accessibilityElement(children: .combine)
-                        }
-                        if progress.topicOverview.count > 6 {
-                            Text("\(progress.topicOverview.count - 6) more topics will be available in review.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
+                if !progress.sourceSections.isEmpty { sourceOverview }
+                else if !isRunning {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Your draft is kept").font(.headline)
+                        Text("Resume when you’re ready. Your completed work is saved.")
+                            .font(.callout).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -79,46 +45,6 @@ struct ImportProgressView: View {
             ImportProgressDetailsView(progress: progress, model: model, title: title, stage: stageTitle, isRunning: isRunning, error: error)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
-        }
-    }
-
-    private var isConnectingIdeas: Bool {
-        progress.stage == .connecting && progress.organizationLabel == nil && !progress.isResolving && !progress.isReviewingSource
-            && !progress.isPatching && !progress.isRepairing
-    }
-
-    private var showsConnectionFeedback: Bool {
-        if progress.organizationLabel != nil { return !progress.connectionPreviews.isEmpty }
-        return isConnectingIdeas
-            && (!progress.connectionPreviews.isEmpty || (isRunning && error == nil && !progress.activeConceptNames.isEmpty))
-    }
-
-    private var connectionFeedback: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if isConnectingIdeas, isRunning, error == nil, !progress.activeConceptNames.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ImportActivityLabel(title: "Exploring").font(.headline).accessibilityAddTraits(.isHeader)
-                    Text(progress.activeConceptNames.joined(separator: " · "))
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-            }
-            if !progress.connectionPreviews.isEmpty {
-                let count = progress.connectionPreviews.count
-                Text(count == 1 ? "1 connection found" : "\(count) connections found")
-                    .font(.headline).accessibilityAddTraits(.isHeader)
-                ForEach(progress.connectionPreviews.prefix(6)) { connection in
-                    ImportConnectionPreviewCard(connection: connection)
-                }
-                if progress.connectionPreviews.count > 6 {
-                    DisclosureGroup("\(progress.connectionPreviews.count - 6) more connections") {
-                        VStack(alignment: .leading, spacing: 16) {
-                            ForEach(progress.connectionPreviews.dropFirst(6)) { connection in
-                                ImportConnectionPreviewCard(connection: connection)
-                            }
-                        }.padding(.top, 12)
-                    }
-                }
-            }
         }
     }
 
@@ -172,7 +98,7 @@ struct ImportProgressView: View {
         if progress.isReviewingSource { return "Checking source support…" }
         if progress.isResolving { return "Considering names and classifications…" }
         if progress.organizationLabel != nil { return "Organizing topics…" }
-        if progress.isPatching || progress.isRepairing { return "Checking your notes…" }
+        if progress.isRepairing { return "Checking your notes…" }
         if progress.stage == .connecting { return "Connecting ideas…" }
         return "Reading your notes…"
     }
@@ -181,7 +107,7 @@ struct ImportProgressView: View {
         if progress.isReviewingSource { return progress.sourceReviewTotal > 0 }
         if progress.isResolving { return progress.resolutionTotal > 0 }
         if progress.organizationLabel != nil { return progress.organizationTotal > 0 }
-        guard !progress.isPatching, !progress.isRepairing else { return false }
+        guard !progress.isRepairing else { return false }
         return (progress.stage == .connecting && progress.reconciliationTotal > 0)
             || (progress.stage == .extracting && progress.total > 0)
     }
@@ -215,27 +141,6 @@ struct ImportProgressView: View {
             ProgressView(value: Double(progress.completed), total: Double(progress.total))
                 .accessibilityLabel("Progress reading your notes")
         }
-    }
-}
-
-private struct ImportConnectionPreviewCard: View {
-    let connection: ImportConnectionPreview
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(connection.isInferred ? "Suggested connection" : "From your notes",
-                systemImage: connection.isInferred ? "sparkles" : "doc.text")
-                .font(.caption).foregroundStyle(.secondary)
-            Text(connection.explanation).font(.headline)
-                .lineLimit(typeSize.isAccessibilitySize ? nil : 4)
-            Text(connection.from + " → " + connection.to)
-                .font(.subheadline).foregroundStyle(.secondary)
-                .accessibilityLabel("Connection from \(connection.from) to \(connection.to)")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-        .accessibilityElement(children: .combine)
     }
 }
 

@@ -262,8 +262,12 @@ struct EvidenceView: View {
     let presentation: EvidencePresentation
     @Environment(CloudLibraryStore.self) private var library: CloudLibraryStore
     @Environment(\.dismiss) private var dismiss
-    @State private var sources: [UUID: PreparedSource] = [:]
+    @State private var sources: [UUID: Source] = [:]
     @State private var error: String?
+    private struct Source {
+        let title: String
+        let segments: [SourceSegment]
+    }
     var body: some View {
         NavigationStack {
             List {
@@ -271,7 +275,7 @@ struct EvidenceView: View {
                     Section {
                         let segment = sources[reference.sourceID]?.segments.first { $0.id == reference.segmentID }
                         Text(reference.quote.isEmpty ? segment?.text ?? "" : reference.quote).textSelection(.enabled)
-                        if let segment = sources[reference.sourceID]?.segments.first(where: { $0.id == reference.segmentID }) {
+                        if let segment {
                             DisclosureGroup("Full passage") { Text(segment.text).textSelection(.enabled) }
                             Text(segment.locationLabel).font(.caption).foregroundStyle(.secondary)
                         } else { Text("This original passage is unavailable.").foregroundStyle(.secondary) }
@@ -290,8 +294,7 @@ struct EvidenceView: View {
                     let passages = try await library.client.pages(CloudJSON.self, path: path + "/passages")
                     let segments = passages.map { SourceSegment(id: $0.text("id"), page: $0.value("page") == .null ? nil : $0.value("page").int,
                         section: $0.value("section").string, text: $0.text("text")) }
-                    sources[sourceID] = PreparedSource(id: sourceID, title: source.text("title"), kind: SourceKind(rawValue: source.text("kind")) ?? .text,
-                        storedFilename: "", digest: "", segments: segments)
+                    sources[sourceID] = Source(title: source.text("title"), segments: segments)
                 }
             } catch { self.error = "Some supporting passages could not be loaded." }
         }

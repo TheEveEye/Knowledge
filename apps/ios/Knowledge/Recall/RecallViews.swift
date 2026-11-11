@@ -401,23 +401,16 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
     }
 
     @ViewBuilder private var summary: some View {
-        let needsPractice = Result { try controller.summaryNeedsPractice() }
         Section {
             Label("Session complete", systemImage: "checkmark.circle.fill").font(.title2.weight(.semibold))
-            if case .success(let count) = needsPractice {
-                sessionDistribution(needsPractice: count)
-            }
+            sessionDistribution(needsPractice: controller.state.needsPractice)
             LabeledContent("Questions completed", value: controller.state.completed.formatted())
             LabeledContent("Independent recall", value: controller.state.independent.formatted())
             if let additional = controller.state.additionalRecalled, additional > 0 {
                 LabeledContent("Additional facts recalled", value: additional.formatted())
             }
             LabeledContent("Succeeded after support / revisits", value: controller.state.supported.formatted())
-            if case .success(let count) = needsPractice {
-                LabeledContent("Need another review", value: count.formatted())
-            } else {
-                LabeledContent("Need another review", value: controller.state.needsPractice.formatted())
-            }
+            LabeledContent("Need another review", value: controller.state.needsPractice.formatted())
             LabeledContent("Skipped or unassessed", value: controller.state.skipped.formatted())
         } footer: { Text("Future reviews follow your recorded recall and difficulty. Helped answers and immediate revisits are kept separate from independent recall.") }
         if !isHistory {

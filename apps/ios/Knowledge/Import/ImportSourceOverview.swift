@@ -35,7 +35,7 @@ nonisolated struct ImportSourceSummary: Sendable, Identifiable {
             section.segmentIDs.map { ($0, section.id) }
         })
         var cardsBySection: [String: [ImportConceptFeedEntry]] = [:]
-        for card in progress.feed where card.validation != .notValidated {
+        for card in progress.feed {
             let sectionIDs = Set(card.sourceSegmentIDs.compactMap { sectionForSegment[$0] })
             for id in sectionIDs { cardsBySection[id, default: []].append(card) }
         }

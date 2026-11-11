@@ -30,12 +30,6 @@ nonisolated struct RecallDesignQuality: Codable, Sendable, Equatable {
     let usefulRetrieval: Bool
     let cueSafe: Bool
     var matchingUnique: Bool
-
-    var isUsable: Bool {
-        focused && usefulRetrieval && cueSafe && matchingUnique
-            && !objective.trimmed.isEmpty && objective.count <= 400
-            && ["single", "contrast", "relationship"].contains(combination)
-    }
 }
 
 nonisolated struct RecallPrecisionNote: Codable, Sendable, Equatable, Identifiable {
@@ -109,51 +103,6 @@ nonisolated struct RecallInput: Codable, Sendable, Equatable {
     }
     static var text: Self { .init(kind: .text, reason: "Explain in your own words.", options: [], correctOrder: [], matches: []) }
     var isRecognition: Bool { [.choice, .slider, .ordering, .matching].contains(kind) }
-
-    /// Public presentation used by assessment turns; no answer key is included.
-    var presentation: String {
-        let items = options.map { "\($0.id): \($0.text)" }.joined(separator: "; ")
-        switch kind {
-        case .text: return "Free text"
-        case .choice: return "Choose one: " + items
-        case .number: return "Number in \(unit ?? "units")"
-        case .slider: return "Estimate in \(unit ?? "units") from \(minimum ?? 0) to \(maximum ?? 0)"
-        case .ordering: return "Order: " + items
-        case .matching: return "Match: " + items
-        }
-    }
-    func validate() throws {
-        func reject(_ message: String) throws { throw RecallError.invalid(message) }
-        // A format explanation is optional metadata, never a correctness gate.
-        guard options.count <= 10, Set(options.map(\.id)).count == options.count,
-              Set(options.map { $0.text.normalizedName }).count == options.count,
-              options.allSatisfy({ !$0.id.isEmpty && $0.id.count <= 40 && !$0.text.trimmed.isEmpty && $0.text.count <= 400 }) else {
-            try reject("The answer options are incomplete or duplicated."); return
-        }
-        let ids = Set(options.map(\.id))
-        switch kind {
-        case .text:
-            guard options.isEmpty, correctOptionID == nil, expectedValue == nil, matches.isEmpty, correctOrder.isEmpty else { try reject("Text inputs must not carry hidden choices."); return }
-        case .choice:
-            guard (3...5).contains(options.count), let correctOptionID, ids.contains(correctOptionID) else { try reject("Multiple choice requires 3–5 distinct options and one valid answer."); return }
-        case .number, .slider:
-            guard let expectedValue, expectedValue.isFinite, let tolerance, tolerance.isFinite, tolerance >= 0,
-                  let unit, !unit.trimmed.isEmpty, unit.count <= 80 else { try reject("A numerical answer needs units, an expected value, and a finite tolerance."); return }
-            if kind == .slider {
-                guard let minimum, let maximum, let step, minimum.isFinite, maximum.isFinite, step.isFinite,
-                      maximum > minimum, step > 0, step <= maximum - minimum, (maximum - minimum) / step <= 1000,
-                      expectedValue > minimum, expectedValue < maximum,
-                      tolerance >= step / 2 else { try reject("The slider needs a meaningful bounded scale and attainable tolerance."); return }
-            }
-        case .ordering:
-            guard (3...6).contains(options.count), Set(correctOrder) == ids, correctOrder.count == options.count else { try reject("Ordering needs a complete, unique supported sequence."); return }
-        case .matching:
-            guard (4...10).contains(options.count), (2...5).contains(matches.count),
-                  Set(matches.map(\.leftID)).count == matches.count, Set(matches.map(\.rightID)).count == matches.count,
-                  Set(matches.map(\.leftID)).isDisjoint(with: matches.map(\.rightID)),
-                  Set(matches.flatMap { [$0.leftID, $0.rightID] }) == ids else { try reject("Matching needs two complete, unambiguous sets."); return }
-        }
-    }
 }
 nonisolated struct RecallMatch: Codable, Sendable, Equatable { let leftID: String; let rightID: String; var criterionID: String = "" }
 
@@ -215,10 +164,4 @@ nonisolated struct RecallResponse: Codable, Sendable, Equatable {
             return pairs.map { "\(labels[$0.leftID] ?? "") → \(labels[$0.rightID] ?? "")" }.joined(separator: "; ")
         }
     }
-}
-
-extension RecallEpisode {
-}
-
-extension RecallMaterialSnapshot {
 }

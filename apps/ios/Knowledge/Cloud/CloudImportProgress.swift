@@ -14,10 +14,10 @@ import Foundation
         case "saved": activity = .saved
         default: activity = status == "queued" ? .waiting : .processing
         }
-        var result = ExtractionProgress(stage: extracting ? .extracting : .connecting, completed: completed, total: total, activity: activity)
+        var result = ExtractionProgress(stage: extracting ? .extracting : .connecting, completed: completed, total: total)
         result.startedAt = CloudDates.date(job.text("createdAt")) ?? CloudDates.date(job.text("updatedAt")) ?? .now
         result.receivedCharacters = value.value("receivedCharacters").int
-        result.batchIndex = value.value("batchIndex") == .null ? nil : value.value("batchIndex").int
+        let batchIndex = value.value("batchIndex") == .null ? nil : value.value("batchIndex").int
         result.isRepairing = extracting && (value.value("attempt").int > 1 || batches.contains { $0.text("state") == "active" && $0.value("attempt").int > 1 })
         result.batches = batches.map { batch in
             let checked = batch.text("state") == "checked", active = batch.text("state") == "active" && extracting
@@ -35,10 +35,9 @@ import Foundation
             else if status == "paused" { state = .paused; label = "Paused" }
             else if active, status == "running" { state = .active; label = batchActivity.label }
             else { state = .queued; label = "Queued" }
-            let counts = batch.value("counts")
             return ImportBatchActivity(index: batch.value("index").int, state: state, label: label, location: batch.value("location").string,
                 error: state == .failed ? batch.value("error").string ?? job.value("error").string : nil,
-                counts: .init(concepts: counts.value("concepts").int, facts: counts.value("facts").int, connections: counts.value("connections").int), isChecking: batchActivity == .validating)
+                isChecking: batchActivity == .validating)
         }
         result.sourceSections = value.value("sourceSections").array.map { section in
             .init(id: section.text("id"), title: section.text("title"), segmentIDs: Set(section.value("segmentIDs").array.compactMap(\.string)), batchIndices: Set(section.value("batchIndices").array.map(\.int)))
@@ -46,13 +45,12 @@ import Foundation
         for batch in batches {
             let index = batch.value("index").int
             var concepts = batch.value("concepts").array
-            if batch.value("concepts") == .null, index == result.batchIndex, extracting, batch.text("state") != "checked" { concepts = value.value("previewConcepts").array }
-            let scope = ImportPreviewScope(batchIndex: index, attempt: LibraryCoding.stableID(job.text("id") + "/batch/\(index)"), pass: .extraction)
-            for (ordinal, concept) in concepts.enumerated() {
+            if batch.value("concepts") == .null, index == batchIndex, extracting, batch.text("state") != "checked" { concepts = value.value("previewConcepts").array }
+            for concept in concepts {
                 let reason = concept.value("reviewReason").string
-                result.feed.append(.init(id: .init(scope: scope, kind: .concept, ordinal: ordinal), name: concept.text("name"),
+                result.feed.append(.init(name: concept.text("name"),
                     validation: concept.value("checked").flag ? reason == nil ? .checked : .needsReview : .awaiting,
-                    reviewReason: reason, sourceSegmentIDs: concept.value("segmentIDs").array.compactMap(\.string)))
+                    sourceSegmentIDs: concept.value("segmentIDs").array.compactMap(\.string)))
             }
         }
         if stage == "reconciling" { result.reconciliationCompleted = value.value("completed").int; result.reconciliationTotal = value.value("total").int }

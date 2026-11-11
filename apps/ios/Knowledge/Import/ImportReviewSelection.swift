@@ -3,7 +3,6 @@ import Foundation
 nonisolated enum ReviewSelection {
     static func concept(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.concepts.firstIndex(where: { $0.id == id }) else { return }
-        draft.recordUserSelection(id, selected: selected)
         draft.concepts[index].selected = selected
         if !selected {
             let removedFacts = Set(draft.facts.filter { $0.conceptID == id }.map(\.id))
@@ -14,7 +13,6 @@ nonisolated enum ReviewSelection {
     }
     static func fact(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.facts.firstIndex(where: { $0.id == id }) else { return }
-        draft.recordUserSelection(id, selected: selected)
         draft.facts[index].selected = selected
         if selected { concept(draft.facts[index].conceptID, selected: true, draft: &draft) }
         else {
@@ -25,7 +23,6 @@ nonisolated enum ReviewSelection {
     }
     static func connection(_ id: UUID, selected: Bool, draft: inout ImportDraft) {
         guard let index = draft.connections.firstIndex(where: { $0.id == id }) else { return }
-        draft.recordUserSelection(id, selected: selected)
         draft.connections[index].selected = selected
         if selected {
             let value = draft.connections[index]
@@ -37,7 +34,6 @@ nonisolated enum ReviewSelection {
     static func includeSuggested(draft: inout ImportDraft) {
         let ids = draft.connections.filter { connection in
             connection.isInferred && connection.reviewReason == nil
-            && !draft.existingFactReviews.contains { connection.supportingFactIDs.contains($0.factID) }
             && !draft.facts.contains { connection.supportingFactIDs.contains($0.id) && $0.reviewReason != nil }
             && !draft.concepts.contains { ($0.id == connection.fromConceptID || $0.id == connection.toConceptID) && $0.reviewReason != nil }
         }.map(\.id)

@@ -1,6 +1,6 @@
 import Foundation
 
-/// A small, stable overview shared by import progress and the topic-based review.
+/// A small, stable overview for the topic-based review.
 nonisolated struct ImportTopicSummary: Sendable, Identifiable {
     let id: UUID?
     let name: String
@@ -8,7 +8,7 @@ nonisolated struct ImportTopicSummary: Sendable, Identifiable {
     let examples: [String]
 
     static func make(topics: [TopicRecord], placements: [ConceptPlacementRecord],
-        concepts: [(id: UUID, name: String)], includeUnsorted: Bool = true) -> [Self] {
+        concepts: [(id: UUID, name: String)]) -> [Self] {
         let byID = Dictionary(topics.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let assigned = Dictionary(placements.map { ($0.conceptID, $0.topicID) }, uniquingKeysWith: { first, _ in first })
         var grouped: [UUID: [(id: UUID, name: String)]] = [:]
@@ -22,8 +22,7 @@ nonisolated struct ImportTopicSummary: Sendable, Identifiable {
                 cursor = topic.parentTopicID
             }
             if let root { grouped[root, default: []].append(concept) }
-            // Pending assignments aren't presented as uncertain while organization is still running.
-            else if includeUnsorted { unsorted.append(concept) }
+            else { unsorted.append(concept) }
         }
         let ordered = topics.sorted {
             if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }

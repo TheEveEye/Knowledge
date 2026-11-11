@@ -1,10 +1,5 @@
 import Foundation
 
-nonisolated enum RecallError: LocalizedError {
-    case invalid(String)
-    var errorDescription: String? { switch self { case .invalid(let message): message } }
-}
-
 nonisolated struct RecallMaterialSnapshot: Codable, Sendable, Equatable {
     let conceptID: UUID
     let conceptName: String

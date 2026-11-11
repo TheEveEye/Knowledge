@@ -16,9 +16,9 @@ import Observation
     func setDraft(_ value: String)
     func setResponse(_ value: RecallResponse)
     func setEffort(_ value: RecallEffort?)
-    func submit(knownUnknown: Bool)
+    func submit()
     func dontKnow()
-    func retry(userInitiated: Bool)
+    func retry()
     func interrupt(message: String)
     func skip(problem: String?)
     func disagree(reason: String, scope: RecallReconsiderationScope)
@@ -26,7 +26,6 @@ import Observation
     func explainMore()
     func stopExplanation()
     func undoLastReview()
-    func summaryNeedsPractice() throws -> Int
     func revealSourceConfirmed() async -> Bool
     func stopGradingAndEditAnswerConfirmed() async -> Bool
 }
@@ -37,7 +36,5 @@ extension RecallSessionPresenting {
     var canRetryRequest: Bool { state.episode?.phase.hasPrefix("awaiting") == true }
     var requestLabel: String { state.episode?.pendingOperation == "explain" ? "Preparing an explanation…" : "Checking your answer…" }
     func reloadSession() { }
-    func submit() { submit(knownUnknown: false) }
-    func retry() { retry(userInitiated: true) }
     func skip() { skip(problem: nil) }
 }

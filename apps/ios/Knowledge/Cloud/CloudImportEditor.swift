@@ -12,7 +12,6 @@ import Observation
     private(set) var requiresReview = false
     var error: String?
     private var baseline: ImportDraft
-    private var revision = 0
     private var closed = false
     @ObservationIgnored private unowned let library: CloudLibraryStore
     @ObservationIgnored private var debounce: Task<Void, Never>?
@@ -50,7 +49,7 @@ import Observation
     }
     func edited() {
         guard !closed else { return }
-        revision &+= 1; dirty = true
+        dirty = true
         debounce?.cancel()
         guard !requiresReview else { return }
         debounce = Task { [weak self] in
@@ -126,12 +125,7 @@ import Observation
                     original: .init(name: original.text("name"), aliases: original.value("aliases").array.compactMap(\.string), explanation: original.text("explanation")), reviewReason: reason, selected: entry.value("selected").flag)
                 value.mergeTargetID = UUID(uuidString: entry.text("mergeTargetID")); value.mergeReason = entry.value("mergeReason").string
                 value.acceptMerge = entry.value("acceptMerge").flag
-                let suggestion = fields.value("resolutionSuggestion")
-                if suggestion != .null, let basis = ConceptResolutionBasis(rawValue: suggestion.text("basis")) {
-                    value.resolutionSuggestion = .init(suggestedName: suggestion.value("suggestedName").string, classification: suggestion.value("classification").string,
-                        basis: basis, rationale: suggestion.text("rationale"), evidence: references(suggestion.value("evidence")), model: suggestion.text("model"),
-                        status: .init(rawValue: suggestion.text("status")) ?? .pending, previousName: suggestion.value("previousName").string, changedLibraryName: suggestion.value("changedLibraryName").flag)
-                }
+                value.resolutionSuggestion = CloudSuggestion.decode(fields.value("resolutionSuggestion"))
                 result.concepts.append(value)
             case "fact":
                 guard let conceptID = UUID(uuidString: fields.text("conceptID")), let kind = FactKind(rawValue: fields.text("kind")) else { throw KnowledgeAccountError.invalidResponse }

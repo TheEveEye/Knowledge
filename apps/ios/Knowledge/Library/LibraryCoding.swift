@@ -1,14 +1,6 @@
 import Foundation
 import CryptoKit
 
-nonisolated struct LibraryContentProposal: Codable, Sendable {
-    let entityID: UUID
-    let field: String
-    let value: String
-    let reason: String
-    let supportingFactIDs: [UUID]
-}
-
 nonisolated enum LibraryCoding {
     static func stableID(_ text: String) -> UUID {
         let bytes = Array(SHA256.hash(data: Data(text.utf8)).prefix(16))

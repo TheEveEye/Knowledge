@@ -22,12 +22,6 @@ nonisolated struct ConceptResolutionSuggestion: Codable, Sendable, Equatable {
     var status: Status = .pending
     var previousName: String? = nil
     var changedLibraryName = false
-
-    var namingNote: String {
-        basis.label + ". Proposed name: " + (suggestedName ?? "unchanged")
-            + ". Suggested classification: " + (classification ?? "none")
-            + ". This interpretation does not establish source identity or support merges. " + rationale
-    }
 }
 
 nonisolated extension DraftConcept {

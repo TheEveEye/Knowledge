@@ -109,8 +109,7 @@ import SwiftUI
         state.episode?.response = value; state.episode?.draft = value.rendered(for: episode.nextInput) ?? ""; formDirty = true
     }
     func setEffort(_ value: RecallEffort?) { guard !isRequesting, state.episode?.canAdjustReviewEffort == true else { return }; state.episode?.effort = value }
-    func submit(knownUnknown: Bool = false) {
-        if knownUnknown { dontKnow(); return }
+    func submit() {
         guard !isRequesting, pending == nil, !hasStaleInput, let episode = state.episode, episode.phase == "answer", !episode.draft.trimmed.isEmpty else { return }
         start(.answer(version: version, answer: episode.draft, value: episode.nextInput.kind == .text ? .string(episode.draft) : CloudRecallPresentation.inputValue(episode.response, for: episode.nextInput)))
     }
@@ -130,7 +129,7 @@ import SwiftUI
         state.episode = episode
         command("/unknown")
     }
-    func retry(userInitiated: Bool = true) {
+    func retry() {
         guard !isRequesting else { return }
         usageLimited = false
         if let pending { start(pending) }
@@ -170,7 +169,6 @@ import SwiftUI
     }
     func undoLastReview() { guard !isRequesting else { return }; command("/undo") }
     func finishSession() { guard !isRequesting else { return }; command("/finish") }
-    func summaryNeedsPractice() throws -> Int { state.needsPractice }
     func revealSourceConfirmed() async -> Bool {
         guard !isRequesting, let targetID = state.episode?.targetID else { return false }
         do {
