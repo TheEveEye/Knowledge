@@ -18,6 +18,86 @@ import SwiftUI
     private var failed: [UUID: Turn] = [:]
     private var undoVersions: [UUID: Int] = [:]
     private var usageBlocked = false
+    private(set) var voice: CloudSubjectVoice?
+    private struct VoiceCaption {
+        let id: UUID
+        let role: ChatMessage.Role
+        let start: Int
+        var end: Int
+        var fragments: [(Int, String)]
+    }
+    private var voiceCaptions: [VoiceCaption] = []
+    private var voiceMessageIDs: Set<UUID> = []
+    var supportsVoice: Bool { importID == nil }
+    var voiceActive: Bool { voice?.active == true }
+    var voiceConnecting: Bool { voice?.active == true && voice?.connecting == true }
+
+    func startVoice() {
+        guard supportsVoice, !voiceActive, !isResponding, queue.isEmpty, library.ready, library.isForeground else { return }
+        voiceCaptions = []
+        let selection = library.selection(for: "chat")
+        let history = conversationHistory(limit: 8, characters: 1000)
+        voice = CloudSubjectVoice(client: library.client, subjectID: subjectID, selection: selection, history: history,
+            receive: { [weak self] type, value in self?.receiveVoice(type, value) },
+            lookup: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.lookupVoice()
+            })
+    }
+    func endVoice() {
+        voice?.stop()
+        for caption in voiceCaptions {
+            if let index = messages.firstIndex(where: { $0.id == caption.id }) { messages[index].isComplete = true }
+        }
+    }
+    private func receiveVoice(_ type: String, _ value: CloudJSON) {
+        guard voiceActive else { return }
+        if type == "error" { notice(value.text("message")); endVoice(); return }
+        if type == "ended" { endVoice(); return }
+        guard type == "transcript", !value.text("delta").isEmpty else { return }
+        let role: ChatMessage.Role = value.text("role") == "user" ? .user : .assistant
+        let start = value.value("start").int, end = value.value("end").int
+        // Keep independent speaker streams; delayed fragments update their own
+        // message rather than assuming packet arrival marks a complete turn.
+        let index: Int
+        if let found = voiceCaptions.lastIndex(where: { $0.role == role && start >= $0.start && start - $0.end < 2500 }) {
+            index = found
+        } else {
+            let id = UUID()
+            voiceMessageIDs.insert(id)
+            voiceCaptions.append(.init(id: id, role: role, start: start, end: end, fragments: []))
+            index = voiceCaptions.count - 1
+            let insertion = voiceCaptions.filter { $0.start > start }.min(by: { $0.start < $1.start })
+                .flatMap { later in messages.firstIndex(where: { $0.id == later.id }) } ?? messages.endIndex
+            messages.insert(.init(id: id, role: role, text: ""), at: insertion)
+        }
+        voiceCaptions[index].end = max(voiceCaptions[index].end, end)
+        voiceCaptions[index].fragments.append((start, value.text("delta")))
+        voiceCaptions[index].fragments.sort { $0.0 < $1.0 }
+        if let message = messages.firstIndex(where: { $0.id == voiceCaptions[index].id }) {
+            messages[message].text = String(voiceCaptions[index].fragments.map(\.1).joined().prefix(20_000))
+        }
+    }
+    private func conversationHistory(limit: Int = 20, characters: Int = 8000) -> [CloudJSON] {
+        messages.filter { ($0.role == .user || $0.role == .assistant) && !$0.text.trimmed.isEmpty && $0.retryID == nil && !isQueued($0.id) }
+            .suffix(limit).map { .object(["role": .string($0.role == .user ? "user" : "assistant"), "content": .string(String($0.text.prefix(characters)))]) }
+    }
+    private func lookupVoice() async throws -> String {
+        guard let voice, voice.active, library.ready, library.isForeground else { throw CancellationError() }
+        let history = conversationHistory()
+        guard voiceCaptions.contains(where: { $0.role == .user && !$0.fragments.isEmpty }) else {
+            return "The user's words have not arrived yet. Ask them to repeat their question; do not invent a request."
+        }
+        var result: String?
+        try await library.client.events("/api/v1/subjects/\(subjectID.uuidString.lowercased())/chat", method: "POST",
+            body: .object(["selection": voice.selection.json, "messages": .array(history), "voice": .bool(true)])) { event, value in
+                if event == "failed" { throw CloudFailure(code: value.text("code"), message: value.text("message")) }
+                if event == "completed" { result = value.text("text") }
+            }
+        try Task.checkCancellation()
+        guard voice.active, let result, !result.trimmed.isEmpty else { throw CancellationError() }
+        return result
+    }
 
     private struct Turn {
         let id: UUID
@@ -41,6 +121,7 @@ import SwiftUI
     @discardableResult func send(_ text: String) -> Bool {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
+        endVoice()
         guard text.count <= 8_000 else { notice("Keep each message under 8,000 characters."); return false }
         guard library.ready else { notice("Reconnect to Knowledge before sending a message."); return false }
         let selection = library.selection(for: "chat")
@@ -77,10 +158,11 @@ import SwiftUI
         }
     }
     func stop() { interrupt(nil); resumeQueued() }
-    func suspend() { interrupt("Response paused when Knowledge entered the background. Retry to continue.") }
-    func close() { generation = UUID(); task?.cancel(); task = nil; active = nil; queue = []; failed = [:]; messages = []; undoVersions = [:]; isResponding = false }
+    func suspend() { endVoice(); interrupt("Response paused when Knowledge entered the background. Retry to continue.") }
+    func close() { endVoice(); voice = nil; voiceCaptions = []; voiceMessageIDs = []; generation = UUID(); task?.cancel(); task = nil; active = nil; queue = []; failed = [:]; messages = []; undoVersions = [:]; isResponding = false }
     func retry(_ id: UUID) {
         guard let old = failed[id], library.ready, queue.count < 10 else { return }
+        endVoice()
         // A retry keeps the original funding choice and operation ID.
         let turn = Turn(id: UUID(), userMessageID: old.userMessageID, operationID: old.operationID, selection: old.selection, history: old.history)
         failed[id] = nil; usageBlocked = false
@@ -161,9 +243,13 @@ import SwiftUI
         guard let last = messages.firstIndex(where: { $0.id == userMessageID }) else { return [] }
         // Pending, cancelled and failed requests are not conversational context for a new goal.
         // Keep completed user/reply pairs, then append only this turn's actual request.
-        let completed = messages[..<last].filter { $0.role == .assistant && $0.isComplete && $0.requestText != nil }.suffix(6)
+        let completed = messages[..<last].filter { voiceMessageIDs.contains($0.id) || ($0.role == .assistant && $0.isComplete && $0.requestText != nil) }.suffix(12)
         var result: [CloudJSON] = []
         for message in completed {
+            if voiceMessageIDs.contains(message.id) {
+                result.append(.object(["role": .string(message.role == .user ? "user" : "assistant"), "content": .string(String(message.text.prefix(8000)))]))
+                continue
+            }
             result.append(.object(["role": .string("user"), "content": .string(String((message.requestText ?? "").prefix(8_000)))]))
             result.append(.object(["role": .string("assistant"), "content": .string(String(message.text.prefix(8_000)))]))
         }
@@ -193,6 +279,16 @@ struct CloudSubjectChatOverlay: View {
     @State private var citationError: String?
     var body: some View {
         ChatOverlay(session: library.chat(for: subjectID, importID: importID), isExpanded: $isExpanded, searchText: search)
+            .background {
+                if let voice = library.chat(for: subjectID, importID: importID).voice, voice.active {
+                    CloudSubjectVoiceTransport(voice: voice)
+                        .id(ObjectIdentifier(voice))
+                        .frame(width: 1, height: 1).opacity(0.01).allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+            .onChange(of: library.ready) { _, ready in
+                if !ready { library.chat(for: subjectID, importID: importID).endVoice() }
+            }
             .environment(\.openURL, OpenURLAction { url in
                 if url == ChatGPTAccountLinks.usage { return .systemAction }
                 let sourceIDs = importID.map { id in library.drafts.filter { $0.text("id") == id }.map { $0.text("sourceID").lowercased() } }

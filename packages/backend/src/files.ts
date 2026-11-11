@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, stat, statfs, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { and, asc, eq, gt, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, or, sql } from "drizzle-orm";
 import type { SourcePassage } from "@knowledge/contracts";
 import { maximumSourceBytes, maximumSourceCharacters } from "@knowledge/contracts";
 import type { Database, Transaction } from "./database.js";
@@ -130,13 +130,20 @@ export class SourceService {
     const rows = await this.db.select().from(sources).where(and(eq(sources.userId, userId), eq(sources.subjectId, subjectID), cursor ? gt(sources.id, cursor) : undefined)).orderBy(asc(sources.id)).limit(limit + 1);
     return { items: rows.slice(0, limit), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   }
-  async readPassages(userId: string, sourceIDs: string[], query: string, segmentIDs: string[], offset: number, limit: number) {
+  async readPassages(userId: string, sourceIDs: string[], query: string, segmentIDs: string[], offset: number, limit: number, match: "phrase" | "terms" = "phrase") {
     if (!sourceIDs.length) return { items: [], nextOffset: null };
     if (!Number.isSafeInteger(offset) || offset < 0 || query.length > 500 || segmentIDs.length > 24 || (segmentIDs.length && sourceIDs.length !== 1)) throw new DomainError("INVALID_TOOL", "Use one source for specific passage IDs and a valid search offset.");
+    // Conversational questions rarely occur verbatim in lecture notes. Rank
+    // lexical matches for chat while preserving literal search for other callers.
+    const stopWords = new Set("a an and are as at be can could do does for from how i in is it me of on or please that the these this to was what when where which who why with would you your about tell explain have has det den de en ett och att som vad hur kan med om till av på är jag du mig vi ni man finns material course notes subject".split(" "));
+    const terms = match === "terms" ? [...new Set((query.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(t => t.length > 1 && !stopWords.has(t)))].slice(0, 16) : [];
+    const literal = sql`${passages.text} ILIKE ${"%" + query.replace(/[\\%_]/g, "\\$&") + "%"}`;
+    const matches = terms.map(term => sql`${passages.text} ILIKE ${"%" + term + "%"}`);
+    const score = matches.length ? sql`(${sql.join(matches.map(value => sql`CASE WHEN ${value} THEN 1 ELSE 0 END`), sql` + `)})` : sql`0`;
     const rows = await this.db.select().from(passages).where(and(eq(passages.userId, userId), inArray(passages.sourceId, sourceIDs),
       segmentIDs.length ? inArray(passages.id, segmentIDs) : undefined,
-      query.trim() ? sql`${passages.text} ILIKE ${"%" + query.replace(/[\\%_]/g, "\\$&") + "%"}` : undefined))
-      .orderBy(asc(passages.sourceId), asc(passages.ordinal)).offset(offset).limit(limit + 1);
+      query.trim() ? (matches.length ? or(literal, ...matches) : literal) : undefined))
+      .orderBy(...(matches.length ? [desc(score)] : []), asc(passages.sourceId), asc(passages.ordinal)).offset(offset).limit(limit + 1);
     return { items: rows.slice(0, limit).map(p => ({ sourceID: p.sourceId, id: p.id, page: p.page, section: p.section, text: p.text,
       citationURL: "knowledge-source://" + p.sourceId + "/" + encodeURIComponent(p.id) })), nextOffset: rows.length > limit ? offset + limit : null };
   }

@@ -28,4 +28,17 @@ nonisolated struct ChatMessage: Identifiable {
     func retry(_ id: UUID)
     func canUndo(_ id: UUID) -> Bool
     func undo(_ id: UUID)
+    var supportsVoice: Bool { get }
+    var voiceActive: Bool { get }
+    var voiceConnecting: Bool { get }
+    func startVoice()
+    func endVoice()
+}
+
+extension ChatSessionPresenting {
+    var supportsVoice: Bool { false }
+    var voiceActive: Bool { false }
+    var voiceConnecting: Bool { false }
+    func startVoice() {}
+    func endVoice() {}
 }

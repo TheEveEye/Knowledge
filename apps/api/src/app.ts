@@ -7,6 +7,7 @@ import { bundledMigrations } from "./db/migrations.js";
 import { createAuth } from "./auth/auth.js";
 import { registerAccountRoutes } from "./auth/routes.js";
 import { registerLibraryRoutes } from "./library/routes.js";
+import { subjectVoiceHTML } from "./subject-voice.js";
 
 const statusSchema = {
   type: "object",
@@ -81,6 +82,13 @@ export function createApp(config: Config) {
   });
 
   registerAccountRoutes(app, auth, config);
+  app.get("/api/subject-voice", async (_request, reply) => {
+    const nonce = randomUUID();
+    return reply.type("text/html; charset=utf-8")
+      .header("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; media-src blob:; connect-src https://api.openai.com wss://api.openai.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`)
+      .header("Permissions-Policy", "microphone=(self), camera=()")
+      .send(subjectVoiceHTML(nonce));
+  });
   registerLibraryRoutes(app, db, pool, auth, config);
 
   return app;

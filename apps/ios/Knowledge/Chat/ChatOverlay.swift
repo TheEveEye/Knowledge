@@ -66,10 +66,10 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
         }
         .accessibilityAction(.escape) { closeChat() }
         .onChange(of: isExpanded) {
-            if !isExpanded { isFocused = false }
+            if !isExpanded { isFocused = false; session.endVoice() }
         }
         .onAppear { session.resumeQueued() }
-        .onDisappear { isFocused = false }
+        .onDisappear { isFocused = false; session.endVoice() }
     }
 
     private var composer: some View {
@@ -129,8 +129,14 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
 
     private var actionButton: some View {
         Button(action: performAction) {
-            Label(actionLabel, systemImage: actionSymbol)
-                .labelStyle(.iconOnly)
+            HStack(spacing: 4) {
+                if session.voiceConnecting {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label(actionLabel, systemImage: actionSymbol)
+                        .labelStyle(.iconOnly)
+                }
+            }
                 .font(.title3.weight(.semibold))
                 .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace.offUp))
                 .frame(width: actionSize, height: actionSize)
@@ -143,6 +149,7 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
             .regular.tint(isExpanded && hasMessage && !session.isResponding ? Color.accentColor : nil).interactive(),
             in: Circle()
         )
+        .accessibilityLabel(session.voiceConnecting ? "Cancel voice connection" : actionLabel)
         .accessibilityHint(actionHint)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: isSearchFocused)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: hasMessage)
@@ -155,21 +162,23 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
         if isSearchFocused { return "keyboard.chevron.compact.down" }
         guard isExpanded else { return "bubble.left" }
         if session.isResponding { return "stop.fill" }
-        return hasMessage ? "arrow.up" : "xmark"
+        if hasMessage { return "arrow.up" }
+        return session.supportsVoice ? (session.voiceActive ? "stop.fill" : "waveform") : "xmark"
     }
 
     private var actionLabel: String {
         if isSearchFocused { return "Dismiss keyboard" }
         guard isExpanded else { return session.presentation.title }
         if session.isResponding { return "Stop response" }
-        return hasMessage ? "Send message" : "Close chat"
+        if hasMessage { return "Send message" }
+        return session.supportsVoice ? (session.voiceActive ? "End voice conversation" : "Start voice conversation") : "Close chat"
     }
 
     private var actionHint: String {
         if isSearchFocused { return "Keeps the current search" }
         guard isExpanded else { return "Expands the instruction field. Tap the field to type." }
         if session.isResponding { return "Stops the current reply and keeps any text you are drafting" }
-        return hasMessage ? session.presentation.sendHint : "Collapses the instruction field"
+        return hasMessage ? session.presentation.sendHint : (session.supportsVoice ? "Starts or ends a voice conversation about this subject" : "Collapses the instruction field")
     }
 
     private func performAction() {
@@ -183,7 +192,10 @@ struct ChatOverlay<Session: ChatSessionPresenting>: View {
         } else if session.isResponding {
             session.stop()
         } else if !hasMessage {
-            closeChat()
+            if session.supportsVoice {
+                isFocused = false
+                if session.voiceActive { session.endVoice() } else { session.startVoice() }
+            } else { closeChat() }
         } else {
             withAnimation(reduceMotion ? nil : .spring(duration: 0.35, bounce: 0.04)) {
                 if session.send(message) {

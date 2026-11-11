@@ -58,6 +58,18 @@ API-funded Recall assessment and optional extra-credit verification request Fast
 
 Import extraction, Recall preparation, assessment, and scheduling execute on the server. The iOS app retains the native presentation and draft editing code; the former device execution, persistence, and request queue implementations have been removed. Presentation preferences remain local.
 
+## Subject voice chat
+
+The subject chat's empty composer action starts GPT-Live through a waveform button; typed messages retain Send and running text requests retain Stop. While voice is active, the empty composer action ends voice. The existing toolbar and background gestures still close chat. Import chat keeps its original controls. The standalone demo has been removed.
+
+GPT-Live handles duplex audio through a nonpersistent WebKit transport and sends user/assistant transcripts into the native chat message UI. Captions use independent speaker streams and approximate timestamps. Typed and spoken conversation context carries across modes. Starting voice requests microphone permission; ending voice, closing chat, losing the Knowledge connection, backgrounding or signing out stops capture/playback and cancels lookups. Sending a typed message also ends voice. No automatic reconnect creates another billable session.
+
+Voice captures the selected chat funding/connection and backend model when started. The fixed `gpt-live-1` voice session uses that credential without funding fallback. GPT-Live client delegation runs the existing read-only subject chat backend, using its subject-scoped search, passages and Recall tools with the captured chat selection. The server checks subject ownership for both session creation and each lookup. Backend results are returned to the voice session in bounded appends; spoken output, rather than hidden backend text, appears as the assistant transcript. Speech recognition or late captions can affect lookup context; this implementation has not been verified on-device.
+
+Voice lookups preload bounded actual passage excerpts, using ranked keyword matches or a small sample from each saved source for broad questions. Tool retrieval remains available for further reading. Only the final grounded answer is handed back, without accumulated tool-loop commentary or native truncation. Transport chunks are appended as silent context before one request to speak the complete result. Retrieval diagnostics record only source/passage counts, character counts, tool names and error codes, never source text or learner speech.
+
+Deploy both app and API. API funding needs the existing server OpenAI secret and positive request allowance; ChatGPT-funded Live remains experimental and previously returned `401/no_matching_rule`. Each API-funded handshake and lookup request consumes the existing request-count allowance, which is not a dollar or minutes budget. Voice duration and model usage are billed separately by OpenAI. Knowledge records handshake status, keeps transcripts only in the current chat session, and never sends credentials into JavaScript or logs SDP/transcripts.
+
 ## Build and review
 
 Use an iOS build and static review only, following [AGENTS.md](../../AGENTS.md). Do not add or run automated tests, fixtures, harnesses, or manual testing.

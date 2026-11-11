@@ -56,6 +56,19 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       if (!["GET", "HEAD"].includes(request.method) && (typeof request.headers.origin !== "string" || !config.auth.trustedOrigins.includes(request.headers.origin))) throw new DomainError("INVALID_ORIGIN", "This request origin is not allowed.", 403);
     });
     app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 }, (_request, body, done) => done(null, body));
+    app.post("/subjects/:subjectID/voice", { bodyLimit: 110_000 }, async (r, reply) => {
+      const { sdp, selection, messages } = z.strictObject({ sdp: z.string().min(1).max(65_536).startsWith("v=0"), selection: selectionSchema,
+        messages: z.array(z.strictObject({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(8) }).parse(r.body);
+      const controller = new AbortController();
+      const disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
+      reply.raw.once("close", disconnected);
+      try {
+        const owner = userID(r);
+        await ownedSubject(db, owner, parseID(r, "subjectID"));
+        return await ai.createSubjectVoiceSession(owner, selection, sdp, messages, AbortSignal.any([shutdown.signal, controller.signal]));
+      }
+      finally { reply.raw.off("close", disconnected); }
+    });
     app.get("/library", async (r): Promise<LibraryBootstrap> => {
       const owner = userID(r);
       const [subjects, drafts, prefs, connections] = await Promise.all([
@@ -151,11 +164,11 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.get("/subjects/:subjectID/recall", r => { const q = z.strictObject({ topicID: uuid.optional() }).parse(r.query); return recall.dashboard(userID(r), parseID(r, "subjectID"), q.topicID ?? null); });
     app.get("/subjects/:subjectID/recall/materials", r => { const q = pageSchema.extend({ includeQuestions: z.enum(["true", "false"]).default("true") }).parse(r.query); return recall.materials(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit, q.includeQuestions === "true"); });
     app.post("/subjects/:subjectID/chat", async (r, reply) => {
-      const b = z.strictObject({ selection: selectionSchema, messages: chatMessages }).parse(r.body);
+      const b = z.strictObject({ selection: selectionSchema, messages: chatMessages, voice: z.boolean().default(false) }).parse(r.body);
       const subjectID = parseID(r, "subjectID"); await ownedSubject(db, userID(r), subjectID);
       const controller = new AbortController(); reply.raw.once("close", () => controller.abort());
       const emit = stream(reply), service = new ChatService(db, ai);
-      try { const result = await service.subject(userID(r), subjectID, b.selection, b.messages, AbortSignal.any([shutdown.signal, controller.signal]), text => emit("delta", { text })); emit("completed", result); }
+      try { const result = await service.subject(userID(r), subjectID, b.selection, b.messages, AbortSignal.any([shutdown.signal, controller.signal]), text => emit("delta", { text }), b.voice); emit("completed", result); }
       catch (error) { emit("failed", { code: error instanceof DomainError ? error.code : "CHAT_FAILED", message: error instanceof DomainError ? error.message : "The conversation was interrupted. Retry to continue." }); }
       finally { if (!reply.raw.destroyed) reply.raw.end(); }
     });
