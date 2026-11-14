@@ -58,6 +58,8 @@ API-funded Recall assessment and optional extra-credit verification request Fast
 
 Import extraction, Recall preparation, assessment, and scheduling execute on the server. The iOS app retains the native presentation and draft editing code; the former device execution, persistence, and request queue implementations have been removed. Presentation preferences remain local.
 
+Recall and topic presentation models contain only values consumed by the native UI; the cloud adapters map server responses into them. Preparation metadata, grading details, and scheduling state remain server-owned. `RecallInput` retains its wire fields and equality checks so a changed question cannot silently reuse an incompatible unsent answer.
+
 ## Subject voice chat
 
 Recall also has **Start voice recall** below **Start Recall**, using a direct Realtime voice tutor with preloaded context, guided support, native answer controls and bounded generated visuals. The tutor makes one silent decision; the server validates and saves it, the UI accepts it, and only then is that same feedback spoken. Routine grading has no second model. The microphone pauses during processing and playback; **Interrupt** stops speech so the learner can respond. Next is app-controlled. **Review assessment** explicitly invokes the selected text provider. Protocol 5 synchronizes these turns without resetting audio between replies. **Continue in text** opens the same saved session. See [Voice Recall](../../docs/Voice-Recall.md) for assessment, lifecycle, funding and validation details.

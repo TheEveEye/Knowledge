@@ -1,17 +1,15 @@
 import Foundation
 
-nonisolated struct TopicRecord: Codable, Sendable, Equatable, Identifiable {
+nonisolated struct TopicRecord: Sendable, Identifiable {
     let id: UUID
     let parentTopicID: UUID?
     let name: String
     let sortOrder: Int
-    var isUserEdited = false
 }
 
-nonisolated struct ConceptPlacementRecord: Codable, Sendable, Equatable {
+nonisolated struct ConceptPlacementRecord: Sendable {
     let conceptID: UUID
     var topicID: UUID?
-    var isLocked = false
     var reason: String?
 }
 

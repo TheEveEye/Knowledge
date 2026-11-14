@@ -203,7 +203,7 @@ struct CloudSubjectView: View {
             TopicRecord(id: $0.id, parentTopicID: UUID(uuidString: $0.text("parentID")), name: $0.title, sortOrder: $0.fields["sortOrder"]?.int ?? 0)
         }, placements: library.entries.filter { $0.kind == "placement" && !$0.isRetired }.compactMap {
             guard let id = UUID(uuidString: $0.text("conceptID")) else { return nil }
-            return ConceptPlacementRecord(conceptID: id, topicID: UUID(uuidString: $0.text("topicID")), isLocked: $0.fields["isLocked"]?.flag ?? false, reason: $0.fields["reason"]?.string)
+            return ConceptPlacementRecord(conceptID: id, topicID: UUID(uuidString: $0.text("topicID")), reason: $0.fields["reason"]?.string)
         })
     }
     var body: some View {

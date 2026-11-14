@@ -59,7 +59,6 @@ import WebKit
         web?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
     }
     func setMuted(_ muted: Bool) { web?.evaluateJavaScript("window.subjectVoice?.mute(\(muted ? "true" : "false"))", completionHandler: nil) }
-    func setOutputEnabled(_ enabled: Bool) { web?.evaluateJavaScript("window.subjectVoice?.output(\(enabled ? "true" : "false"))", completionHandler: nil) }
     func setPaused(_ paused: Bool) { web?.evaluateJavaScript("window.subjectVoice?.pause(\(paused ? "true" : "false"))", completionHandler: nil) }
     func setListening(_ listening: Bool, turnID: String) {
         guard let encoded = try? JSONEncoder().encode(turnID), let literal = String(data: encoded, encoding: .utf8) else { return }

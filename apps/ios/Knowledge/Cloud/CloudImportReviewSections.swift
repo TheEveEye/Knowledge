@@ -24,7 +24,7 @@ struct CloudImportReviewSections: View {
             return conceptID == concept.id || conceptID == id
         }?.value("record").value("fields")
         let value = saved.map { $0.fields["isLocked"]?.flag == true || $0.fields["topicID"]?.string != nil ? CloudJSON.object($0.fields) : proposed ?? .object($0.fields) } ?? proposed ?? .null
-        return .init(conceptID: concept.id, topicID: UUID(uuidString: value.text("topicID")), isLocked: value.value("isLocked").flag, reason: value.value("reason").string)
+        return .init(conceptID: concept.id, topicID: UUID(uuidString: value.text("topicID")), reason: value.value("reason").string)
     }
     private var topicSummaries: [ImportTopicSummary] {
         let values = ImportTopicSummary.make(topics: topics, placements: editor.draft.concepts.map(placement), concepts: editor.draft.concepts.map { ($0.id, $0.name) })
@@ -126,7 +126,7 @@ struct CloudImportReviewSections: View {
                     ForEach(editor.draft.coverage.filter { $0.disposition != .extracted }, id: \.segmentID) { decision in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(decision.reason).foregroundStyle(.secondary)
-                            Button("View source") { evidence = .init(title: "Passage coverage", references: [.init(sourceID: editor.draft.sourceID, segmentID: decision.segmentID, quote: "")]) }
+                            Button("View source") { evidence = .init(references: [.init(sourceID: editor.draft.sourceID, segmentID: decision.segmentID, quote: "")]) }
                             if decision.disposition == .uncertain {
                                 CloudActionButton(editor.draft.isPassageReviewed(decision.segmentID) ? "Reopen review" : "Mark as reviewed", key: "review-passage-" + decision.segmentID, systemImage: editor.draft.isPassageReviewed(decision.segmentID) ? "arrow.uturn.backward" : "checkmark.circle") {
                                     try await editor.flush()
@@ -149,17 +149,17 @@ struct CloudImportReviewSections: View {
             guard let index = editor.draft.concepts.firstIndex(where: { $0.id == fallback.id }) else { return }; editor.draft.concepts[index] = value; editor.edited()
         }), target: fallback.mergeTargetID.flatMap { id in library.entries.first { $0.id == id }?.title }, onSelect: {
             ReviewSelection.concept(fallback.id, selected: $0, draft: &editor.draft); editor.edited()
-        }, onEvidence: { evidence = .init(title: fallback.name, references: fallback.evidence) }, onResolutionEvidence: { evidence = .init(title: "Suggestion context", references: $0) })
+        }, onEvidence: { evidence = .init(references: fallback.evidence) }, onResolutionEvidence: { evidence = .init(references: $0) })
     }
     private func factFields(_ fallback: DraftFact) -> some View {
         FactReviewFields(value: Binding(get: { editor.draft.facts.first { $0.id == fallback.id } ?? fallback }, set: { value in
             guard let index = editor.draft.facts.firstIndex(where: { $0.id == fallback.id }) else { return }; editor.draft.facts[index] = value; editor.edited()
-        }), onSelect: { ReviewSelection.fact(fallback.id, selected: $0, draft: &editor.draft); editor.edited() }, onEvidence: { evidence = .init(title: "Fact evidence", references: fallback.evidence) })
+        }), onSelect: { ReviewSelection.fact(fallback.id, selected: $0, draft: &editor.draft); editor.edited() }, onEvidence: { evidence = .init(references: fallback.evidence) })
     }
     private func connectionFields(_ fallback: DraftConnection) -> some View {
         func name(_ id: UUID) -> String { editor.draft.concepts.first { $0.id == id }?.name ?? library.entries.first { $0.id == id }?.title ?? "Unavailable concept" }
         return ConnectionReviewFields(value: Binding(get: { editor.draft.connections.first { $0.id == fallback.id } ?? fallback }, set: { value in
             guard let index = editor.draft.connections.firstIndex(where: { $0.id == fallback.id }) else { return }; editor.draft.connections[index] = value; editor.edited()
-        }), from: name(fallback.fromConceptID), to: name(fallback.toConceptID), onSelect: { ReviewSelection.connection(fallback.id, selected: $0, draft: &editor.draft); editor.edited() }, onEvidence: { evidence = .init(title: "Connection evidence", references: fallback.evidence) })
+        }), from: name(fallback.fromConceptID), to: name(fallback.toConceptID), onSelect: { ReviewSelection.connection(fallback.id, selected: $0, draft: &editor.draft); editor.edited() }, onEvidence: { evidence = .init(references: fallback.evidence) })
     }
 }

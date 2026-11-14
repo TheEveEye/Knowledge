@@ -30,11 +30,5 @@ import Observation
     func stopGradingAndEditAnswerConfirmed() async -> Bool
 }
 extension RecallSessionPresenting {
-    var isPresentingPreloadedQuestion: Bool { false }
-    var hasStaleInput: Bool { false }
-    var requestAction: String? { nil }
-    var canRetryRequest: Bool { state.episode?.phase.hasPrefix("awaiting") == true }
-    var requestLabel: String { state.episode?.pendingOperation == "explain" ? "Preparing an explanation…" : "Checking your answer…" }
-    func reloadSession() { }
     func skip() { skip(problem: nil) }
 }

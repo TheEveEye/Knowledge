@@ -12,7 +12,7 @@ final class ChatGPTAPIClient {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        session = URLSession(configuration: configuration, delegate: AuthenticationRedirectDelegate(), delegateQueue: nil)
+        session = URLSession(configuration: configuration, delegate: KnowledgeRedirectPolicy(), delegateQueue: nil)
     }
 
     func authorizationEndpoint() async throws -> URL {
@@ -204,13 +204,6 @@ final class ChatGPTAPIClient {
         guard value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { return nil }
         let encoded = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         return Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4))
-    }
-}
-
-nonisolated private final class AuthenticationRedirectDelegate: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
     }
 }
 

@@ -18,11 +18,11 @@ struct CloudRecallView: View {
     private var overview: RecallOverview {
         let value = dashboard.value("overview")
         var result = RecallOverview()
-        result.total = value.value("total").int; result.prepared = value.value("prepared").int; result.assessed = value.value("assessed").int
+        result.prepared = value.value("prepared").int; result.assessed = value.value("assessed").int
         result.due = value.value("due").int; result.new = value.value("new").int; result.issues = value.value("issues").int
         result.materialPending = value.value("materialPending").int; result.materialBlocked = value.value("materialBlocked").int
         result.contextMaterials = value.value("contextMaterials").int; result.duplicateMaterials = value.value("duplicateMaterials").int
-        result.nextDueAt = CloudDates.date(value.text("nextDueAt")); result.scopeName = value.text("scopeName")
+        result.nextDueAt = CloudDates.date(value.text("nextDueAt"))
         return result
     }
     private var preparationJob: CloudJSON? { library.currentJob(kind: "prepareRecall") }

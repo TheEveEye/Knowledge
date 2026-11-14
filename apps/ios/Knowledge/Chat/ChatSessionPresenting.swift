@@ -10,7 +10,6 @@ nonisolated struct ChatMessage: Identifiable {
     var retryID: UUID? = nil
     var requestText: String? = nil
     var isComplete = false
-    var accountID: String? = nil
     var usageLimitReached = false
 }
 
@@ -33,12 +32,4 @@ nonisolated struct ChatMessage: Identifiable {
     var voiceConnecting: Bool { get }
     func startVoice()
     func endVoice()
-}
-
-extension ChatSessionPresenting {
-    var supportsVoice: Bool { false }
-    var voiceActive: Bool { false }
-    var voiceConnecting: Bool { false }
-    func startVoice() {}
-    func endVoice() {}
 }

@@ -5,7 +5,7 @@ import SwiftUI
 /// The native Recall screen issues server commands through this account-scoped adapter.
 @MainActor @Observable final class CloudRecallController: RecallSessionPresenting {
     let sessionID: String
-    private(set) var state = RecallSessionState(queue: [], episode: nil)
+    private(set) var state = RecallSessionState(episode: nil)
     private(set) var isRequesting = false
     private(set) var error: String?
     private(set) var usageLimited = false
@@ -119,10 +119,9 @@ import SwiftUI
         // This result is deterministic and the answer is already on the device.
         // Reveal it immediately; advancement still requires server confirmation.
         if episode.turns.isEmpty {
-            var turn = RecallTurn(id: UUID(), prompt: episode.question.prompt, kind: .initial, answer: "I don't know.", submittedAt: .now, input: .text)
-            turn.assessment = RecallAssessment(outcome: .incorrect, metCriterionIDs: [], missingCriterionIDs: episode.question.criteria.map(\.id),
-                contradictions: [], feedback: "Review the answer below, then practise it again later.", followUp: nil, followUpKind: nil,
-                sourceConcern: nil, model: "server:self-reported-unknown", policyVersion: RecallAssessmentPolicy.version, responseID: nil, assessedAt: .now)
+            var turn = RecallTurn(id: UUID(), prompt: episode.question.prompt, kind: .initial, answer: "I don't know.", input: .text)
+            turn.assessment = RecallAssessment(outcome: .incorrect, metCriterionIDs: [],
+                feedback: "Review the answer below, then practise it again later.", followUp: nil, followUpKind: nil, sourceConcern: nil)
             episode.turns = [turn]
         }
         episode.phase = "feedback"; episode.draft = ""; episode.response = nil
@@ -141,7 +140,7 @@ import SwiftUI
     }
     func close() {
         closed = true; generation = UUID(); task?.cancel(); task = nil; pending = nil; commandPath = nil
-        state = .init(queue: [], episode: nil); presentation = .null; upcoming = []; isPresentingPreloadedQuestion = false
+        state = .init(episode: nil); presentation = .null; upcoming = []; isPresentingPreloadedQuestion = false
         error = nil; isRequesting = false; formDirty = false; hasStaleInput = false
     }
     func skip(problem: String? = nil) {
@@ -209,7 +208,7 @@ import SwiftUI
                 // Retries keep this turn until the server replaces it on refresh.
                 let turn = RecallTurn(id: UUID(), prompt: episode.nextPrompt,
                     kind: episode.turns.isEmpty ? .initial : (episode.lastAssessment?.followUpKind ?? .clarification),
-                    answer: answer, submittedAt: .now, input: episode.nextInput, response: episode.response)
+                    answer: answer, input: episode.nextInput)
                 episode.turns.append(turn)
                 episode.phase = "awaiting"; episode.pendingOperation = "assess"
                 state.episode = episode

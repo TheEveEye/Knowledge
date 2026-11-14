@@ -262,9 +262,9 @@ import SwiftUI
         if let message { failed[turn.id] = turn; update(turn.id, text: message, retryID: turn.id) }
         else { messages.removeAll { $0.id == turn.id } }
     }
-    private func update(_ id: UUID, text: String, complete: Bool = false, retryID: UUID? = nil) {
+    private func update(_ id: UUID, text: String, retryID: UUID? = nil) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text = text; messages[index].isComplete = complete; messages[index].retryID = retryID
+        messages[index].text = text; messages[index].isComplete = false; messages[index].retryID = retryID
     }
     private func notice(_ text: String) { messages.append(.init(id: UUID(), role: .status, text: text, isComplete: true)) }
 }
@@ -302,7 +302,7 @@ struct CloudSubjectChatOverlay: View {
             })
             .sheet(item: $citation) { passage in
                 if let sourceID = UUID(uuidString: passage.sourceID) {
-                    EvidenceView(presentation: .init(title: "Supporting passages", references: [.init(sourceID: sourceID, segmentID: passage.passageID, quote: "")]))
+                    EvidenceView(presentation: .init(references: [.init(sourceID: sourceID, segmentID: passage.passageID, quote: "")]))
                         .cloudConnectionGate()
                 }
             }

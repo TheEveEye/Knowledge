@@ -63,7 +63,7 @@ struct CloudSavedInterpretationsSection: View {
                         ConceptResolutionProvenance(suggestion: item.suggestion)
                         if item.index != nil, !item.suggestion.changedLibraryName, item.suggestion.suggestedName != nil { Text("The existing concept’s name was retained when this source was merged.").font(.caption).foregroundStyle(.secondary) }
                         if !item.suggestion.evidence.isEmpty {
-                            Button("View supporting note context") { evidence = .init(title: "Suggestion context", references: item.suggestion.evidence) }.buttonStyle(.borderless)
+                            Button("View supporting note context") { evidence = .init(references: item.suggestion.evidence) }.buttonStyle(.borderless)
                         }
                         CloudActionButton("Undo saved suggestion", key: "undo-suggestion-" + item.id) {
                             guard let version = library.activeSubject?.version else { return }
@@ -78,7 +78,7 @@ struct CloudSavedInterpretationsSection: View {
 
 extension CloudEntity {
     var evidencePresentation: EvidencePresentation {
-        .init(title: title, references: (fields["evidence"]?.array ?? []).compactMap {
+        .init(references: (fields["evidence"]?.array ?? []).compactMap {
             guard let sourceID = UUID(uuidString: $0.text("sourceID")) else { return nil }
             return EvidenceReference(sourceID: sourceID, segmentID: $0.text("segmentID"), quote: $0.text("quote"))
         })

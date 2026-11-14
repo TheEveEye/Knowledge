@@ -25,7 +25,6 @@ import Observation
     private var subjectInvalidations: [UUID: Int] = [:]
     private(set) var busyActions: Set<String> = []
     var message: String?
-    var selection = CloudSelection()
     private(set) var isForeground = true
     private var chatSessions: [UUID: CloudChatSession] = [:]
     private var importEditors: [String: CloudImportEditor] = [:]
@@ -39,7 +38,6 @@ import Observation
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var connectionGeneration = UUID()
     @ObservationIgnored private var refreshGeneration = UUID()
-    @ObservationIgnored private var selectionLoaded = false
     @ObservationIgnored private var subjectSnapshots: [UUID: CloudSubjectSnapshot] = [:]
     @ObservationIgnored private var subjectEpochs: [UUID: UUID] = [:]
     @ObservationIgnored private var snapshotEpochs: [UUID: UUID] = [:]
@@ -124,7 +122,6 @@ import Observation
                             }
                             if value.text("resource") != "recallSessions" { scheduleRefresh() }
                         }
-                        _ = value
                     }
                     try Task.checkCancellation()
                     guard generation == run, connectionGeneration == connection, isForeground else { return }
@@ -283,17 +280,12 @@ import Observation
         allDrafts = allDraftValues.sorted { $0.text("updatedAt") > $1.text("updatedAt") }
         preferences = prefs; connections = configuration.value("items").array
         selfHostedEnabled = configuration.value("selfHostedEnabled").flag; apiEnabled = configuration.value("apiEnabled").flag
-        if !selectionLoaded {
-            if let data = try? JSONEncoder().encode(prefs.value("values").value("aiSelection")), let saved = try? JSONDecoder().decode(CloudSelection.self, from: data) { selection = saved }
-            selectionLoaded = true
-        }
         if let selected = activeSubjectID, !subjectIDs.contains(selected) { activeSubjectID = nil; clearSubject() }
         hasLoaded = true
         // Initial/foreground/reconnect reads must succeed before the library is accessible.
         // Subsequent refreshes leave the confirmed screen visible while requests are running.
         if let selected = activeSubjectID, let subject = subjects.first(where: { $0.id == selected }) {
-            async let snapshot = loadSubject(subject, force: forceSubject)
-            let value = try await snapshot
+            let value = try await loadSubject(subject, force: forceSubject)
             try Task.checkCancellation()
             guard generation == run, refreshGeneration == refresh else { return }
             if activeSubjectID == selected { display(value) }
@@ -498,7 +490,7 @@ import Observation
             } catch let failure as CloudFailure where failure.code == "VERSION_CONFLICT" && attempt == 0 { continue }
         }
     }
-    func loadModels(selection: CloudSelection? = nil) async throws { models = try await client.json("/api/v1/ai/models", method: "POST", body: (selection ?? self.selection).json).value("items").array }
+    func loadModels(selection: CloudSelection) async throws { models = try await client.json("/api/v1/ai/models", method: "POST", body: selection.json).value("items").array }
     func downloadSource(_ sourceID: String) async throws -> URL {
         let run = generation
         guard UUID(uuidString: sourceID) != nil else { throw KnowledgeAccountError.invalidResponse }
@@ -509,10 +501,9 @@ import Observation
         guard generation == run else { try? FileManager.default.removeItem(at: file); throw CancellationError() }
         return file
     }
-    @discardableResult func upload(data: Data, title: String, kind: String, selection requestedSelection: CloudSelection? = nil) async throws -> UUID {
+    func upload(data: Data, title: String, kind: String, selection: CloudSelection) async throws -> UUID {
         let run = generation
         guard let subject = activeSubject else { throw CloudFailure(code: "SUBJECT_UNAVAILABLE", message: "Choose a subject before importing.") }
-        let selection = requestedSelection ?? self.selection(for: "import")
         let fingerprint = digest(Data((subject.id.uuidString + ":" + title + ":" + kind + ":").utf8) + data)
         let operationID = try operationID(for: fingerprint), prefix = "/api/v1/subjects/" + subject.id.uuidString.lowercased()
         var components = URLComponents(); components.queryItems = [.init(name: "operationID", value: operationID.uuidString.lowercased()), .init(name: "title", value: title), .init(name: "kind", value: kind)]

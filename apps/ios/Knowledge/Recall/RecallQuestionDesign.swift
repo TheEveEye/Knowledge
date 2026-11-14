@@ -1,58 +1,8 @@
 import Foundation
 
-nonisolated struct RecallLearningPlan: Codable, Sendable, Equatable {
-    enum Disposition: String, Codable, Sendable { case practice, context, duplicate, sourceIssue }
-    let version: String
-    let disposition: Disposition
-    let objective: String
-    let essentialMeanings: [String]
-    let contextualMeanings: [String]
-    let optionalPrecision: [String]
-    let reason: String
-    let evidenceQuotes: [String]
-    var canonicalMaterialID: String? = nil
-    var canonicalSignature: String? = nil
-}
-
-nonisolated enum RecallPracticeValue: String, Codable, Sendable { case substantive, organizational }
-
-nonisolated enum RecallQuestionKind: String, Codable, Sendable { case focused, integrated, connection }
-nonisolated enum RecallRetrievalGoal: String, Codable, Sendable, CaseIterable {
-    case definition, explanation, scalarQuantity, distinction, sequence, association
-}
-
-nonisolated struct RecallDesignQuality: Codable, Sendable, Equatable {
-    let objective: String
-    let combination: String
-    let comparisonAxis: String
-    let integrationBenefit: String
-    let focused: Bool
-    let usefulRetrieval: Bool
-    let cueSafe: Bool
-    var matchingUnique: Bool
-}
-
-nonisolated struct RecallPrecisionNote: Codable, Sendable, Equatable, Identifiable {
+nonisolated struct RecallPrecisionNote: Sendable, Identifiable {
     let id: String
-    let materialID: String
     let text: String
-    let sourceQuote: String
-}
-
-nonisolated struct RecallQuestionDisclosure: Codable, Sendable, Equatable {
-    let materialID: String
-    let signature: String
-    let visibleQuotes: [String]
-    let evidenceQuotes: [String]
-    let reason: String
-}
-
-nonisolated struct RecallCriterionDecision: Codable, Sendable, Equatable {
-    let status: RecallCriterionStatus
-    let evidenceQuotes: [String]
-    let missingMeaning: String?
-    /// Zero-based learner turn where ALL required meaning was first demonstrated.
-    var completionTurn: Int? = nil
 }
 
 nonisolated enum RecallInputKind: String, Codable, Sendable, CaseIterable { case text, choice, number, slider, ordering, matching }
@@ -106,17 +56,13 @@ nonisolated struct RecallInput: Codable, Sendable, Equatable {
 }
 nonisolated struct RecallMatch: Codable, Sendable, Equatable { let leftID: String; let rightID: String; var criterionID: String = "" }
 
-nonisolated struct RecallQuestionBinding: Codable, Sendable, Equatable {
+nonisolated struct RecallQuestionBinding: Sendable {
     let materialID: String
-    let signature: String
-    let conceptID: UUID
     let label: String
     let criterionIDs: [String]
     /// Independent preparation review checked collective coverage of this complete saved claim.
     /// Missing on old banks; absence must never be treated as proof of coverage.
     var completeCoverage: Bool? = nil
-    /// Alternative names for the claim's actual subject, not a shared endpoint/topic.
-    var creditSubjects: [String]? = nil
 }
 
 extension RecallQuestion {

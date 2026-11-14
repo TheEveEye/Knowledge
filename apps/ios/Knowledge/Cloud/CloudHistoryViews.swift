@@ -67,7 +67,7 @@ struct CloudRevisionView: View {
                                 if after != .null, !after.value("isRetired").flag { Text("After").font(.caption).foregroundStyle(.secondary); Text(title(after)); Text(detail(after)).foregroundStyle(.secondary) }
                                 else { Text(after.value("redirectID") == .null ? "Removed from this subject" : "Combined with an equivalent entry").foregroundStyle(.secondary) }
                                 if !record.value("fields").value("evidence").array.isEmpty {
-                                    Button("View source") { evidence = .init(title: title(record), references: record.value("fields").value("evidence").array.compactMap { value in
+                                    Button("View source") { evidence = .init(references: record.value("fields").value("evidence").array.compactMap { value in
                                         guard let id = UUID(uuidString: value.text("sourceID")) else { return nil }; return .init(sourceID: id, segmentID: value.text("segmentID"), quote: value.text("quote"))
                                     }) }.buttonStyle(.borderless)
                                 }

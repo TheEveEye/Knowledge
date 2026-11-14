@@ -254,7 +254,6 @@ struct SubjectSettingsView: View {
 
 nonisolated struct EvidencePresentation: Identifiable {
     let id = UUID()
-    let title: String
     let references: [EvidenceReference]
 }
 

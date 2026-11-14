@@ -126,7 +126,7 @@ private struct CloudRecallQuestionBankRow: View {
                 }
                 .disabled(busy)
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                    Button("View source", systemImage: "doc.text.magnifyingglass") { run { try await expose(); evidence = .init(title: "Recall source", references: question.sourceEvidence) } }.tint(.blue)
+                    Button("View source", systemImage: "doc.text.magnifyingglass") { run { try await expose(); evidence = .init(references: question.sourceEvidence) } }.tint(.blue)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button(target.value("excluded").flag ? "Restore" : "Exclude", systemImage: target.value("excluded").flag ? "arrow.uturn.backward" : "pause.circle") {

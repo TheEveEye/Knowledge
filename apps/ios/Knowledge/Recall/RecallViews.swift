@@ -169,7 +169,7 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
         }
         .sheet(isPresented: $showsSource) {
             if let episode = controller.state.episode {
-                EvidenceView(presentation: .init(title: "Recall source", references: episode.question.sourceEvidence))
+                EvidenceView(presentation: .init(references: episode.question.sourceEvidence))
             }
         }
         .sheet(item: $challenge) { item in
