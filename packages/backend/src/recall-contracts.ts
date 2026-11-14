@@ -38,6 +38,18 @@ export function verificationSchema(question: Question, unitKeys: string[]) {
   });
 }
 export const judgmentDecision = z.strictObject({ status: z.enum(["met", "partial", "missing"]), evidenceQuotes: z.array(text).max(3), missingMeaning: nullable, completionTurn: z.number().int().nonnegative().nullable() });
+// Compact tool report from the same model that speaks the feedback. The server
+// supplies the original answer; the model cannot replace it with a paraphrase.
+export const voiceJudgmentSchema = z.strictObject({
+  disposition: z.enum(["answer", "not_answer"]).optional(), inputIDs: z.array(text.max(160)).max(20).optional(),
+  taskID: text.max(240), answerTurn: z.number().int().min(0).max(2), feedback: text.max(1600),
+  decisions: z.array(z.strictObject({ criterionID: text.max(160), status: z.enum(["met", "partial", "missing"]),
+    evidenceTurn: z.number().int().min(0).max(2).nullable(), quote: z.string().max(400), missingMeaning: nullable,
+    retractionReason: z.string().min(1).max(600).optional() })).max(6),
+  uncertainty: nullable, followUp: z.strictObject({ prompt: text.max(1500), criterionID: text.max(160), kind: z.enum(["clarification", "hint"]) }).nullable(),
+  answerInput: z.strictObject({ optionID: z.string().max(160).nullable(), number: z.number().nullable(), order: z.array(z.string().max(160)).max(30),
+    pairs: z.array(z.strictObject({ leftID: z.string().max(160), rightID: z.string().max(160) })).max(30) }).optional(),
+});
 export const extraDecisionSchema = (ids: string[]) => z.strictObject({ contextConsistent: z.boolean(), decisions: keyed(ids, judgmentDecision) });
 export function judgmentSchema(ids: string[], allowFollowUp: boolean, extras: { key: string; criteria: { id: string }[] }[] = []) {
   const followUp = z.strictObject({ prompt: text, kind: z.enum(["clarification", "furtherAssessment", "hint"]), criterionID: text, interpretations: z.array(text), input: answerInputSchema.nullable() });

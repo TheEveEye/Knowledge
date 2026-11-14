@@ -1,16 +1,25 @@
 // Credential-free audio transport, hosted on an HTTPS origin for microphone access.
 // UI, credentials, transcript presentation and subject retrieval stay native.
-export function subjectVoiceHTML(nonce: string) {
+export function subjectVoiceHTML(nonce: string, recall = false) {
   return String.raw`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body><audio id="audio" autoplay playsinline></audio><script nonce="${nonce}">
 (() => {
   const audio = document.getElementById('audio');
   const bridge = body => window.webkit.messageHandlers.subjectVoice.postMessage(body);
+  const recall = ${recall};
   let peer, stream, events, timer, closeTimer, lostTimer, run = 0, ready = false, ending = false;
+  let outputAllowed = true, paused = false, userMuted = false;
+  let serverListening = !recall, localSpeaking = false, interrupted = false, expectedTurn = '', drainTimer;
+  const responseTurns = new Map();
+  audio.muted = recall;
+  function updateMic() {
+    stream?.getAudioTracks().forEach(track => { track.enabled = !userMuted && !paused && (!recall || serverListening && !localSpeaking); });
+  }
   const seen = new Set();
   function cleanup() {
     run++; ready = false; ending = false;
-    clearTimeout(timer); clearTimeout(closeTimer); clearTimeout(lostTimer);
+    clearTimeout(timer); clearTimeout(closeTimer); clearTimeout(lostTimer); clearTimeout(drainTimer);
+    localSpeaking = false; responseTurns.clear();
     stream?.getTracks().forEach(track => track.stop()); stream = null;
     if (events) { events.onclose = null; events.close(); events = null; }
     if (peer) { peer.onconnectionstatechange = null; peer.close(); peer = null; }
@@ -23,6 +32,9 @@ export function subjectVoiceHTML(nonce: string) {
     if (ending) { if (immediate) cleanup(); return; }
     ending = true;
     stream?.getTracks().forEach(track => track.stop()); audio.pause();
+    // Recall's authenticated backend hangs up the Realtime call. Close local
+    // capture immediately; session.close belongs to GPT-Live subject chat only.
+    if (recall) { report('ended'); cleanup(); return; }
     if (ready && events?.readyState === 'open') {
       try { send({ type: 'session.close' }); } catch { cleanup(); return; }
       closeTimer = setTimeout(() => { report('ended'); cleanup(); }, 5000);
@@ -68,7 +80,7 @@ export function subjectVoiceHTML(nonce: string) {
     try {
       const captured = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
       if (current !== run) { captured.getTracks().forEach(track => track.stop()); return; }
-      stream = captured; const connection = new RTCPeerConnection(); peer = connection;
+      stream = captured; updateMic(); const connection = new RTCPeerConnection(); peer = connection;
       connection.ontrack = event => {
         if (current !== run) return;
         audio.srcObject = event.streams[0] || new MediaStream([event.track]);
@@ -82,15 +94,30 @@ export function subjectVoiceHTML(nonce: string) {
       };
       stream.getTracks().forEach(track => connection.addTrack(track, stream));
       events = connection.createDataChannel('oai-events');
+      events.onopen = () => {
+        if (recall && current === run && !ending) { ready = true; clearTimeout(timer); report('started'); }
+      };
       events.onmessage = message => {
         if (current !== run) return;
         try {
           const event = JSON.parse(message.data);
-          if (event.type === 'session.started') { ready = true; clearTimeout(timer); report('started'); }
-          if (event.type === 'session.input_transcript.delta' || event.type === 'session.output_transcript.delta')
+          if (recall && event.type === 'response.created') {
+            responseTurns.set(event.response.id, event.response.metadata?.utteranceID || '');
+            if (responseTurns.size > 100) responseTurns.delete(responseTurns.keys().next().value);
+          }
+          if (recall && event.type === 'output_audio_buffer.started') {
+            clearTimeout(drainTimer); localSpeaking = true; updateMic();
+            audio.muted = paused || !outputAllowed || interrupted || responseTurns.get(event.response_id) !== expectedTurn;
+          }
+          if (recall && (event.type === 'output_audio_buffer.stopped' || event.type === 'output_audio_buffer.cleared')) {
+            clearTimeout(drainTimer);
+            drainTimer = setTimeout(() => { if (current === run) { localSpeaking = false; updateMic(); } }, 250);
+          }
+          if (!recall && event.type === 'session.started') { ready = true; clearTimeout(timer); report('started'); }
+          if (!recall && (event.type === 'session.input_transcript.delta' || event.type === 'session.output_transcript.delta'))
             report('transcript', { role: event.type === 'session.input_transcript.delta' ? 'user' : 'assistant', delta: event.delta, start: event.start_ms, end: event.end_ms });
-          if (event.type === 'session.delegation.created') void delegate(event, current);
-          if (event.type === 'error') fail(event.error?.message || 'The voice session reported an error.');
+          if (!recall && event.type === 'session.delegation.created') void delegate(event, current);
+          if (event.type === 'error' && !['response_cancel_not_active', 'response_already_in_progress'].includes(event.error?.code)) fail(event.error?.message || 'The voice session reported an error.');
           if (event.type === 'session.closed') { report('ended'); cleanup(); }
         } catch { fail('The voice session returned an unreadable event.'); }
       };
@@ -108,7 +135,16 @@ export function subjectVoiceHTML(nonce: string) {
       await connection.setRemoteDescription({ type: 'answer', sdp: result.sdp });
     } catch (error) { if (current === run) fail(String(error.message || error)); }
   }
-  window.subjectVoice = { start, stop };
+  function mute(value) { userMuted = value; updateMic(); }
+  function listen(value, turnID) {
+    serverListening = value;
+    if (turnID !== expectedTurn) { expectedTurn = turnID; interrupted = false; audio.muted = true; }
+    updateMic();
+  }
+  function interrupt() { interrupted = true; audio.muted = true; localSpeaking = false; updateMic(); }
+  function output(enabled) { outputAllowed = enabled; audio.muted = paused || !enabled; }
+  function pause(value) { paused = value; updateMic(); audio.muted = value || !outputAllowed || interrupted; }
+  window.subjectVoice = { start, stop, mute, pause, output, listen, interrupt };
   window.addEventListener('pagehide', () => stop(true));
   document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
 })();

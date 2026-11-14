@@ -7,6 +7,7 @@ struct CloudRecallView: View {
     @State private var sessions: [CloudJSON] = []
     @State private var dashboard = CloudJSON.null
     @State private var sessionID: String?
+    @State private var voiceSessionID: String?
     @State private var error: String?
     @State private var questions = false
     @State private var category: RecallOverviewCategory?
@@ -37,12 +38,19 @@ struct CloudRecallView: View {
             RecallOverviewCards(overview: overview) { category = $0 }.listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             Section {
                 if let active {
-                    Button("Resume session", systemImage: "play.fill") { sessionID = active.text("id") }
+                    Button("Resume session", systemImage: "play.fill") {
+                        if active.value("state").text("mode") == "voice" { voiceSessionID = active.text("id") }
+                        else { sessionID = active.text("id") }
+                    }
                     Button("Finish session", systemImage: "checkmark.circle") { sessionToFinish = active }
                 } else {
                     CloudActionButton("Start Recall", key: "recall-start-" + subjectID.uuidString, systemImage: "brain.head.profile") {
                         let result = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/sessions", fields: ["selection": library.selection(for: "assessment").json, "topicID": topicID.map { .string($0.uuidString.lowercased()) } ?? .null])
                         sessionID = result.value("session").text("id")
+                    }.disabled(overview.due + overview.new == 0)
+                    CloudActionButton("Start voice recall", key: "recall-voice-start-" + subjectID.uuidString, systemImage: "waveform") {
+                        let result = try await library.mutate("/api/v1/subjects/\(subjectID.uuidString.lowercased())/recall/sessions", fields: ["selection": library.selection(for: "assessment").json, "topicID": topicID.map { .string($0.uuidString.lowercased()) } ?? .null, "mode": .string("voice")])
+                        voiceSessionID = result.value("session").text("id")
                     }.disabled(overview.due + overview.new == 0)
                 }
             }
@@ -90,6 +98,7 @@ struct CloudRecallView: View {
             }
         }
         .navigationDestination(isPresented: Binding(get: { sessionID != nil }, set: { if !$0 { sessionID = nil } })) { if let sessionID { CloudRecallSessionScreen(sessionID: sessionID) } }
+        .navigationDestination(isPresented: Binding(get: { voiceSessionID != nil }, set: { if !$0 { voiceSessionID = nil } })) { if let voiceSessionID { CloudRecallVoiceScreen(sessionID: voiceSessionID) } }
         .sheet(isPresented: $questions) { CloudRecallQuestionLibrary(subjectID: subjectID, topicID: topicID) }
         .sheet(item: $category) { category in CloudRecallQuestionLibrary(subjectID: subjectID, topicID: topicID, category: category) }
         .sheet(isPresented: $account) { CloudChatGPTAccountView() }

@@ -7,6 +7,7 @@ export * from "./jobs.js";
 export * from "./ai.js";
 export * from "./imports.js";
 export * from "./recall.js";
+export * from "./recall-voice.js";
 export * from "./structured.js";
 export * from "./worker.js";
 export * from "./chat.js";

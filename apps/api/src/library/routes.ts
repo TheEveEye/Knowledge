@@ -8,6 +8,7 @@ import type { AccountPreferences, APIError, ImportDraft, Invalidation, JSONObjec
 import type { Authentication } from "../auth/auth.js";
 import { authHeaders, forwardHeaders } from "../auth/routes.js";
 import type { Config } from "../config.js";
+import { RecallVoiceService, voiceCommandSchema, voicePresentedSchema } from "@knowledge/backend";
 
 const pageSchema = z.object({ cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) });
 const createSchema = z.strictObject({ operationID: uuid, name: z.string().min(1).max(160) });
@@ -40,6 +41,8 @@ function stream(reply: FastifyReply) {
 export function registerLibraryRoutes(parent: FastifyInstance, db: Database, pool: pg.Pool, auth: Authentication, config: Config) {
   const files = new FileStore(), library = new LibraryService(db), queue = new JobQueue(db), ai = new AIService(db, pool), sources = new SourceService(db, files), importer = new ImportService(db, ai, queue), recall = new RecallService(db, ai, queue);
   const shutdown = new AbortController(); parent.addHook("preClose", async () => { shutdown.abort(); });
+  const recallVoice = new RecallVoiceService(recall, ai);
+  parent.addHook("preClose", async () => { await recallVoice.close(); });
   parent.register(async app => {
     app.decorateRequest("knowledgeUserID", null);
     app.setErrorHandler((error, request, reply) => {
@@ -57,7 +60,8 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     });
     app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 }, (_request, body, done) => done(null, body));
     app.post("/subjects/:subjectID/voice", { bodyLimit: 110_000 }, async (r, reply) => {
-      const { sdp, selection, messages } = z.strictObject({ sdp: z.string().min(1).max(65_536).startsWith("v=0"), selection: selectionSchema,
+      // Accept older clients' selection field, but voice funding is server-owned.
+      const { sdp, messages } = z.strictObject({ sdp: z.string().min(1).max(65_536).startsWith("v=0"), selection: selectionSchema.optional(),
         messages: z.array(z.strictObject({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(8) }).parse(r.body);
       const controller = new AbortController();
       const disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
@@ -65,7 +69,7 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       try {
         const owner = userID(r);
         await ownedSubject(db, owner, parseID(r, "subjectID"));
-        return await ai.createSubjectVoiceSession(owner, selection, sdp, messages, AbortSignal.any([shutdown.signal, controller.signal]));
+        return await ai.createSubjectVoiceSession(owner, sdp, messages, AbortSignal.any([shutdown.signal, controller.signal]));
       }
       finally { reply.raw.off("close", disconnected); }
     });
@@ -175,7 +179,26 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
     app.post("/subjects/:subjectID/recall/prepare", r => { const b = z.strictObject({ operationID: uuid, selection: selectionSchema, regenerateMaterialID: uuid.nullable().default(null) }).parse(r.body); return recall.prepare(userID(r), parseID(r, "subjectID"), b.operationID, b.selection, b.regenerateMaterialID); });
     app.post("/subjects/:subjectID/recall/reset", r => { const b = mutationSchema.parse(r.body); return recall.reset(userID(r), parseID(r, "subjectID"), b.operationID, b.expectedVersion); });
     app.get("/subjects/:subjectID/recall/sessions", r => { const q = pageSchema.parse(r.query); return recall.sessions(userID(r), parseID(r, "subjectID"), q.cursor ? uuid.parse(q.cursor) : undefined, q.limit); });
-    app.post("/subjects/:subjectID/recall/sessions", r => { const b = z.strictObject({ operationID: uuid, selection: selectionSchema, topicID: uuid.nullable().default(null) }).parse(r.body); return recall.newSession(userID(r), parseID(r, "subjectID"), b.operationID, b.selection, b.topicID); });
+    app.post("/subjects/:subjectID/recall/sessions", r => { const b = z.strictObject({ operationID: uuid, selection: selectionSchema, topicID: uuid.nullable().default(null), mode: z.enum(["text", "voice"]).default("text") }).parse(r.body); return recall.newSession(userID(r), parseID(r, "subjectID"), b.operationID, b.selection, b.topicID, b.mode); });
+    app.post("/recall/sessions/:sessionID/voice", { bodyLimit: 70_000 }, async (r, reply) => {
+      const b = z.strictObject({ sdp: z.string().min(1).max(65_536).startsWith("v=0"), protocolVersion: z.number().int().min(1).max(5).default(1) }).parse(r.body);
+      const controller = new AbortController(), disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
+      reply.raw.once("close", disconnected);
+      try { return await recallVoice.connect(userID(r), parseID(r, "sessionID"), b.sdp, AbortSignal.any([shutdown.signal, controller.signal]), b.protocolVersion); }
+      finally { reply.raw.off("close", disconnected); }
+    });
+    app.post("/recall/sessions/:sessionID/voice/:voiceID/command", r => recallVoice.get(userID(r), parseID(r, "sessionID"), parseID(r, "voiceID")).command(voiceCommandSchema.parse(r.body)));
+    app.post("/recall/sessions/:sessionID/voice/:voiceID/presented", r => {
+      const b = voicePresentedSchema.parse(r.body);
+      return recallVoice.get(userID(r), parseID(r, "sessionID"), parseID(r, "voiceID")).presented(b.turnID, b.expectedVersion);
+    });
+    app.get("/recall/sessions/:sessionID/voice/:voiceID/events", async (r, reply) => {
+      const call = recallVoice.get(userID(r), parseID(r, "sessionID"), parseID(r, "voiceID")), emit = stream(reply);
+      const unsubscribe = call.subscribe(emit);
+      reply.raw.once("close", unsubscribe);
+      // The client reconnects to this existing call; it never creates a new
+      // billable session to recover the event stream.
+    });
     app.get("/recall/sessions/:sessionID", r => recall.presentation(userID(r), parseID(r, "sessionID")));
     app.post("/recall/sessions/:sessionID/answer", async r => {
       const b = mutationSchema.extend({ answer: z.string().min(1).max(20_000), inputValue: z.json().default(null) }).parse(r.body);

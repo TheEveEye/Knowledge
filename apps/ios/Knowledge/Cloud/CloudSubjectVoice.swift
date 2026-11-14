@@ -3,25 +3,35 @@ import Observation
 import SwiftUI
 import WebKit
 
-/// A subject-scoped transport. The native chat owns every message and lookup.
+/// Shared media transport. Native owners supply subject chat or Recall commands.
 @MainActor @Observable final class CloudSubjectVoice: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     private(set) var connecting = true
     private(set) var active = true
     let client: CloudClient
-    let subjectID: UUID
+    let subjectID: UUID?
     let selection: CloudSelection
     let history: [CloudJSON]
     var receive: (String, CloudJSON) -> Void
     var lookup: () async throws -> String
+    private let recallSessionID: String?
+    private var recallConnect: ((String) async throws -> CloudJSON)?
     @ObservationIgnored private weak var web: WKWebView?
     @ObservationIgnored private var tasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var permissionTask: Task<Void, Never>?
-    private var page: URL { URL(string: client.origin + "/api/subject-voice")! }
+    @ObservationIgnored private var audioObservers: [any NSObjectProtocol] = []
+    private var page: URL { URL(string: client.origin + (recallSessionID == nil ? "/api/subject-voice" : "/api/recall-voice"))! }
 
     init(client: CloudClient, subjectID: UUID, selection: CloudSelection, history: [CloudJSON],
          receive: @escaping (String, CloudJSON) -> Void, lookup: @escaping () async throws -> String) {
         self.client = client; self.subjectID = subjectID; self.selection = selection; self.history = history
         self.receive = receive; self.lookup = lookup
+        self.recallSessionID = nil
+    }
+    init(client: CloudClient, recallSessionID: String, receive: @escaping (String, CloudJSON) -> Void,
+         connect: @escaping (String) async throws -> CloudJSON) {
+        self.client = client; self.recallSessionID = recallSessionID
+        self.subjectID = nil; self.selection = .init(); self.history = []
+        self.receive = receive; self.lookup = { throw CancellationError() }; self.recallConnect = connect
     }
     func makeView() -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -42,10 +52,36 @@ import WebKit
     func stop() {
         guard active else { return }
         active = false; connecting = false; permissionTask?.cancel(); permissionTask = nil
+        for observer in audioObservers { NotificationCenter.default.removeObserver(observer) }; audioObservers = []
         for task in tasks.values { task.cancel() }; tasks.removeAll()
-        web?.evaluateJavaScript("window.subjectVoice?.stop(true)", completionHandler: nil)
+        web?.evaluateJavaScript("window.subjectVoice?.stop()", completionHandler: nil)
         web?.setMicrophoneCaptureState(.none, completionHandler: nil)
         web?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
+    }
+    func setMuted(_ muted: Bool) { web?.evaluateJavaScript("window.subjectVoice?.mute(\(muted ? "true" : "false"))", completionHandler: nil) }
+    func setOutputEnabled(_ enabled: Bool) { web?.evaluateJavaScript("window.subjectVoice?.output(\(enabled ? "true" : "false"))", completionHandler: nil) }
+    func setPaused(_ paused: Bool) { web?.evaluateJavaScript("window.subjectVoice?.pause(\(paused ? "true" : "false"))", completionHandler: nil) }
+    func setListening(_ listening: Bool, turnID: String) {
+        guard let encoded = try? JSONEncoder().encode(turnID), let literal = String(data: encoded, encoding: .utf8) else { return }
+        web?.evaluateJavaScript("window.subjectVoice?.listen(\(listening ? "true" : "false"), \(literal))", completionHandler: nil)
+    }
+    func interruptPlayback() { web?.evaluateJavaScript("window.subjectVoice?.interrupt()", completionHandler: nil) }
+    private func observeAudio() {
+        guard audioObservers.isEmpty else { return }
+        audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: nil, queue: nil) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, active, !connecting else { return }
+                fail("Voice audio was interrupted. Start voice again to resume.")
+            }
+        })
+        audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] notification in
+            let disconnected = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
+            guard disconnected else { return }
+            Task { @MainActor [weak self] in
+                guard let self, active, !connecting else { return }
+                fail("The audio device disconnected. Check the audio output and start voice again.")
+            }
+        })
     }
     func detach(_ view: WKWebView) {
         stop(); view.stopLoading()
@@ -82,7 +118,7 @@ import WebKit
               let raw = message.body as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: raw), data.count <= 100_000,
               let body = try? JSONDecoder().decode(CloudJSON.self, from: data) else { replyHandler(nil, "Voice connection ended."); return }
         let type = body.text("type")
-        if type == "started" { connecting = false; receive(type, body); replyHandler([:], nil); return }
+        if type == "started" { connecting = false; observeAudio(); receive(type, body); replyHandler([:], nil); return }
         if ["transcript", "error", "ended"].contains(type) {
             receive(type, body); replyHandler([:], nil)
             if type != "transcript" { stop() }; return
@@ -94,8 +130,15 @@ import WebKit
             defer { tasks[id] = nil }
             do {
                 if type == "connect" {
+                    if let recallConnect {
+                        let result = try await recallConnect(body.text("sdp"))
+                        try Task.checkCancellation(); guard active else { throw CancellationError() }
+                        replyHandler(["sdp": result.text("sdp")], nil)
+                        return
+                    }
+                    guard let subjectID else { throw CancellationError() }
                     let result = try await client.json("/api/v1/subjects/\(subjectID.uuidString.lowercased())/voice", method: "POST",
-                        body: .object(["sdp": body.value("sdp"), "selection": selection.json, "messages": .array(history)]))
+                        body: .object(["sdp": body.value("sdp"), "messages": .array(history)]))
                     try Task.checkCancellation(); guard active else { throw CancellationError() }
                     replyHandler(["sdp": result.text("sdp")], nil)
                 } else {

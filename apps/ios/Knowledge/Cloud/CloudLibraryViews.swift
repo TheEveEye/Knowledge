@@ -511,9 +511,21 @@ struct CloudActionButton: View {
     var body: some View {
         Button(role: role) { library.perform(key, reportError: { failure = $0 }) { try await action() } } label: {
             HStack {
-                if library.busyActions.contains(key) { ProgressView() }
-                if !toolbarProgress || !library.busyActions.contains(key) {
-                    if let systemImage { Label(title, systemImage: systemImage) } else { Text(title) }
+                if toolbarProgress && library.busyActions.contains(key) {
+                    ProgressView()
+                } else if let systemImage {
+                    Label {
+                        Text(title)
+                    } icon: {
+                        if library.busyActions.contains(key) {
+                            ProgressView()
+                        } else {
+                            Image(systemName: systemImage)
+                        }
+                    }
+                } else {
+                    if library.busyActions.contains(key) { ProgressView() }
+                    Text(title)
                 }
             }
         }.accessibilityLabel(title).disabled(library.busyActions.contains(key))

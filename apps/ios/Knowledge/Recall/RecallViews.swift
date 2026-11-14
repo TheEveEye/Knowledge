@@ -235,6 +235,9 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 if episode.phase == "awaiting", episode.pendingOperation == "assess", turn.id == episode.turns.last?.id {
                     gradingActions
                 }
+                if episode.phase.hasPrefix("awaiting"), episode.pendingOperation == "explain", turn.id == episode.turns.last?.id {
+                    explanationActions
+                }
             }
         }
         if episode.phase == "answer" {
@@ -273,16 +276,8 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                 }
             }
         } else if episode.phase.hasPrefix("awaiting"), episode.pendingOperation == "explain" {
-            Section {
-                if controller.isRequesting {
-                    Button { } label: { HStack { ProgressView(); Text(controller.requestLabel) }.frame(maxWidth: .infinity, minHeight: 32) }
-                        .buttonStyle(.borderedProminent).disabled(true)
-                } else if controller.error == nil {
-                    Button("Retry assessment") { controller.retry() }
-                }
-                Button(controller.isRequesting ? "Stop" : "Back to feedback") {
-                    controller.stopExplanation()
-                }
+            if episode.turns.isEmpty {
+                Section { explanationActions }
             }
         } else if episode.phase == "feedback" {
             feedbackSections(episode)
@@ -294,6 +289,28 @@ struct RecallSessionContent<Controller: RecallSessionPresenting>: View {
                     Task { defer { revealingSource = false }; if await controller.revealSourceConfirmed() { showsSource = true } }
                 } label: { HStack { if revealingSource { ProgressView() }; Label("View source", systemImage: "doc.text.magnifyingglass") } }.disabled(revealingSource)
             }
+        }
+    }
+
+    private var explanationActions: some View {
+        HStack(spacing: 16) {
+            if controller.isRequesting || controller.error == nil {
+                Button { controller.retry() } label: {
+                    HStack {
+                        if controller.isRequesting { ProgressView() }
+                        Text(controller.isRequesting ? "Preparing" : "Retry explanation")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(controller.isRequesting)
+                .accessibilityLabel(controller.isRequesting ? "Preparing an explanation" : "Retry explanation")
+            }
+            Button { controller.stopExplanation() } label: {
+                Text(controller.isRequesting ? "Stop" : "Back to feedback")
+                    .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.bordered)
         }
     }
 

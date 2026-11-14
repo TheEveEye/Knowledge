@@ -30,6 +30,7 @@ import Observation
     private var chatSessions: [UUID: CloudChatSession] = [:]
     private var importEditors: [String: CloudImportEditor] = [:]
     private var recallControllers: [String: CloudRecallController] = [:]
+    private var recallVoiceControllers: [String: CloudRecallVoiceController] = [:]
     let client: CloudClient
     @ObservationIgnored private let folder: URL
     @ObservationIgnored private var eventTask: Task<Void, Never>?
@@ -147,6 +148,7 @@ import Observation
         connectionGeneration = UUID()
         for session in chatSessions.values { session.suspend() }
         for controller in recallControllers.values { controller.interrupt(message: "Assessment paused. Your answer was kept; retry when you resume.") }
+        for controller in recallVoiceControllers.values { controller.stop() }
         refreshGeneration = UUID()
         eventTask?.cancel(); eventTask = nil
         refreshTask?.cancel(); refreshTask = nil
@@ -167,6 +169,10 @@ import Observation
         if let controller = recallControllers[id] { return controller }
         let controller = CloudRecallController(sessionID: id, library: self); recallControllers[id] = controller; return controller
     }
+    func recallVoiceController(for id: String) -> CloudRecallVoiceController {
+        if let controller = recallVoiceControllers[id] { return controller }
+        let controller = CloudRecallVoiceController(sessionID: id, library: self); recallVoiceControllers[id] = controller; return controller
+    }
     func close() {
         if case .closed = state { return }
         isConnecting = false
@@ -176,6 +182,8 @@ import Observation
         for session in chatSessions.values { session.close() }
         for editor in importEditors.values { editor.close() }
         for controller in recallControllers.values { controller.close() }
+        for controller in recallVoiceControllers.values { controller.stop() }
+        recallVoiceControllers = [:]
         recallControllers = [:]
         importEditors = [:]
         chatSessions = [:]
