@@ -518,20 +518,31 @@ export class RecallService {
     const preview = { ...current.session, state: { ...current.session.state, index: next.index!, episode: next.episode! } };
     return this.voiceContext(userId, id, preview);
   }
-  async voiceSupport(userId: string, id: string, operationID: string, version: number, kind: "hint" | "explanation", text: string, questionID: string | null = null, occurredAt: string | null = null) {
-    return mutation(this.db, userId, operationID, { action: "voiceSupport", id, version, kind, text, ...(questionID ? { questionID } : {}), ...(occurredAt ? { occurredAt } : {}) }, async tx => {
+  async voiceSupport(userId: string, id: string, operationID: string, version: number, kind: "hint" | "explanation", text: string, questionID: string | null = null, occurredAt: string | null = null, revealedCriterionIDs: string[] = []) {
+    return mutation(this.db, userId, operationID, { action: "voiceSupport", id, version, kind, text, ...(questionID ? { questionID } : {}), ...(occurredAt ? { occurredAt } : {}), ...(revealedCriterionIDs.length ? { revealedCriterionIDs } : {}) }, async tx => {
       const session = await this.session(userId, id); await ownedSubject(tx, userId, session.subjectId, true);
       const latest = requireValue((await tx.select().from(recallSessions).where(and(eq(recallSessions.id, id), eq(recallSessions.userId, userId))).for("update"))[0]);
       if (questionID && latest.state.mode === "voice") {
         if (stringValue(jsonObject(jsonObject(latest.state.episode).question).id) !== questionID) throw new DomainError("VOICE_TURN_CHANGED", "The active question changed.", 409);
       } else expected(latest.version, version);
       const target = await this.current(tx, latest), episode = structuredClone(jsonObject(latest.state.episode));
+      const criteria = jsonArray(jsonObject(episode.question).criteria).map(c => stringValue(jsonObject(c).id));
+      if (revealedCriterionIDs.some(id => !criteria.includes(id))) throw new DomainError("INVALID_VOICE_SUPPORT", "Use current criterion IDs for taught answers.");
       const support = { kind, text, at: occurredAt ?? new Date().toISOString(), beforeTurn: jsonArray(episode.turns).length,
-        questionID: stringValue(jsonObject(episode.question).id) };
-      // Assistance after a saved attempt is an append-only annotation. It must
-      // not invalidate the version held by an in-flight background assessor.
+        questionID: stringValue(jsonObject(episode.question).id), ...(revealedCriterionIDs.length ? { revealedCriterionIDs: [...new Set(revealedCriterionIDs)] } : {}) };
+      // Assistance stays append-only during assessment. Closing a taught probe
+      // is allowed only after grading, without invalidating an in-flight assessor.
       if (latest.state.mode === "voice" || episode.assessmentPending) {
         await tx.insert(learningEvents).values({ userId, subjectId: latest.subjectId, sessionId: id, targetId: target.id, kind: "voiceSupport", payload: support });
+        const assessments = jsonArray(episode.assessments).map(jsonObject), last = assessments.at(-1);
+        // Teaching the pending gap ends that probe, without changing any
+        // evidence or outcome. Never invalidate an in-flight assessment.
+        if (latest.state.mode === "voice" && !episode.assessmentPending && last?.followUp && revealedCriterionIDs.includes(stringValue(jsonObject(last.followUp).criterionID))) {
+          last.followUp = null; episode.assessments = assessments;
+          await tx.update(recallSessions).set({ state: { ...latest.state, episode }, version: latest.version + 1, updatedAt: new Date() }).where(eq(recallSessions.id, id));
+          await invalidate(tx, userId, "recallSessions", latest.subjectId, latest.version + 1);
+          return { version: latest.version + 1 };
+        }
         return { version: latest.version };
       }
       episode.voiceSupport = [...jsonArray(episode.voiceSupport), support].slice(-20);
@@ -679,6 +690,28 @@ export class RecallService {
       await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1); return { version: version + 1 };
     });
   }
+  async repairVoiceTranscript(userId: string, id: string, operationID: string, version: number, answerTurn: number, original: string, corrected: string) {
+    return mutation(this.db, userId, operationID, { action: "repairVoiceTranscript", id, version, answerTurn, original, corrected }, async tx => {
+      const initial = await this.session(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
+      const session = requireValue((await tx.select().from(recallSessions).where(and(eq(recallSessions.userId, userId), eq(recallSessions.id, id))).for("update"))[0]);
+      expected(session.version, version);
+      if (session.finished || session.state.mode !== "voice") throw new DomainError("VOICE_TURN_CHANGED", "Only the active voice question can be repaired.", 409);
+      const target = await this.current(tx, session), episode = structuredClone(jsonObject(session.state.episode));
+      const turns = jsonArray(episode.turns).map(jsonObject), turn = turns[answerTurn];
+      if (!turn || answerTurn !== turns.length - 1 || turn.answer !== original || turn.inputKind !== "text" || !corrected.trim() || corrected.length > 8000) throw new DomainError("VOICE_REPAIR", "Repair only the unchanged latest spoken text answer.", 409);
+      const assessments = jsonArray(episode.assessments);
+      const repair = { original, corrected, confirmedAt: new Date().toISOString(), answerTurn };
+      turn.transcriptRepairs = [...jsonArray(turn.transcriptRepairs), repair]; turn.answer = corrected;
+      episode.turns = turns; episode.assessments = assessments.slice(0, answerTurn); episode.assessmentPending = true;
+      // An unverified claim about a mishearing cannot retroactively establish
+      // independent recall after feedback. Reassess fairly, without a memory penalty.
+      episode.disputed = true; episode.transcriptRepaired = true; delete episode.explanation;
+      await tx.update(recallSessions).set({ state: { ...session.state, episode }, version: version + 1, updatedAt: new Date() }).where(eq(recallSessions.id, id));
+      await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: "voiceTranscriptRepair", payload: { ...repair, previousAssessment: assessments[answerTurn] ?? null, sessionVersion: version + 1 } });
+      await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1);
+      return { version: version + 1 };
+    });
+  }
   async explain(userId: string, id: string, operationID: string, version: number, signal: AbortSignal) {
     const input = { action: "recallExplain", id, version }, previous = await completedOperation(this.db, userId, operationID, input); if (previous) return previous;
     const initial = await this.session(userId, id), reserved = await reserveOperation(this.db, userId, operationID, input, initial.subjectId);
@@ -696,7 +729,7 @@ export class RecallService {
       const selection = selectionSchema.parse(initial.state.selection);
       if (selection.reasoning === "automatic") selection.reasoning = "medium";
       const output = await structured(this.ai, userId, selection, "recall_explanation",
-        policies.recall_commonInstructions + " Explain the saved expected answer in clear, concise prose (at most 3 paragraphs). Use only its supplied facts and passages. Preserve qualifications. Do not assess the learner or add criteria, links, or follow-up questions.",
+        policies.recall_commonInstructions + "\n" + policies.recall_tutoringInstructions + "\nExplain the saved expected answer in clear, concise prose (at most 3 paragraphs). Include a clearly hypothetical example or analogy when it helps make the supported principle concrete. Preserve qualifications. Do not assess the learner or add criteria, links, or follow-up questions.",
         { question: asJSON(question), material: material.snapshot }, z.strictObject({ explanation: z.string().trim().min(1).max(5000) }), AbortSignal.any([signal, controller.signal]), false);
       signal.throwIfAborted(); controller.signal.throwIfAborted();
       return await mutation(this.db, userId, operationID, input, async tx => {
@@ -815,15 +848,17 @@ export class RecallService {
       if (!episode.assessmentPending || proposed.answerTurn !== index) throw new DomainError("INVALID_ASSESSMENT", "Assess the currently saved answer turn, without replacing or resubmitting it.", 409);
       const ids = question.criteria.map(c => c.id), supplied = proposed.decisions.map(d => d.criterionID);
       if (canonical([...ids].sort()) !== canonical([...supplied].sort())) throw new DomainError("INVALID_ASSESSMENT", "Report every current criterion exactly once.");
+      if (proposed.revealedCriterionIDs.some(id => !ids.includes(id))) throw new DomainError("INVALID_ASSESSMENT", "Use current criterion IDs for taught answers.");
       const prior = jsonObject(jsonObject(assessments[assessments.length - 1] ?? {}).decisions ?? {}), decisions: JSONObject = {}, retractions: JSONObject[] = [];
       for (const part of proposed.decisions) {
+        const previous = jsonObject(prior[part.criterionID] ?? {});
         const evidenceTurn = part.evidenceTurn, source = evidenceTurn === null ? null : turns[evidenceTurn];
         if (evidenceTurn !== null && (!source || evidenceTurn > index)) throw new DomainError("INVALID_ASSESSMENT", "Use evidence from an existing learner answer.");
+        if ((part.status !== "met" || previous.status !== "met") && evidenceTurn !== index) throw new DomainError("INVALID_ASSESSMENT", "Bind new or unresolved criterion evidence to the current answer. Only previously met criteria can retain earlier completion turns.");
         const answer = source ? stringValue(source.answer) : "", quote = part.quote || (answer.length <= 400 ? answer : "");
         if (part.quote && !answer.includes(part.quote)) throw new DomainError("INVALID_ASSESSMENT", "Evidence quotes must appear verbatim in the referenced saved learner answer.");
         if (part.status === "met" && (evidenceTurn === null || !quote || part.missingMeaning !== null)) throw new DomainError("INVALID_ASSESSMENT", "Met criteria need a saved evidence turn, an exact quote, and no missing meaning. For answers longer than 400 characters, supply a short exact excerpt.");
         if (part.status !== "met" && !part.missingMeaning?.trim()) throw new DomainError("INVALID_ASSESSMENT", "Describe the missing meaning for every unresolved criterion.");
-        const previous = jsonObject(prior[part.criterionID] ?? {});
         if (previous.status === "met" && part.status !== "met") {
           if (!part.retractionReason || evidenceTurn !== index || !quote) throw new DomainError("INVALID_ASSESSMENT", "Keep earlier valid credit, or explain its retraction with exact contradictory evidence from the latest learner answer.");
           retractions.push({ criterionID: part.criterionID, reason: part.retractionReason });
@@ -836,11 +871,13 @@ export class RecallService {
       let accepted: JSONObject = { decisions, ambiguities: Object.fromEntries(ids.map(id => [id, []])), contradictions: [],
         taskFairness: { status: uncertainty ? "ambiguous" : "fair", reason: uncertainty, alternativeAnswer: null },
         feedback: proposed.feedback, interpretedAnswer: stringValue(turns[index]?.answer).slice(0, 1200), followUp: null,
-        sourceConcern: null, sourceConcernEvidence: [], additionalRecall: {}, additionalCredits: [], creditRetractions: retractions, model: "gpt-realtime-2.1" };
+        revealedCriterionIDs: [...new Set(proposed.revealedCriterionIDs)],
+        sourceConcern: null, sourceConcernEvidence: [], additionalRecall: {}, additionalCredits: [], creditRetractions: retractions, model: "gpt-realtime-2.1-mini" };
       const follow = proposed.followUp;
-      if (follow) {
-        if (index >= 2 || !ids.includes(follow.criterionID) || jsonObject(decisions[follow.criterionID]).status === "met"
-          || turns.slice(1).some(t => t.criterionID === follow.criterionID)) throw new DomainError("INVALID_ASSESSMENT", "Use one fresh unresolved criterion for a follow-up, or return followUp null.");
+      // Keep teaching and the original assessment, but never request repetition
+      // of the same answer that this feedback explicitly disclosed.
+      if (follow && !proposed.revealedCriterionIDs.includes(follow.criterionID)) {
+        if (index !== 0 || !ids.includes(follow.criterionID) || jsonObject(decisions[follow.criterionID]).status === "met") throw new DomainError("INVALID_ASSESSMENT", "Use one unresolved criterion for the single initial follow-up; after that, teach the gap and return followUp null.");
         accepted.followUp = { ...follow, interpretations: [], input: { kind: "text" } };
       }
       const objective = objectiveAssessment(question, episode);
@@ -853,13 +890,60 @@ export class RecallService {
         } else accepted.feedback = proposed.feedback;
       }
       const result = outcome(accepted);
+      if (result === "correct") {
+        accepted.feedback = "Correct.";
+        accepted.followUp = null;
+        accepted.revealedCriterionIDs = [];
+        const check = jsonObject(episode.voiceUnderstandingCheck ?? {});
+        if (check.status === "pending") episode.voiceUnderstandingCheck = { ...check, status: "cancelled" };
+      }
+      if (accepted.followUp) {
+        // Retrieval feedback itself must not introduce the missing answer.
+        accepted.feedback = jsonObject(accepted.followUp).kind === "clarification" ? "Let me check what you meant." : "There's one more part.";
+        accepted.revealedCriterionIDs = [];
+      } else if (result !== "correct" && result !== "uncertain") {
+        const unresolved = question.criteria.filter(c => jsonObject(jsonObject(accepted.decisions)[c.id]).status !== "met");
+        const revealed = jsonArray(accepted.revealedCriterionIDs).map(stringValue);
+        // Once the follow-up is used, always teach verified content instead of
+        // accepting another instruction to try harder with followUp=null.
+        // Initial corrections that omit their disclosures get the same safe path.
+        if (unresolved.length && (index > 0 || unresolved.some(c => !revealed.includes(c.id)))) {
+          const contextual = jsonObject(question.verification?.contextualAnswers ?? {});
+          accepted.feedback = unresolved.length === question.criteria.length ? question.expectedAnswer
+            : [...new Set(unresolved.map(c => stringValue(contextual[c.id]) || c.requiredMeaning))].join(" ");
+          accepted.revealedCriterionIDs = [...new Set([...revealed, ...unresolved.map(c => c.id)])];
+          accepted.teachingFromVerifiedAnswer = true;
+        }
+      }
+      if (proposed.understandingCheck && result !== "correct" && result !== "uncertain") {
+        if (accepted.followUp || !jsonArray(accepted.revealedCriterionIDs).length || episode.voiceUnderstandingCheck) throw new DomainError("INVALID_ASSESSMENT", "An understanding check needs newly taught criterion content, no Recall follow-up, and no earlier understanding check for this question.");
+        episode.voiceUnderstandingCheck = { id: randomUUID(), prompt: proposed.understandingCheck.prompt, status: "pending", afterTurn: index };
+      }
       episode.assessments = [...assessments, { ...accepted, outcome: result, policyVersion: recallPolicyVersion, assessedAt: new Date().toISOString(), origin: "voice" }];
-      episode.assessmentPending = false; episode.disputed = result === "uncertain";
+      episode.assessmentPending = false; episode.disputed = episode.transcriptRepaired === true || result === "uncertain";
       await tx.update(recallSessions).set({ state: { ...session.state, episode }, version: version + 1, updatedAt: new Date() }).where(eq(recallSessions.id, id));
       await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: "assessment",
         payload: { assessment: accepted, origin: "voice", sessionVersion: version + 1 } });
       await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1);
       return { version: version + 1, assessment: accepted, outcome: result };
+    });
+  }
+  async completeVoiceUnderstandingCheck(userId: string, id: string, operationID: string, version: number, checkID: string, answer: string, feedback: string, requestedHelp: string | null = null) {
+    return mutation(this.db, userId, operationID, { action: "voiceUnderstandingCheck", id, version, checkID, answer, feedback, requestedHelp }, async tx => {
+      const initial = await this.session(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
+      const session = requireValue((await tx.select().from(recallSessions).where(and(eq(recallSessions.userId, userId), eq(recallSessions.id, id))).for("update"))[0]);
+      expected(session.version, version);
+      const episode = structuredClone(jsonObject(session.state.episode)), check = jsonObject(episode.voiceUnderstandingCheck ?? {});
+      if (session.state.mode !== "voice" || session.finished || check.id !== checkID || check.status !== "pending" || episode.assessmentPending) throw new DomainError("VOICE_TURN_CHANGED", "This understanding check is no longer active.", 409);
+      const target = await this.current(tx, session);
+      episode.voiceUnderstandingCheck = { ...check, status: "completed", answer, feedback, requestedHelp, completedAt: new Date().toISOString() };
+      // Supported practice never enters episode.turns or assessments and cannot
+      // alter the original decisions, completion turns, or scheduled review.
+      await tx.update(recallSessions).set({ state: { ...session.state, episode }, version: version + 1, updatedAt: new Date() }).where(eq(recallSessions.id, id));
+      await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: "voicePractice",
+        payload: { checkID, questionID: stringValue(jsonObject(episode.question).id), prompt: check.prompt ?? "", answer, feedback, requestedHelp, graded: false, assisted: true, sessionVersion: version + 1 } });
+      await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1);
+      return { version: version + 1 };
     });
   }
   private async assessReserved(userId: string, id: string, operationID: string, version: number, signal: AbortSignal, dispute: string | null, disputeScope: "initial" | "conversation", leaseID: string) {

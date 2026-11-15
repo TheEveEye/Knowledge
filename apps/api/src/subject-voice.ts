@@ -10,15 +10,17 @@ export function subjectVoiceHTML(nonce: string, recall = false) {
   let peer, stream, events, timer, closeTimer, lostTimer, run = 0, ready = false, ending = false;
   let outputAllowed = true, paused = false, userMuted = false;
   let serverListening = !recall, localSpeaking = false, interrupted = false, expectedTurn = '', drainTimer;
+  let diagnosticTimer, diagnosticPending = false, diagnosticStarted = 0;
   const responseTurns = new Map();
   audio.muted = recall;
   function updateMic() {
-    stream?.getAudioTracks().forEach(track => { track.enabled = !userMuted && !paused && (!recall || serverListening && !localSpeaking); });
+    stream?.getAudioTracks().forEach(track => { track.enabled = !userMuted && !paused && (!recall || serverListening); });
   }
   const seen = new Set();
   function cleanup() {
     run++; ready = false; ending = false;
     clearTimeout(timer); clearTimeout(closeTimer); clearTimeout(lostTimer); clearTimeout(drainTimer);
+    clearInterval(diagnosticTimer); diagnosticTimer = null; diagnosticPending = false;
     localSpeaking = false; responseTurns.clear();
     stream?.getTracks().forEach(track => track.stop()); stream = null;
     if (events) { events.onclose = null; events.close(); events = null; }
@@ -26,6 +28,58 @@ export function subjectVoiceHTML(nonce: string, recall = false) {
     audio.pause(); audio.srcObject = null;
   }
   function report(type, fields = {}) { return bridge({ type, ...fields }).catch(() => {}); }
+  async function diagnoseAudio(phase) {
+    if (!recall || ending || !stream || diagnosticPending) return;
+    const current = run, connection = peer, track = stream.getAudioTracks()[0];
+    if (!track) return;
+    diagnosticPending = true;
+    try {
+      const settings = track.getSettings(), supported = navigator.mediaDevices.getSupportedConstraints();
+      const numeric = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+      const boolean = value => typeof value === 'boolean' ? value : null;
+      const diagnostics = {
+        phase, elapsedMs: Math.round(performance.now() - diagnosticStarted),
+        echoCancellationRequested: true, noiseSuppressionRequested: true, autoGainControlRequested: true,
+        echoCancellationSupported: supported.echoCancellation === true,
+        noiseSuppressionSupported: supported.noiseSuppression === true,
+        autoGainControlSupported: supported.autoGainControl === true,
+        echoCancellation: ['all', 'remote-only'].includes(settings.echoCancellation) ? settings.echoCancellation : boolean(settings.echoCancellation),
+        noiseSuppression: boolean(settings.noiseSuppression), autoGainControl: boolean(settings.autoGainControl),
+        sampleRate: numeric(settings.sampleRate), channelCount: numeric(settings.channelCount),
+        captureLatency: numeric(settings.latency), microphoneEnabled: track.enabled, microphoneMuted: track.muted,
+        tutorPlaying: localSpeaking, outputMuted: audio.muted, paused, userMuted, serverListening,
+        statsAvailable: false, statsFailed: false,
+        microphoneLevel: null, remoteLevel: null, echoReturnLoss: null, echoReturnLossEnhancement: null,
+      };
+      try {
+        if (connection) {
+          const stats = await connection.getStats();
+          for (const stat of stats.values()) {
+            if (stat.type === 'media-source' && stat.kind === 'audio') {
+              diagnostics.statsAvailable = true;
+              diagnostics.microphoneLevel = numeric(stat.audioLevel);
+              diagnostics.echoReturnLoss = numeric(stat.echoReturnLoss);
+              diagnostics.echoReturnLossEnhancement = numeric(stat.echoReturnLossEnhancement);
+            } else if (stat.type === 'inbound-rtp' && stat.kind === 'audio') {
+              diagnostics.statsAvailable = true;
+              diagnostics.remoteLevel = numeric(stat.audioLevel);
+            }
+          }
+        }
+      } catch { diagnostics.statsFailed = true; }
+      // Only allowlisted settings and aggregate measurements cross the bridge.
+      // Never send device names/IDs, SDP, IP addresses, speech or audio samples.
+      if (current === run && !ending) await report('audioDiagnostics', { diagnostics });
+    } catch {
+      // Optional diagnostics must never break capture or playback.
+      if (current === run && !ending) await report('audioDiagnostics', { diagnostics: { phase, diagnosticsFailed: true } });
+    } finally { if (current === run) diagnosticPending = false; }
+  }
+  function startRecallIfReady(current) {
+    if (!recall || current !== run || ready || ending || events?.readyState !== 'open' || peer?.connectionState !== 'connected' || !audio.srcObject) return;
+    ready = true; clearTimeout(timer); report('started');
+    void diagnoseAudio('connected');
+  }
   function fail(message) { report('error', { message }); cleanup(); }
   function send(value) { if (events?.readyState === 'open') events.send(JSON.stringify(value)); }
   function stop(immediate = false) {
@@ -75,32 +129,42 @@ export function subjectVoiceHTML(nonce: string, recall = false) {
     }
   }
   async function start() {
-    cleanup(); const current = run; seen.clear();
+    cleanup(); const current = run; seen.clear(); diagnosticStarted = performance.now();
     timer = setTimeout(() => { if (current === run) fail('Voice connection timed out. Try starting voice again.'); }, 60000);
     try {
       const captured = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
       if (current !== run) { captured.getTracks().forEach(track => track.stop()); return; }
       stream = captured; updateMic(); const connection = new RTCPeerConnection(); peer = connection;
+      void diagnoseAudio('capture');
+      if (recall) diagnosticTimer = setInterval(() => { if (current === run && localSpeaking) void diagnoseAudio('playback_sample'); }, 2000);
       connection.ontrack = event => {
         if (current !== run) return;
         audio.srcObject = event.streams[0] || new MediaStream([event.track]);
         audio.play().catch(() => { if (current === run) fail('Voice playback could not start. Check the audio output and try again.'); });
+        startRecallIfReady(current);
       };
       connection.onconnectionstatechange = () => {
         if (current !== run) return;
         clearTimeout(lostTimer);
         if (connection.connectionState === 'failed') fail('Voice connection failed.');
         if (connection.connectionState === 'disconnected') lostTimer = setTimeout(() => { if (current === run) fail('Voice connection was lost.'); }, 10000);
+        startRecallIfReady(current);
       };
       stream.getTracks().forEach(track => connection.addTrack(track, stream));
       events = connection.createDataChannel('oai-events');
       events.onopen = () => {
-        if (recall && current === run && !ending) { ready = true; clearTimeout(timer); report('started'); }
+        startRecallIfReady(current);
       };
       events.onmessage = message => {
         if (current !== run) return;
         try {
           const event = JSON.parse(message.data);
+          if (recall && event.type === 'input_audio_buffer.speech_started' && serverListening && !paused && !userMuted) {
+            void diagnoseAudio('speech_started');
+            // Stop the phone's playback immediately. The authenticated sideband
+            // receives the same event and cancels/clears the tutor response.
+            interrupt();
+          }
           if (recall && event.type === 'response.created') {
             responseTurns.set(event.response.id, event.response.metadata?.utteranceID || '');
             if (responseTurns.size > 100) responseTurns.delete(responseTurns.keys().next().value);
@@ -108,6 +172,7 @@ export function subjectVoiceHTML(nonce: string, recall = false) {
           if (recall && event.type === 'output_audio_buffer.started') {
             clearTimeout(drainTimer); localSpeaking = true; updateMic();
             audio.muted = paused || !outputAllowed || interrupted || responseTurns.get(event.response_id) !== expectedTurn;
+            void diagnoseAudio('playback_started');
           }
           if (recall && (event.type === 'output_audio_buffer.stopped' || event.type === 'output_audio_buffer.cleared')) {
             clearTimeout(drainTimer);
@@ -142,9 +207,17 @@ export function subjectVoiceHTML(nonce: string, recall = false) {
     updateMic();
   }
   function interrupt() { interrupted = true; audio.muted = true; localSpeaking = false; updateMic(); }
+  function preparePlayback(turnID) {
+    if (!recall || ending || !ready || !turnID || turnID !== expectedTurn || paused || interrupted || !outputAllowed || !audio.srcObject || peer?.connectionState !== 'connected') return false;
+    // The native owner awaits this before acknowledging presentation to the
+    // server. RTP audio can precede data-channel output_audio_buffer.started;
+    // open the approved turn's playback gate before speech is generated.
+    audio.muted = false;
+    return true;
+  }
   function output(enabled) { outputAllowed = enabled; audio.muted = paused || !enabled; }
   function pause(value) { paused = value; updateMic(); audio.muted = value || !outputAllowed || interrupted; }
-  window.subjectVoice = { start, stop, mute, pause, output, listen, interrupt };
+  window.subjectVoice = { start, stop, mute, pause, output, listen, interrupt, preparePlayback };
   window.addEventListener('pagehide', () => stop(true));
   document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
 })();

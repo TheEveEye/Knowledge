@@ -31,7 +31,6 @@ import SwiftUI
     var finished: Bool { snapshot.value("finished").flag }
     var phase: String { snapshot.text("phase") }
     var awaitingPresentation: Bool { snapshot.value("awaitingPresentation").flag }
-    var textFunding: String { snapshot.value("textFunding").string ?? library.selection(for: "assessment").funding }
     var displayError: String? { error ?? snapshot.value("error").string }
     var input: RecallInput {
         var wire = snapshot.value("input").object
@@ -70,7 +69,7 @@ import SwiftUI
             transport?.setPaused(value.value("paused").flag)
         }
         snapshot = value
-        transport?.setListening(value.value("listening").flag, turnID: value.text("turnID"))
+        transport?.setListening(value.value("listening").flag, turnID: value.text("turnID"), tutorSpeaking: value.value("speaking").flag)
         if changedQuestion { draft = ""; response = nil; editingTranscript = false }
         if !editingTranscript { draft = value.text("draft") }
         if value.value("closed").flag || value.value("ending").flag { transport?.stop() }
@@ -85,7 +84,13 @@ import SwiftUI
         guard snapshot.text("turnID") == id, generation == run else { return }
         presentedTurnID = id
         do {
+            let prepared = try await transport?.preparePlayback(turnID: id) == true
             guard generation == run, snapshot.text("turnID") == id else { return }
+            guard prepared else {
+                presentedTurnID = nil
+                error = "Voice playback is not ready. Tap Retry to hear the tutor."
+                return
+            }
             let value = try await library.client.json("/api/v1/recall/sessions/\(sessionID)/voice/\(voiceID)/presented", method: "POST",
                 body: .object(["turnID": .string(id), "expectedVersion": version]))
             guard generation == run, snapshot.text("turnID") == id else { return }
@@ -145,7 +150,7 @@ import SwiftUI
         var body: [String: CloudJSON] = ["operationID": .string(UUID().uuidString.lowercased()), "expectedVersion": snapshot.value("version"), "action": .string(action)]
         if !snapshot.text("turnID").isEmpty { body["turnID"] = snapshot.value("turnID") }
         if action == "submit" {
-            body["text"] = .string(draft)
+            body["text"] = .string(editingTranscript ? draft : "")
             body["inputValue"] = CloudRecallPresentation.inputValue(response, for: input)
         }
         if action == "hint" || action == "explain" { body["text"] = .string(draft) }
@@ -193,6 +198,21 @@ import SwiftUI
         }
     }
     func stopAndWait() async { stop(); await stopTask?.value }
+    func finishSession() async -> Bool {
+        await stopAndWait()
+        do {
+            // Stopping voice can finish an in-flight save. Read its confirmed
+            // version before issuing the existing, idempotent session command.
+            let path = "/api/v1/recall/sessions/\(sessionID)"
+            let current = try await library.client.json(path)
+            let session = current.value("session")
+            if !session.value("finished").flag {
+                _ = try await library.mutate(path + "/finish", fields: ["expectedVersion": session.value("version")])
+            }
+            error = nil
+            return true
+        } catch { self.error = error.localizedDescription; return false }
+    }
     func prepareTextContinuation() async -> Bool {
         let savedDraft = draft, savedResponse = response, prompt = snapshot.text("prompt"), turnCount = snapshot.value("turnCount").int
         let hadAnswer = phase == "answer", kind = input.kind
@@ -213,10 +233,13 @@ import SwiftUI
 struct CloudRecallVoiceScreen: View {
     let sessionID: String
     @Environment(CloudLibraryStore.self) private var library
+    @Environment(\.dismiss) private var dismiss
     @State private var controller: CloudRecallVoiceController?
     @State private var textMode = false
     @State private var switching = false
     @State private var captions = false
+    @State private var confirmsFinish = false
+    @State private var finishing = false
     var body: some View {
         Group {
             if textMode { CloudRecallSessionScreen(sessionID: sessionID) }
@@ -234,12 +257,18 @@ struct CloudRecallVoiceScreen: View {
     }
     private func content(_ controller: CloudRecallVoiceController) -> some View {
         List {
+            if controller.snapshot.value("transcriptRepair") != .null {
+                Section("Correct transcript") {
+                    LabeledContent("Heard", value: controller.snapshot.value("transcriptRepair").text("original"))
+                    LabeledContent("Correction", value: controller.snapshot.value("transcriptRepair").text("corrected"))
+                    Button { controller.command("confirm_repair") } label: { action("Confirm correction", icon: "checkmark", command: "confirm_repair", controller: controller) }
+                        .disabled(controller.busy)
+                    Button("Keep original", systemImage: "xmark") { controller.command("cancel_repair") }.disabled(controller.busy)
+                }
+            }
             if !controller.snapshot.text("prompt").isEmpty {
                 Section {
                     RecallText(source: controller.snapshot.text("prompt"))
-                    if controller.speaking, controller.active, !controller.paused {
-                        Button("Interrupt", systemImage: "hand.raised") { controller.command("interrupt") }
-                    }
                     if controller.phase == "answer", controller.input.kind != .text {
                         RecallAnswerInputView(input: controller.input, response: controller.response, seed: sessionID + controller.snapshot.text("prompt"), update: controller.setResponse)
                             .id(controller.snapshot.text("prompt"))
@@ -263,9 +292,9 @@ struct CloudRecallVoiceScreen: View {
                         HStack {
                             if controller.awaitingPresentation { ProgressView(); Text("Preparing") }
                             else if controller.busy, controller.commandAction == nil || controller.commandAction == "submit" || controller.commandAction == "retry" { ProgressView(); Text("Checking answer") }
-                            else { Label("Finish answer", systemImage: "checkmark") }
+                            else { Label(controller.snapshot.value("thinking").flag ? "Finish thinking and submit" : "Finish answer", systemImage: "checkmark") }
                         }
-                    }.disabled(controller.busy || controller.awaitingPresentation || controller.paused || (controller.draft.trimmed.isEmpty && controller.response == nil))
+                    }.disabled(controller.busy || controller.awaitingPresentation || controller.speaking || controller.paused || controller.snapshot.value("transcriptRepair") != .null || controller.snapshot.value("transcribing").flag || (controller.draft.trimmed.isEmpty && controller.response == nil))
                     Button { controller.command("hint") } label: { action("Hint", icon: "lightbulb", command: "hint", controller: controller) }.disabled(controller.busy || controller.awaitingPresentation || controller.paused)
                     if controller.snapshot.value("turnCount").int == 0 {
                         Button { controller.command("unknown") } label: { action("I don't know", icon: "questionmark", command: "unknown", controller: controller) }.disabled(controller.busy || controller.awaitingPresentation || controller.paused)
@@ -293,37 +322,6 @@ struct CloudRecallVoiceScreen: View {
                     }
                 }
             }
-            Section {
-                LabeledContent("Voice usage", value: "Server allowance")
-                LabeledContent("Text mode and reviews", value: controller.textFunding == "api" ? "Server allowance" : "ChatGPT")
-                Button {
-                    if controller.active { controller.stop() } else { controller.start() }
-                } label: {
-                    HStack {
-                        if controller.stopping { ProgressView(); Text("Ending voice") }
-                        else if controller.connecting { ProgressView(); Text("Connecting voice") }
-                        else { Label(controller.active ? "End voice" : "Start voice again", systemImage: controller.active ? "stop.circle" : "waveform") }
-                    }
-                }.disabled(controller.stopping || (controller.finished && !controller.active))
-                if controller.active, !controller.connecting {
-                    Button(controller.muted ? "Unmute microphone" : "Mute microphone", systemImage: controller.muted ? "mic.slash" : "mic") { controller.toggleMute() }
-                    Button(controller.paused ? "Resume" : "Pause", systemImage: controller.paused ? "play" : "pause") { controller.togglePause() }
-                    Button("Repeat", systemImage: "arrow.counterclockwise") { controller.command("repeat") }.disabled(controller.busy)
-                    Toggle("Finish answers manually", isOn: Binding(get: { controller.snapshot.value("manual").flag }, set: { controller.command($0 ? "manual" : "automatic") })).disabled(controller.busy)
-                }
-                Button {
-                    switching = true
-                    Task { textMode = await controller.prepareTextContinuation(); switching = false }
-                } label: { HStack { if switching { ProgressView() }; Text("Continue in text") } }.disabled(switching)
-                DisclosureGroup("Transcript", isExpanded: $captions) {
-                    ForEach(controller.snapshot.value("captions").array, id: \.cloudID) { caption in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(caption.text("role") == "user" ? "You" : "Tutor").font(.caption).foregroundStyle(.secondary)
-                            Text(caption.text("text"))
-                        }
-                    }
-                }
-            }
             if let error = controller.displayError {
                 Section {
                     Text(error).foregroundStyle(.red)
@@ -331,12 +329,147 @@ struct CloudRecallVoiceScreen: View {
                 }
             }
         }
+        .disabled(finishing)
         .environment(\.editMode, .constant(controller.input.kind == .ordering && controller.phase == "answer" ? .active : .inactive))
+        .scrollDismissesKeyboard(.interactively)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Continue in text", systemImage: "keyboard") {
+                        switching = true
+                        Task { textMode = await controller.prepareTextContinuation(); switching = false }
+                    }.disabled(controller.stopping)
+                    Button("Transcript", systemImage: "text.bubble") { captions = true }
+                    Button("Finish session", systemImage: "checkmark.circle") { confirmsFinish = true }
+                        .disabled(controller.finished || controller.stopping)
+                } label: {
+                    HStack(spacing: 8) {
+                        if finishing { ProgressView(); Text("Finishing session") }
+                        else if switching { ProgressView(); Text("Opening text") }
+                        else { Label("Session options", systemImage: "ellipsis").labelStyle(.iconOnly) }
+                    }
+                }
+                .disabled(switching || finishing)
+            }
+        }
+        .sheet(isPresented: $captions) { transcriptSheet(controller) }
+        .alert("Finish this session?", isPresented: $confirmsFinish) {
+            Button("Finish session") {
+                finishing = true
+                Task {
+                    let completed = await controller.finishSession()
+                    finishing = false
+                    if completed { dismiss() }
+                }
+            }
+            Button("Keep practising", role: .cancel) { }
+        } message: {
+            Text("Completed results and any fully graded answer are kept. Unfinished answers won't be graded, and remaining targets can appear in future sessions.")
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            voiceControls(controller)
+                .disabled(finishing)
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+        }
         .task(id: "\(controller.snapshot.text("turnID"))/\(controller.paused)/\(controller.connecting)") { await controller.presentCurrentTurn() }
         .background {
-            if let transport = controller.transport, transport.active {
+            if let transport = controller.transport, transport.active, transport.usesWebKit {
                 CloudSubjectVoiceTransport(voice: transport).id(ObjectIdentifier(transport)).frame(width: 1, height: 1).opacity(0.01).accessibilityHidden(true)
             }
+        }
+    }
+    private func voiceControls(_ controller: CloudRecallVoiceController) -> some View {
+        let available = controller.active && !controller.connecting && !controller.stopping && !switching
+        let transitioning = controller.connecting || controller.stopping
+        return GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 8) {
+                HStack(spacing: 0) {
+                    if available {
+                        voiceControl(controller.muted ? "Unmute microphone" : "Mute microphone", icon: controller.muted ? "mic.slash" : "mic", perform: controller.toggleMute)
+                            .accessibilityValue(controller.muted ? "Muted" : "On")
+                        voiceControl(controller.paused ? "Resume voice" : "Pause voice", icon: controller.paused ? "play" : "pause", perform: controller.togglePause)
+                    }
+                    Menu {
+                        if available {
+                            Button("Let me think", systemImage: "hand.raised") { controller.command("hold") }
+                                .disabled(controller.busy || controller.snapshot.value("thinking").flag)
+                            Button("Repeat question", systemImage: "arrow.counterclockwise") { controller.command("repeat") }
+                                .disabled(controller.busy || controller.paused)
+                            Toggle("Finish answers manually", isOn: Binding(get: { controller.snapshot.value("manual").flag }, set: { controller.command($0 ? "manual" : "automatic") }))
+                                .disabled(controller.busy)
+                        }
+                    } label: {
+                        Label("Voice options", systemImage: "ellipsis")
+                            .labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(maxWidth: available ? .infinity : nil)
+                    }
+                    .disabled(!available)
+                }
+                .buttonStyle(.plain)
+                .font(.title3)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 6)
+                .glassEffect(.regular, in: Capsule())
+                if !available, !switching, !transitioning { Spacer(minLength: 0) }
+                Button {
+                    if controller.active { controller.stop() } else { controller.start() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if controller.stopping { ProgressView(); Text("Ending voice") }
+                        else if controller.connecting { ProgressView(); Text("Connecting voice") }
+                        else {
+                            Label(controller.active ? "End voice" : "Start voice again", systemImage: controller.active ? "stop.fill" : "waveform")
+                                .labelStyle(.iconOnly)
+                                .font(.title3.weight(.semibold))
+                                .frame(width: 56, height: 56)
+                        }
+                    }
+                    .padding(.horizontal, transitioning ? 16 : 0)
+                    .frame(maxWidth: transitioning ? .infinity : nil, minHeight: 56)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Capsule())
+                .accessibilityLabel(controller.stopping ? "Ending voice" : controller.connecting ? "Cancel voice connection" : controller.active ? "End voice" : "Start voice again")
+                .disabled(controller.stopping || switching || (controller.finished && !controller.active))
+            }
+        }
+    }
+    private func transcriptSheet(_ controller: CloudRecallVoiceController) -> some View {
+        NavigationStack {
+            List {
+                ForEach(controller.snapshot.value("captions").array, id: \.cloudID) { caption in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(caption.text("role") == "user" ? "You" : "Tutor").font(.caption).foregroundStyle(.secondary)
+                        Text(caption.text("text")).textSelection(.enabled)
+                    }
+                }
+            }
+            .overlay {
+                if controller.snapshot.value("captions").array.isEmpty {
+                    ContentUnavailableView("No transcript yet", systemImage: "text.bubble")
+                }
+            }
+            .navigationTitle("Transcript")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark") { captions = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationSizing(.page)
+    }
+    private func voiceControl(_ title: String, icon: String, perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Label(title, systemImage: icon)
+                .labelStyle(.iconOnly)
+                .frame(minWidth: 44, maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
         }
     }
     private func action(_ title: String, icon: String, command: String, controller: CloudRecallVoiceController) -> some View {

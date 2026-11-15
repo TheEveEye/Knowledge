@@ -46,7 +46,9 @@ export const voiceJudgmentSchema = z.strictObject({
   decisions: z.array(z.strictObject({ criterionID: text.max(160), status: z.enum(["met", "partial", "missing"]),
     evidenceTurn: z.number().int().min(0).max(2).nullable(), quote: z.string().max(400), missingMeaning: nullable,
     retractionReason: z.string().min(1).max(600).optional() })).max(6),
-  uncertainty: nullable, followUp: z.strictObject({ prompt: text.max(1500), criterionID: text.max(160), kind: z.enum(["clarification", "hint"]) }).nullable(),
+  revealedCriterionIDs: z.array(text.max(160)).max(6).default([]),
+  uncertainty: nullable, followUp: z.strictObject({ prompt: text.max(1500), criterionID: text.max(160), kind: z.enum(["clarification", "furtherAssessment", "hint"]) }).nullable(),
+  understandingCheck: z.strictObject({ prompt: text.max(500) }).nullable().optional(),
   answerInput: z.strictObject({ optionID: z.string().max(160).nullable(), number: z.number().nullable(), order: z.array(z.string().max(160)).max(30),
     pairs: z.array(z.strictObject({ leftID: z.string().max(160), rightID: z.string().max(160) })).max(30) }).optional(),
 });

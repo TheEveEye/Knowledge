@@ -9,6 +9,7 @@ import type { Authentication } from "../auth/auth.js";
 import { authHeaders, forwardHeaders } from "../auth/routes.js";
 import type { Config } from "../config.js";
 import { RecallVoiceService, voiceCommandSchema, voicePresentedSchema } from "@knowledge/backend";
+import { VoiceDiagnostics, voiceDiagnosticBatch } from "../voice-diagnostics.js";
 
 const pageSchema = z.object({ cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) });
 const createSchema = z.strictObject({ operationID: uuid, name: z.string().min(1).max(160) });
@@ -42,6 +43,8 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
   const files = new FileStore(), library = new LibraryService(db), queue = new JobQueue(db), ai = new AIService(db, pool), sources = new SourceService(db, files), importer = new ImportService(db, ai, queue), recall = new RecallService(db, ai, queue);
   const shutdown = new AbortController(); parent.addHook("preClose", async () => { shutdown.abort(); });
   const recallVoice = new RecallVoiceService(recall, ai);
+  const voiceDiagnostics = new VoiceDiagnostics();
+  parent.addHook("preClose", async () => { await voiceDiagnostics.close(); });
   parent.addHook("preClose", async () => { await recallVoice.close(); });
   parent.register(async app => {
     app.decorateRequest("knowledgeUserID", null);
@@ -186,6 +189,23 @@ export function registerLibraryRoutes(parent: FastifyInstance, db: Database, poo
       reply.raw.once("close", disconnected);
       try { return await recallVoice.connect(userID(r), parseID(r, "sessionID"), b.sdp, AbortSignal.any([shutdown.signal, controller.signal]), b.protocolVersion); }
       finally { reply.raw.off("close", disconnected); }
+    });
+    app.get("/debug/voice-diagnostics", async (r, reply) => {
+      reply.header("Cache-Control", "no-store");
+      return { files: await voiceDiagnostics.list(userID(r)) };
+    });
+    app.get("/debug/voice-diagnostics/:sessionID/:voiceID", async (r, reply) => {
+      const sessionID = parseID(r, "sessionID"), voiceID = parseID(r, "voiceID");
+      await recall.session(userID(r), sessionID);
+      reply.header("Cache-Control", "no-store").header("Content-Type", "application/x-ndjson")
+        .header("Content-Disposition", `attachment; filename="voice-${voiceID}.jsonl"`);
+      return voiceDiagnostics.read(userID(r), sessionID, voiceID);
+    });
+    app.post("/recall/sessions/:sessionID/voice/:voiceID/diagnostics", { bodyLimit: 64_000 }, async r => {
+      const owner = userID(r), sessionID = parseID(r, "sessionID"), voiceID = parseID(r, "voiceID");
+      recallVoice.get(owner, sessionID, voiceID);
+      await voiceDiagnostics.append(owner, sessionID, voiceID, voiceDiagnosticBatch.parse(r.body));
+      return { accepted: true };
     });
     app.post("/recall/sessions/:sessionID/voice/:voiceID/command", r => recallVoice.get(userID(r), parseID(r, "sessionID"), parseID(r, "voiceID")).command(voiceCommandSchema.parse(r.body)));
     app.post("/recall/sessions/:sessionID/voice/:voiceID/presented", r => {

@@ -1,9 +1,10 @@
 import AVFAudio
 import Observation
+import OSLog
 import SwiftUI
 import WebKit
 
-/// Shared media transport. Native owners supply subject chat or Recall commands.
+/// Voice session adapter: native WebRTC for Recall, isolated WebKit for subject chat.
 @MainActor @Observable final class CloudSubjectVoice: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     private(set) var connecting = true
     private(set) var active = true
@@ -19,6 +20,12 @@ import WebKit
     @ObservationIgnored private var tasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var permissionTask: Task<Void, Never>?
     @ObservationIgnored private var audioObservers: [any NSObjectProtocol] = []
+    @ObservationIgnored private let audioLogger = Logger(subsystem: "dev.kiwiapps.Knowledge", category: "VoiceAudio")
+    @ObservationIgnored private var diagnosticPath: String?
+    @ObservationIgnored private var diagnosticSamples: [CloudJSON] = []
+    @ObservationIgnored private var diagnosticUpload: Task<Void, Never>?
+    @ObservationIgnored private var native: NativeRecallAudio?
+    var usesWebKit: Bool { native == nil }
     private var page: URL { URL(string: client.origin + (recallSessionID == nil ? "/api/subject-voice" : "/api/recall-voice"))! }
 
     init(client: CloudClient, subjectID: UUID, selection: CloudSelection, history: [CloudJSON],
@@ -32,8 +39,26 @@ import WebKit
         self.client = client; self.recallSessionID = recallSessionID
         self.subjectID = nil; self.selection = .init(); self.history = []
         self.receive = receive; self.lookup = { throw CancellationError() }; self.recallConnect = connect
+        super.init()
+        let audio = NativeRecallAudio(connect: { [weak self] sdp in
+            guard let self, active else { throw CancellationError() }
+            let result = try await connect(sdp)
+            try Task.checkCancellation(); guard active else { throw CancellationError() }
+            if let id = UUID(uuidString: result.text("voiceID")) {
+                diagnosticPath = "/api/v1/recall/sessions/\(recallSessionID)/voice/\(id.uuidString.lowercased())/diagnostics"
+                uploadDiagnostics()
+            }
+            return result
+        }, receive: { [weak self] type, value in
+            guard let self, active else { return }
+            if type == "started" { connecting = false; observeAudio() }
+            receive(type, value)
+            if type == "error" || type == "ended" { stop() }
+        }, diagnostics: { [weak self] in self?.logAudioDiagnostics($0) })
+        native = audio; audio.start()
     }
     func makeView() -> WKWebView {
+        guard usesWebKit else { return WKWebView(frame: .zero) }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.allowsInlineMediaPlayback = true
@@ -52,19 +77,29 @@ import WebKit
     func stop() {
         guard active else { return }
         active = false; connecting = false; permissionTask?.cancel(); permissionTask = nil
+        native?.stop()
+        diagnosticUpload?.cancel(); diagnosticUpload = nil; diagnosticSamples.removeAll()
         for observer in audioObservers { NotificationCenter.default.removeObserver(observer) }; audioObservers = []
         for task in tasks.values { task.cancel() }; tasks.removeAll()
         web?.evaluateJavaScript("window.subjectVoice?.stop()", completionHandler: nil)
         web?.setMicrophoneCaptureState(.none, completionHandler: nil)
         web?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
     }
-    func setMuted(_ muted: Bool) { web?.evaluateJavaScript("window.subjectVoice?.mute(\(muted ? "true" : "false"))", completionHandler: nil) }
-    func setPaused(_ paused: Bool) { web?.evaluateJavaScript("window.subjectVoice?.pause(\(paused ? "true" : "false"))", completionHandler: nil) }
-    func setListening(_ listening: Bool, turnID: String) {
+    func setMuted(_ muted: Bool) { if let native { native.setMuted(muted); return }; web?.evaluateJavaScript("window.subjectVoice?.mute(\(muted ? "true" : "false"))", completionHandler: nil) }
+    func setPaused(_ paused: Bool) { if let native { native.setPaused(paused); return }; web?.evaluateJavaScript("window.subjectVoice?.pause(\(paused ? "true" : "false"))", completionHandler: nil) }
+    func setListening(_ listening: Bool, turnID: String, tutorSpeaking: Bool) {
+        if let native { native.setListening(listening, turnID: turnID, tutorSpeaking: tutorSpeaking); return }
         guard let encoded = try? JSONEncoder().encode(turnID), let literal = String(data: encoded, encoding: .utf8) else { return }
         web?.evaluateJavaScript("window.subjectVoice?.listen(\(listening ? "true" : "false"), \(literal))", completionHandler: nil)
     }
-    func interruptPlayback() { web?.evaluateJavaScript("window.subjectVoice?.interrupt()", completionHandler: nil) }
+    func interruptPlayback() { if let native { native.interruptPlayback(); return }; web?.evaluateJavaScript("window.subjectVoice?.interrupt()", completionHandler: nil) }
+    func preparePlayback(turnID: String) async throws -> Bool {
+        if let native { return native.preparePlayback(turnID: turnID) }
+        guard active, let web, let encoded = try? JSONEncoder().encode(turnID),
+              let literal = String(data: encoded, encoding: .utf8) else { return false }
+        let prepared = try await web.evaluateJavaScript("window.subjectVoice?.preparePlayback(\(literal))") as? Bool
+        return active && prepared == true
+    }
     private func observeAudio() {
         guard audioObservers.isEmpty else { return }
         audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: nil, queue: nil) { [weak self] _ in
@@ -75,12 +110,66 @@ import WebKit
         })
         audioObservers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] notification in
             let disconnected = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
-            guard disconnected else { return }
             Task { @MainActor [weak self] in
                 guard let self, active, !connecting else { return }
+                if let native { native.routeChanged() }
+                else { logAudioDiagnostics(.object(["phase": .string("route_changed")])) }
+                guard disconnected else { return }
                 fail("The audio device disconnected. Check the audio output and start voice again.")
             }
         })
+    }
+    private func logAudioDiagnostics(_ value: CloudJSON) {
+        guard recallSessionID != nil else { return }
+        let phases = ["capture", "connected", "playback_sample", "speech_started", "speech_confirmed", "playback_started", "route_changed", "microphone_gate"]
+        guard phases.contains(value.text("phase")) else { return }
+        let keys: Set<String> = ["transport", "audioDeviceRunning", "speakerEchoGuard", "automaticInterruption", "elapsedMs", "echoCancellationRequested", "noiseSuppressionRequested", "autoGainControlRequested",
+            "echoCancellationSupported", "noiseSuppressionSupported", "autoGainControlSupported", "echoCancellation", "noiseSuppression", "autoGainControl",
+            "sampleRate", "channelCount", "captureLatency", "microphoneEnabled", "microphoneMuted", "tutorPlaying", "outputMuted", "paused", "userMuted", "serverListening",
+            "statsAvailable", "statsFailed", "diagnosticsFailed", "microphoneLevel", "remoteLevel", "echoReturnLoss", "echoReturnLossEnhancement"]
+        var fields: [String: CloudJSON] = ["phase": .string(value.text("phase"))]
+        for (key, field) in value.object where keys.contains(key) {
+            switch field {
+            case .bool, .null: fields[key] = field
+            case .number(let number) where number.isFinite: fields[key] = field
+            case .string(let mode) where key == "echoCancellation" && ["all", "remote-only"].contains(mode): fields[key] = field
+            case .string(let mode) where key == "transport" && ["native-webrtc", "webkit"].contains(mode): fields[key] = field
+            default: break
+            }
+        }
+        let session = AVAudioSession.sharedInstance()
+        fields["category"] = .string(session.category.rawValue)
+        fields["mode"] = .string(session.mode.rawValue)
+        fields["inputPorts"] = .array(session.currentRoute.inputs.map { .string($0.portType.rawValue) })
+        fields["outputPorts"] = .array(session.currentRoute.outputs.map { .string($0.portType.rawValue) })
+        fields["nativeSampleRate"] = .number(session.sampleRate)
+        fields["ioBufferDuration"] = .number(session.ioBufferDuration)
+        fields["inputLatency"] = .number(session.inputLatency)
+        fields["outputLatency"] = .number(session.outputLatency)
+        guard let data = try? JSONEncoder().encode(CloudJSON.object(fields)), let line = String(data: data, encoding: .utf8) else { return }
+        audioLogger.info("Audio diagnostics: \(line, privacy: .public)")
+        diagnosticSamples.append(.object(fields))
+        if diagnosticSamples.count > 60 { diagnosticSamples.removeFirst(diagnosticSamples.count - 60) }
+        uploadDiagnostics()
+    }
+    private func uploadDiagnostics() {
+        guard active, let diagnosticPath, diagnosticUpload == nil, !diagnosticSamples.isEmpty else { return }
+        diagnosticUpload = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(2))
+                try Task.checkCancellation()
+                let batch = Array(diagnosticSamples.prefix(20))
+                diagnosticSamples.removeFirst(batch.count)
+                // Optional telemetry is bounded and best effort, separate from
+                // voice commands. Network failures never interrupt learning.
+                _ = try await client.json(diagnosticPath, method: "POST", body: .object([
+                    "batchID": .string(UUID().uuidString.lowercased()), "samples": .array(batch)]))
+            } catch is CancellationError { }
+            catch { audioLogger.notice("Audio diagnostic upload unavailable") }
+            diagnosticUpload = nil
+            if active { uploadDiagnostics() }
+        }
     }
     func detach(_ view: WKWebView) {
         stop(); view.stopLoading()
@@ -117,6 +206,7 @@ import WebKit
               let raw = message.body as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: raw), data.count <= 100_000,
               let body = try? JSONDecoder().decode(CloudJSON.self, from: data) else { replyHandler(nil, "Voice connection ended."); return }
         let type = body.text("type")
+        if type == "audioDiagnostics" { logAudioDiagnostics(body.value("diagnostics")); replyHandler([:], nil); return }
         if type == "started" { connecting = false; observeAudio(); receive(type, body); replyHandler([:], nil); return }
         if ["transcript", "error", "ended"].contains(type) {
             receive(type, body); replyHandler([:], nil)
@@ -132,6 +222,10 @@ import WebKit
                     if let recallConnect {
                         let result = try await recallConnect(body.text("sdp"))
                         try Task.checkCancellation(); guard active else { throw CancellationError() }
+                        if let recallSessionID, let id = UUID(uuidString: result.text("voiceID")) {
+                            diagnosticPath = "/api/v1/recall/sessions/\(recallSessionID)/voice/\(id.uuidString.lowercased())/diagnostics"
+                            uploadDiagnostics()
+                        }
                         replyHandler(["sdp": result.text("sdp")], nil)
                         return
                     }
