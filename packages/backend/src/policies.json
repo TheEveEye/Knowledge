@@ -473,6 +473,7 @@
     "CONTEXTUAL RUBRIC: For EVERY criterion supply contextualAnswers, requiredMeanings, promptGivens,",
     "independentParts and 1–3 acceptedAnswers. contextualAnswers is the minimal correct fragment; requiredMeanings",
     "contains only NEW requested knowledge. promptGivens contains 0–4 exact visible-prompt or public-label spans.",
+    "For every criterion, voiceScopes contains 0–2 short noun phrases quoted EXACTLY from the visible question prompt. Choose already named scopes that help target a missing aspect, such as interpersonal effects when the prompt already names that scope. Never introduce an answer, mechanism or unstated fact; use [] if the question cannot be narrowed safely. These prepare uncued voice follow-ups before the live session.",
     "acceptedAnswers uses minimal natural wording and source-supported equivalents. Remove supplied subjects and",
     "purposes from the response requirement while retaining complete point propositions for mapping. Use semantic",
     "entailment rather than recital, artificial synonyms or universal interpretations of possible effects.",

@@ -15,7 +15,8 @@ import { policies } from "./policies.js";
 import { candidateMatch, candidateQuantities, mentionsSubject } from "./recall-candidates.js";
 import { designVersion, bounded, contextIssue, displayPrompt, enrichmentSelection, evidenceID, presentationPriority, repairExample, unitInput, validateDesign, verificationInput } from "./recall-design.js";
 import { objectiveAssessment, renderAnswer } from "./recall-objective.js";
-import { gradeVoiceAnswer as assessVoiceAnswer } from "./recall-voice-assessment.js";
+import { gradeVoiceAnswer as assessVoiceAnswer, compileVoiceAssessment, fastVoiceAssessmentSchema } from "./recall-voice-assessment.js";
+import { prepareVoicePrompts } from "./recall-voice-prompts.js";
 
 export const schedulerVersion = "fsrs6-retention90-no-fuzz-v1", recallPolicyVersion = "recall-evidence-v21";
 const scheduler = fsrs({ request_retention: 0.9, enable_fuzz: false, enable_short_term: true, learning_steps: ["1m", "10m"], relearning_steps: ["10m"],
@@ -321,6 +322,7 @@ export class RecallService {
     question.practiceValue = review.practiceValue;
     if (!question.criteria.length || unitKeys.some(key => !question.criteria.some(c => c.unitKey === key))) throw new DomainError("INVALID_QUESTION", "Each target requires an essential response criterion.");
     question.precisionNotes = question.precisionNotes.filter(n => !review.omitPrecisionNoteIDs.includes(n.id)); question.verified = true; question.verification = { ...review, disclosures };
+    question.voicePrompts = prepareVoicePrompts(question);
     return question;
   }
   private async install(job: ClaimedJob, revisionID: string, units: Unit[], plans: JSONObject, questions: Question[], issues: JSONObject, planningOnly = false, diagnostics: JSONObject[] = []) {
@@ -484,6 +486,7 @@ export class RecallService {
     if (!confirmed) await this.current(this.db, session);
     const episode = structuredClone(jsonObject(session.state.episode)), question = episode.question as unknown as Question;
     if (!question) throw new DomainError("QUESTION_UNAVAILABLE", "Resume Recall to prepare its current question.", 409);
+    question.voicePrompts ??= prepareVoicePrompts(question);
     // A confirmed advance has already validated the new episode inside its
     // transaction. Reuse its state and matching preloaded evidence directly.
     if (!confirmed) await this.participants(this.db, session, question);
@@ -835,17 +838,44 @@ export class RecallService {
     try { return await this.assessReserved(userId, id, operationID, version, AbortSignal.any([signal, controller.signal]), dispute, disputeScope, leaseID); }
     finally { clearInterval(heartbeat); await releaseOperation(this.db, userId, operationID, leaseID); }
   }
-  async gradeVoiceAnswer(userId: string, id: string, operationID: string, version: number, signal: AbortSignal) {
+  async gradeVoiceAnswer(userId: string, id: string, operationID: string, version: number, signal: AbortSignal, proposal?: unknown) {
     const context = await this.voiceContext(userId, id); expected(context.session.version, version);
     const selection = selectionSchema.parse(context.session.state.selection);
-    const report = await assessVoiceAnswer(this.ai, userId, selection, id, context.episode, context.materials, signal);
+    let report: z.infer<typeof voiceJudgmentSchema> | undefined, reason = "explicit_verification";
+    if (proposal !== undefined) {
+      try {
+        const question = context.episode.question as unknown as Question;
+        const candidate = fastVoiceAssessmentSchema(question).parse(proposal);
+        report = compileVoiceAssessment(id, context.episode, candidate);
+        const objective = objectiveAssessment(question, context.episode);
+        if (objective && question.criteria.some(c => jsonObject(jsonObject(objective.decisions)[c.id]).status !== candidate.decisions[c.id]!.status)) {
+          reason = "answer_key_disagreement"; report = undefined;
+        }
+        if (/\banalog(?:y|ies)\b/iu.test(question.prompt) && /\b(?:supplied|specific|stated|given|notes?|sources?)\b/iu.test(question.prompt)) {
+          reason = "source_specific_analogy"; report = undefined;
+        }
+        if (question.goal === "scalarQuantity" && question.input.kind === "text") {
+          reason = "spoken_quantity"; report = undefined;
+        }
+      } catch (error) {
+        if (!(error instanceof z.ZodError || error instanceof DomainError && (error.code.startsWith("INVALID_") || error.code === "VOICE_REVIEW_REQUIRED"))) throw error;
+        report = undefined;
+        reason = error instanceof DomainError ? error.code : "VOICE_COMPACT_SCHEMA";
+      }
+    }
+    const fast = !!report;
+    if (!report) {
+      await this.db.insert(learningEvents).values({ userId, subjectId: context.session.subjectId, sessionId: id, targetId: stringValue(context.episode.targetID),
+        kind: "voiceAssessmentEscalated", payload: { reason, model: selection.model, questionID: stringValue(jsonObject(context.episode.question).id) } });
+      report = await assessVoiceAnswer(this.ai, userId, selection, id, context.episode, context.materials, signal);
+    }
     signal.throwIfAborted();
-    return this.acceptVoiceAssessment(userId, id, operationID, version, report);
+    return this.acceptVoiceAssessment(userId, id, operationID, version, report, { model: fast ? "gpt-realtime-2.1-mini" : selection.model, provider: fast ? "realtime_mini" : "selected_text", reason: fast ? null : reason });
   }
-  async acceptVoiceAssessment(userId: string, id: string, operationID: string, version: number, report: z.infer<typeof voiceJudgmentSchema>) {
+  async acceptVoiceAssessment(userId: string, id: string, operationID: string, version: number, report: z.infer<typeof voiceJudgmentSchema>, assessor?: { model: string; provider: string; reason: string | null }) {
     const proposed = voiceJudgmentSchema.parse(report);
     if (proposed.disposition === "not_answer") throw new DomainError("INVALID_ASSESSMENT", "Non-answer speech cannot be saved as a Recall assessment.");
-    return mutation(this.db, userId, operationID, { action: "voiceAssessment", id, version, report: asJSON(proposed) }, async tx => {
+    return mutation(this.db, userId, operationID, { action: "voiceAssessment", id, version, report: asJSON(proposed), ...(assessor ? { assessor } : {}) }, async tx => {
       const initial = await this.session(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
       const session = requireValue((await tx.select().from(recallSessions).where(and(eq(recallSessions.id, id), eq(recallSessions.userId, userId))).for("update"))[0]);
       expected(session.version, version);
@@ -864,7 +894,8 @@ export class RecallService {
         const previous = jsonObject(prior[part.criterionID] ?? {});
         const evidenceTurn = part.evidenceTurn, source = evidenceTurn === null ? null : turns[evidenceTurn];
         if (evidenceTurn !== null && (!source || evidenceTurn > index)) throw new DomainError("INVALID_ASSESSMENT", "Use evidence from an existing learner answer.");
-        if ((part.status !== "met" || previous.status !== "met") && evidenceTurn !== index) throw new DomainError("INVALID_ASSESSMENT", "Bind new or unresolved criterion evidence to the current answer. Only previously met criteria can retain earlier completion turns.");
+        const retainedPartial = part.status === "partial" && previous.status === "partial" && evidenceTurn !== null && evidenceTurn < index && !!part.quote && jsonArray(previous.evidenceQuotes).includes(part.quote);
+        if (!retainedPartial && (part.status !== "met" || previous.status !== "met") && evidenceTurn !== index) throw new DomainError("INVALID_ASSESSMENT", "New evidence belongs to the current answer; previously demonstrated partial knowledge can retain its stored quote without claiming new completion.");
         const answer = source ? stringValue(source.answer) : "", quote = part.quote || (answer.length <= 400 ? answer : "");
         if (part.quote && !answer.includes(part.quote)) throw new DomainError("INVALID_ASSESSMENT", "Evidence quotes must appear verbatim in the referenced saved learner answer.");
         if (part.status === "met" && (evidenceTurn === null || !quote || part.missingMeaning !== null)) throw new DomainError("INVALID_ASSESSMENT", "Met criteria need a saved evidence turn, an exact quote, and no missing meaning. For answers longer than 400 characters, supply a short exact excerpt.");
@@ -873,7 +904,7 @@ export class RecallService {
           if (!part.retractionReason || evidenceTurn !== index || !quote) throw new DomainError("INVALID_ASSESSMENT", "Keep earlier valid credit, or explain its retraction with exact contradictory evidence from the latest learner answer.");
           retractions.push({ criterionID: part.criterionID, reason: part.retractionReason });
         }
-        decisions[part.criterionID] = { status: part.status, completionTurn: part.status === "met" ? evidenceTurn : null,
+        decisions[part.criterionID] = { status: part.status, evidenceTurn, completionTurn: part.status === "met" ? evidenceTurn : null,
           evidenceQuotes: quote ? [quote] : [], missingMeaning: part.status === "met" ? null : part.missingMeaning };
         if (previous.status === "met" && part.status === "met" && Number(previous.completionTurn) <= Number(evidenceTurn)) decisions[part.criterionID] = previous;
       }
@@ -883,12 +914,12 @@ export class RecallService {
         feedback: proposed.feedback, interpretedAnswer: stringValue(turns[index]?.answer).slice(0, 1200), followUp: null,
         revealedCriterionIDs: [],
         sourceConcern: null, sourceConcernEvidence: [], additionalRecall: {}, additionalCredits: [], creditRetractions: retractions,
-        model: stringValue(jsonObject(session.state.selection).model) };
+        model: assessor?.model ?? stringValue(jsonObject(session.state.selection).model) };
       const follow = proposed.followUp;
       // Retrieval is selected by backend policy, independently of teaching.
       if (follow) {
         if (index !== 0 || !ids.includes(follow.criterionID) || jsonObject(decisions[follow.criterionID]).status === "met") throw new DomainError("INVALID_ASSESSMENT", "Use one unresolved criterion for the single initial follow-up; after that, teach the gap and return followUp null.");
-        accepted.followUp = { ...follow, interpretations: [], input: { kind: "text" } };
+        accepted.followUp = asJSON({ ...follow, interpretations: [], input: { kind: "text" } });
       }
       const objective = objectiveAssessment(question, episode);
       if (objective) {
@@ -900,8 +931,9 @@ export class RecallService {
           accepted.feedback = "This answer needs clarification against its saved answer key. No learning penalty will be recorded.";
         } else { accepted.feedback = proposed.feedback; accepted.followUp = retrieval; }
       }
-      accepted.assessorModel = stringValue(jsonObject(session.state.selection).model);
-      accepted.assessmentProvider = "selected_text"; accepted.voiceAssessmentVersion = "selected-text-v1";
+      accepted.assessorModel = assessor?.model ?? stringValue(jsonObject(session.state.selection).model);
+      accepted.assessmentProvider = assessor?.provider ?? "selected_text"; accepted.voiceAssessmentVersion = "mini-selective-v1";
+      if (assessor?.reason) accepted.verificationReason = assessor.reason;
       const result = outcome(accepted);
       if (result === "correct") {
         accepted.feedback = "Correct.";

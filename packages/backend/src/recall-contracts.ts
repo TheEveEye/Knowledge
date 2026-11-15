@@ -17,7 +17,8 @@ export const questionSchema = z.strictObject({
   criteria: z.array(criterionSchema).min(1).max(6), acceptableWording: z.string(), input: answerInputSchema,
   precisionNotes: z.array(z.strictObject({ id: text, unitKey: text, text, evidenceIDs: z.array(text) })),
 });
-export type Question = z.infer<typeof questionSchema> & { id: string; verified: boolean; verification?: Record<string, unknown>; designVersion?: string; preparationModel?: string; evidenceCatalog?: Record<string, unknown>; targetSignatures?: Record<string, string> };
+export type Question = z.infer<typeof questionSchema> & { id: string; verified: boolean; verification?: Record<string, unknown>; designVersion?: string; preparationModel?: string; evidenceCatalog?: Record<string, unknown>; targetSignatures?: Record<string, string>;
+  voicePrompts?: { version: string; criteria: Record<string, { prompt: string; clarification: string }[]> } };
 export const bankSchema = z.strictObject({ questions: z.array(questionSchema).max(6), blocked: z.array(z.strictObject({ key: text, reason: text })) });
 export const learningPlanSchema = z.strictObject({ disposition: z.enum(["practice", "context", "duplicate", "sourceIssue"]), objective: z.string(), essentialMeanings: z.array(text).max(6), contextualMeanings: z.array(text).max(4), optionalPrecision: z.array(text).max(4), reason: text, evidenceQuotes: z.array(text).min(1).max(3), equivalentKey: nullable });
 export function keyed<T extends z.ZodType>(keys: string[], value: T) { return z.strictObject(Object.fromEntries(keys.map(key => [key, value]))); }
@@ -33,13 +34,14 @@ export function verificationSchema(question: Question, unitKeys: string[]) {
     scopeCheck: z.strictObject({ alternativeAnswer: z.string(), validUnderPrompt: z.boolean(), coveredByRubric: z.boolean(), sourceSupported: z.boolean(), supportingQuotes: z.array(text).max(3) }),
     contextualAnswers: byCriterion(text), requiredMeanings: byCriterion(text), independentParts: byCriterion(z.array(text).min(1).max(6)), acceptedAnswers: byCriterion(z.array(text).min(1).max(3)),
     promptGivens: byCriterion(z.array(text).max(4)), criterionSupport: byCriterion(z.strictObject({ supported: z.boolean(), reason: text })),
+    voiceScopes: byCriterion(z.array(text.max(160)).max(2)),
     criterionEssentials: byCriterion(z.strictObject({ essential: z.boolean(), reason: text })),
     coverage: keyed(unitKeys, z.strictObject({ status: z.enum(["complete", "partial", "none"]), missingParts: z.array(text), reason: text })), creditSubjects: keyed(unitKeys, z.array(text).min(1).max(4)),
   });
 }
 export const judgmentDecision = z.strictObject({ status: z.enum(["met", "partial", "missing"]), evidenceQuotes: z.array(text).max(3), missingMeaning: nullable, completionTurn: z.number().int().nonnegative().nullable() });
-// Canonical voice assessment assembled by the backend from the selected text
-// assessor. Original answers and evidence indices remain application-owned.
+// Canonical assessment assembled from compact Mini judgments or selected-model
+// verification. Original answers and evidence indices remain app-owned.
 export const voiceJudgmentSchema = z.strictObject({
   disposition: z.enum(["answer", "not_answer"]).optional(), inputIDs: z.array(text.max(160)).max(20).optional(),
   taskID: text.max(240), answerTurn: z.number().int().min(0).max(2), feedback: text.max(1600),
@@ -47,7 +49,7 @@ export const voiceJudgmentSchema = z.strictObject({
     evidenceTurn: z.number().int().min(0).max(2).nullable(), quote: z.string().max(400), missingMeaning: nullable,
     retractionReason: z.string().min(1).max(600).optional() })).max(6),
   revealedCriterionIDs: z.array(text.max(160)).max(6).default([]),
-  uncertainty: nullable, followUp: z.strictObject({ prompt: text.max(1500), criterionID: text.max(160), kind: z.enum(["clarification", "furtherAssessment", "hint"]) }).nullable(),
+  uncertainty: nullable, followUp: z.strictObject({ prompt: text.max(1500), criterionID: text.max(160), kind: z.enum(["clarification", "furtherAssessment", "hint"]), clarificationPrompt: text.max(1500).optional() }).nullable(),
   understandingCheck: z.strictObject({ prompt: text.max(500) }).nullable().optional(),
   answerInput: z.strictObject({ optionID: z.string().max(160).nullable(), number: z.number().nullable(), order: z.array(z.string().max(160)).max(30),
     pairs: z.array(z.strictObject({ leftID: z.string().max(160), rightID: z.string().max(160) })).max(30) }).optional(),

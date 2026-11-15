@@ -9,15 +9,17 @@ import { DomainError, jsonArray, jsonObject as requiredObject, requireValue, str
 import { RecallService } from "./recall.js";
 import { aiRequests, learningEvents } from "./schema.js";
 import { asJSON, selectionSchema } from "./structured.js";
-import { voiceJudgmentSchema } from "./recall-contracts.js";
+import { voiceJudgmentSchema, type Question } from "./recall-contracts.js";
+import { fastVoiceAssessmentSchema, voiceCriterionSchema } from "./recall-voice-assessment.js";
 import { policies } from "./policies.js";
 
 const object = (value: unknown): JSONObject => value && typeof value === "object" && !Array.isArray(value) ? requiredObject(value) : {};
 const policy = `You are Knowledge's turn-based voice Recall tutor. This is a SILENT routing step: call exactly one tool, with no spoken preamble. The app displays and speaks approved text afterward.
-For a completed answer to the displayed task, call assess_answer with its actual inputIDs and, only for a structured answer control, answerInput mapped from explicit learner choices. Include all assertions, fragments and self-corrections. Never return a grade, criterion status, feedback, missingMeaning, followUp, evidence or disclosure report in assess_answer. The selected Recall text provider is the sole answer assessor; the backend owns feedback, the single uncued retrieval follow-up, teaching and progress.
+For a completed answer, call assess_answer with actual inputIDs, compact decisions for every criterion, uncertainty and understandingCheck (usually null). Only structured controls need answerInput mapped from explicit choices. Include all assertions, fragments and self-corrections. The backend owns feedback, retrieval, teaching and progress; never compose those in an assessment.
+Judge the exact requested meaning, accepting equivalent natural speech. Same-species chemical communication conveys the pheromone definition without the verb exchanged. A generic creativity definition does not demonstrate a supplied local-minima analogy. Thinking and processing alone does not demonstrate solving problems and making judgments. met means the entire requested meaning; partial means some substantive requested meaning; missing means none. quote is an exact current learner excerpt, never the answer key. missingMeaning is a plain description of the gap, null for met. Previously met criteria retain earlier evidence. Previously partial criteria may stay partial with quote empty when no new knowledge was supplied. New completion requires current evidence. uncertainty flags genuine ambiguity or a judgment needing stronger verification, not low learner confidence. probe selects an indexed prepared prompt for the missing aspect. understandingCheck may supply one short application question after substantial teaching, never for correct answers or initial partial answers eligible for retrieval.
 Do not turn an answer into tutoring, correction or a new question yourself. An uncertain-sounding substantive answer is still an answer; submit it for assessment. Ignore fillers and obvious concept-name transcription slips when routing. Never judge whether an answer is sufficiently correct to submit.
 thinking=true means the learner is holding the turn. In manual mode, wait for explicitSubmission=true. Use wait with retainInput=true for unfinished meaningful fragments; silence never submits a held answer or becomes an error. Use hold for thinking requests and finish for an explicit submission request. Empty/noise input can use wait with retainInput=false.
-Use recall_action for support (requested hint, example, analogy or explanation), clarify (unclear speech without answer content), practice (discussion after completed feedback), next/skip/pause/repeat on explicit intent, unknown for an admission of not knowing, review only for an explicit grading challenge, and repair_transcript for an explicit transcription complaint. "I've no clue", "I have no idea" and "I don't know" mean unknown, not an answer to grade. An isolated "I'm not sure" gets one small support hint while uncertaintyHintRemaining=1; continued uncertainty after that cue chooses unknown. Never discard a substantive answer merely because a confidence hedge accompanies it.
+Use recall_action for support (requested hint, example, analogy or explanation), clarify (question-scope or unclear-speech requests without answer content), practice (discussion after completed feedback), next/skip/pause/repeat on explicit intent, unknown for an admission of not knowing, review only for an explicit grading challenge, and repair_transcript for an explicit transcription complaint. "Which part do you mean?" and "What are you asking?" request clarification, never a new answer attempt. "I've no clue", "I have no idea" and "I don't know" mean unknown, not an answer to grade. An isolated "I'm not sure" gets one small support hint while uncertaintyHintRemaining=1; continued uncertainty after that cue chooses unknown. Never discard a substantive answer merely because a confidence hedge accompanies it.
 During an active understanding check use complete_check for the response or an explanation request. Give one brief confirmation or correction, then stop: this is supported practice, never another Recall assessment. No second check or further retrieval question is allowed. Respect thinking holds.
 support, practice, complete_check and show_visual cite exact sourceQuotes for their underlying principle, even for a brief confirmation. Examples may be newly invented but must preserve that principle; never fabricate a quote. Mark criterion facts actually taught by help in revealedCriterionIDs, otherwise []. Hints give the smallest useful cue; clarify supplies no answers. No grading terminology, generic praise, or recaps of correct parts. text is the exact short useful response to display and speak, never app internals.
 repair_transcript proposes one exact originalQuote and replacementQuote, identifying either a current unused inputID or the latest saved answerTurn. Preserve every other word. Never repair knowledge errors using the answer key. The learner must confirm the proposal before evidence changes.
@@ -31,14 +33,17 @@ const actionToolSchema = z.strictObject({
   sourceQuotes: z.array(z.string().min(1).max(900)).max(3).default([]), visual: visualSchema.nullable().default(null),
   retainInput: z.boolean().default(false), revealedCriterionIDs: z.array(z.string().min(1).max(160)).max(6).default([]),
   repair: z.strictObject({ inputID: z.string().max(160).nullable(), answerTurn: z.number().int().min(0).max(2).nullable(), originalQuote: z.string().min(1).max(8000), replacementQuote: z.string().min(1).max(8000) }).nullable().default(null) });
-// Routing belongs to the authenticated request/frame, not model-generated IDs.
-// Keep the full report schema for the persistence boundary below.
-const assessmentToolSchema = z.strictObject({
+// Routing and evidence indices belong to the authenticated request/frame.
+const assessmentSubmissionSchema = z.object({
   inputIDs: z.array(z.string().min(1).max(160)).max(20).describe("Copy the learner inputIDs being assessed; [] for an already saved pending answer."),
   answerInput: voiceJudgmentSchema.shape.answerInput.unwrap().nullable().optional(),
 });
+const assessmentToolSchema = assessmentSubmissionSchema.strict().extend({
+  decisions: z.record(z.string(), voiceCriterionSchema), uncertainty: z.string().min(1).max(1200).nullable(),
+  understandingCheck: z.strictObject({ prompt: z.string().min(1).max(500) }).nullable(),
+});
 const decisionTools = (assessment: z.ZodType, action: z.ZodType): JSONObject[] => [
-  { type: "function", name: "assess_answer", description: "Submit the learner's completed answer to the authoritative Recall assessor. Return only inputIDs and optional structured answerInput. Do not grade, give feedback, teach, or choose follow-ups.", parameters: z.toJSONSchema(assessment, { target: "draft-7", io: "input" }) as JSONObject },
+  { type: "function", name: "assess_answer", description: "Submit a compact criterion assessment with exact learner evidence. The backend validates it and chooses feedback, prepared follow-ups and teaching. Flag uncertain judgments for stronger verification.", parameters: z.toJSONSchema(assessment, { target: "draft-7", io: "input" }) as JSONObject },
   { type: "function", name: "recall_action", description: "Silently select help, navigation, clarification, practice or waiting. Complete an active understanding check with complete_check, a short confirmation/correction and sourceQuotes; never regrade it. text is the exact useful response; never narrate app internals. For unfinished thinking choose wait and retainInput true.", parameters: z.toJSONSchema(action, { target: "draft-7", io: "input" }) as JSONObject },
 ];
 export const voiceCommandSchema = z.strictObject({ operationID: z.uuid(), expectedVersion: z.number().int().positive(),
@@ -73,7 +78,8 @@ export class RecallVoiceService {
       const context = await this.recall.voiceContext(userId, sessionID);
       if (context.session.finished) throw new DomainError("SESSION_FINISHED", "This Recall session is complete.", 409);
       const selection = selectionSchema.parse(context.session.state.selection);
-      const connection = await this.ai.createRecallVoiceSession(userId, sdp, policy, decisionTools(assessmentToolSchema, actionToolSchema), signal);
+      const initialAssessment = assessmentToolSchema.extend(fastVoiceAssessmentSchema(context.episode.question as unknown as Question).shape);
+      const connection = await this.ai.createRecallVoiceSession(userId, sdp, policy, decisionTools(initialAssessment, actionToolSchema), signal);
       const call = new RecallVoiceCall(userId, sessionID, context, selection, this.recall, this.ai, connection, id => {
         const cleanup = setTimeout(() => this.calls.delete(id), 60_000); cleanup.unref();
       });
@@ -153,7 +159,7 @@ class RecallVoiceCall {
       socket.once("open", open); socket.once("error", fail); socket.once("close", fail); signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort(); else if (socket.readyState === WebSocket.OPEN) open();
     });
-    await this.record("voiceStarted", { voiceID: this.id, protocolVersion: 5, model: "gpt-realtime-2.1-mini", funding: "api", textFunding: this.selection.funding, textModel: this.selection.model, assessmentProvider: "selected_text" });
+    await this.record("voiceStarted", { voiceID: this.id, protocolVersion: 5, model: "gpt-realtime-2.1-mini", funding: "api", textFunding: this.selection.funding, textModel: this.selection.model, assessmentProvider: "realtime_mini_selective" });
   }
   private taskID() { return taskKey(this.context); }
   private last() { return object(jsonArray(this.context.episode.assessments).at(-1)); }
@@ -275,7 +281,7 @@ class RecallVoiceCall {
   }
   private maybeAdvance() {
     const utterance = this.utterance;
-    if (!utterance?.advanceAfter || !utterance.done || this.processing || this.paused || this.closing || this.closed || this.context.session.finished || utterance.taskID !== this.taskID()) return;
+    if (!utterance?.advanceAfter || !utterance.done || this.processing || this.error || this.context.episode.assessmentPending || this.paused || this.closing || this.closed || this.context.session.finished || utterance.taskID !== this.taskID()) return;
     utterance.advanceAfter = false;
     this.launch(this.command({ operationID: randomUUID(), expectedVersion: this.context.session.version, action: "next", text: "", inputValue: null, turnID: utterance.id }).catch(error => {
       if (this.utterance === utterance) utterance.advanceAfter = true;
@@ -368,6 +374,7 @@ class RecallVoiceCall {
     const criterionID = z.enum(jsonArray(object(this.context.episode.question).criteria).map(c => stringValue(object(c).id)));
     return {
       assessment: assessmentToolSchema.extend({
+        ...fastVoiceAssessmentSchema(this.context.episode.question as unknown as Question).shape,
         inputIDs: decision.inputIDs.length ? z.array(z.enum(decision.inputIDs)).max(20) : z.array(z.string()).length(0),
         answerInput: this.publicInput().kind === "text" ? z.null().optional() : assessmentToolSchema.shape.answerInput,
       }),
@@ -376,9 +383,9 @@ class RecallVoiceCall {
   }
   private lesson(decision: Decision): JSONObject {
     const question = object(this.context.episode.question);
-    return { displayedPrompt: this.prompt(), input: this.publicInput(), question: { prompt: question.prompt ?? "", teachingTargets: jsonArray(question.criteria).map(c => ({ id: object(c).id ?? "", meaning: object(c).requiredMeaning ?? "" })), input: question.input ?? null },
+    return { displayedPrompt: this.prompt(), input: this.publicInput(), question: { prompt: question.prompt ?? "", goal: question.goal ?? "", criteria: question.criteria ?? [], acceptableWording: question.acceptableWording ?? "", voicePrompts: question.voicePrompts ?? null, input: question.input ?? null },
       materials: asJSON(this.context.materials), attempts: jsonArray(this.context.episode.turns).map((raw, index) => { const t = object(raw); return { index, prompt: t.prompt ?? "", answer: t.answer ?? "", kind: t.kind ?? "initial", transcriptRepairs: t.transcriptRepairs ?? [] }; }),
-      assessment: { outcome: this.last().outcome ?? null, feedback: this.last().feedback ?? "" }, assessmentPending: this.context.episode.assessmentPending ?? false, submittedInput: decision.value,
+      assessment: { outcome: this.last().outcome ?? null, decisions: this.last().decisions ?? {}, followUp: this.last().followUp ?? null }, assessmentPending: this.context.episode.assessmentPending ?? false, submittedInput: decision.value,
       thinking: this.thinking, manual: this.manual, explicitSubmission: decision.submission,
       followUpsRemaining: decision.answerTurn === 0 ? 1 : 0, uncertaintyHintRemaining: this.uncertaintyHintRemaining() ? 1 : 0,
       understandingChecksRemaining: this.context.episode.voiceUnderstandingCheck ? 0 : 1,
@@ -402,7 +409,7 @@ class RecallVoiceCall {
       const audioIDs = [...new Set([...decision.inputIDs, ...jsonArray(this.context.episode.turns).flatMap(t => jsonArray(object(object(t).voice).inputIDs).map(stringValue))])]
         .filter(id => this.inputs.get(id)?.audioItem && this.inputs.get(id)?.taskID === decision.taskID);
       const supportOnly = this.checkingUnderstanding() || !jsonArray(this.context.episode.turns).length && this.unsureOnly(decision.inputIDs);
-      const tool = this.context.episode.assessmentPending ? "assess_answer" : supportOnly ? "recall_action" : decision.repairTool;
+      const tool = this.context.episode.assessmentPending ? "assess_answer" : supportOnly ? "recall_action" : decision.repairTool ?? (decision.submission && !this.thinking ? "assess_answer" : null);
       const repair = decision.validation ? "\nYour previous tool call was rejected. Return one COMPLETE corrected call under the supplied schema, fixing ALL validation errors. Do not just return changed fields. Never include top-level taskID or answerTurn fields.\n" : "";
       void this.record("voiceDecisionRequested", { decisionID: decision.id, requestID, attempt: decision.attempts + 1, audioItemIDs: audioIDs, state }).catch(() => {});
       this.send("response.create", { response: { input: audioIDs.map(id => ({ type: "item_reference", id })), output_modalities: ["text"], tools: decisionTools(schemas.assessment, schemas.action), tool_choice: tool ? { type: "function", name: tool } : "required", parallel_tool_calls: false,
@@ -421,11 +428,13 @@ class RecallVoiceCall {
         await this.exclusive(async () => { this.consume(inputIDs); await this.advance(false); }); return;
       }
       const spoken = this.available(inputIDs).map(input => input.text).join(" ").trim().toLocaleLowerCase().replaceAll("’", "'").replace(/[.!?,;:]+$/u, "");
+      const clarificationAt = latest?.text.search(/\b(?:which part (?:you|are you|do you|were you)|what (?:do you mean|are you asking)|clarify (?:the|your) question)\b/iu) ?? -1;
+      const clarificationPrefix = latest?.text.slice(0, clarificationAt).toLocaleLowerCase().replaceAll("’", "'") ?? "";
+      if (!this.context.episode.assessmentPending && !this.checkingUnderstanding() && latest && latest.text.length < 240 && clarificationAt >= 0 && /^(?:(?:well|f|i|don't|do|not|have|a|no|clue|idea|understand|sorry|but|okay|ok|please)[\s,.!?]*)*$/u.test(clarificationPrefix)) {
+        await this.exclusive(async () => { this.consume([latest.id]); this.clarifyCurrentQuestion(); }); return;
+      }
       if (!this.context.episode.assessmentPending && !this.checkingUnderstanding() && /^(?:(?:well|sorry|honestly)[, ]+)?(?:i (?:really |just )?(?:don't|do not) know(?: (?:the answer|this one|that))?|i(?:'ve| have) (?:got )?no (?:clue|idea)|no (?:clue|idea)|i dunno|(?:please )?explain (?:it|the answer)(?: please)?|ich (?:weiß|weiss) (?:es )?nicht|(?:ich habe )?keine ahnung)$/iu.test(spoken)) {
         await this.exclusive(async () => { await this.unknown(inputIDs); this.consume(inputIDs); }); return;
-      }
-      if (this.context.episode.assessmentPending || decision.submission && this.publicInput().kind === "text" && !this.checkingUnderstanding() && !this.unsureOnly(inputIDs)) {
-        await this.exclusive(() => this.apply({ name: "assess_answer", arguments: JSON.stringify({ inputIDs }) }, decision, signal)); return;
       }
       for (let attempt = 0; attempt < 2; attempt++) {
         decision.attempts = attempt; signal.throwIfAborted();
@@ -439,8 +448,8 @@ class RecallVoiceCall {
           this.timing("decision_committed", { elapsedMs: Date.now() - started }); return;
         } catch (error) {
           if (controller.signal.aborted || error instanceof DOMException) throw error;
-          // Once saved, grading belongs to the structured assessor. Do not ask
-          // the voice router to repair its report or create another attempt.
+          // Once saved, invalid grading escalates inside the service. Never
+          // ask Mini to create another attempt after an assessor failure.
           if (call.name === "assess_answer" && this.context.episode.assessmentPending) throw error;
           if (!(error instanceof DomainError || error instanceof z.ZodError || error instanceof SyntaxError)) throw error;
           decision.validation = error instanceof DomainError ? error.message : error instanceof z.ZodError ? error.issues.map(i => i.path.join(".") + ": " + i.message).join("; ").slice(0, 1600) : "Return valid JSON arguments matching the entire tool schema.";
@@ -467,7 +476,12 @@ class RecallVoiceCall {
     if (call.name === "assess_answer") {
       if (this.checkingUnderstanding() || this.unsureOnly(decision.inputIDs) && this.uncertaintyHintRemaining()) throw new DomainError("VOICE_HOLD", "Use recall_action: complete_check for supported practice, or support for the learner's one uncertainty cue.");
       if (this.repair || (this.thinking || this.manual) && !decision.submission && !this.context.episode.assessmentPending) throw new DomainError("VOICE_HOLD", "The learner is still thinking. Retain their answer using wait.");
-      const proposed = schemas.assessment.parse(JSON.parse(stringValue(call.arguments)));
+      let raw: JSONObject;
+      try { raw = object(JSON.parse(stringValue(call.arguments))); }
+      catch (error) { if (!(error instanceof SyntaxError) || this.publicInput().kind !== "text") throw error; raw = { inputIDs: decision.inputIDs }; }
+      // Save captured evidence before validating the model's compact assessment.
+      // A malformed grade escalates; it never discards or resubmits the answer.
+      const proposed = assessmentSubmissionSchema.extend({ inputIDs: schemas.assessment.shape.inputIDs, answerInput: schemas.assessment.shape.answerInput }).parse(raw);
       if (!this.context.episode.assessmentPending) {
         const available = this.available(decision.inputIDs), ids = proposed.inputIDs.length ? proposed.inputIDs : available.map(i => i.id);
         if (!ids.length || ids.some(id => !available.some(i => i.id === id))) throw new DomainError("INVALID_ASSESSMENT", "Select actual non-empty learner inputIDs.");
@@ -480,7 +494,8 @@ class RecallVoiceCall {
         await this.recall.answer(this.userId, this.sessionID, randomUUID(), this.context.session.version, text, value, voice);
         this.consume(decision.inputIDs); await this.refresh();
       }
-      await this.recall.gradeVoiceAnswer(this.userId, this.sessionID, randomUUID(), this.context.session.version, signal); await this.refresh();
+      await this.recall.gradeVoiceAnswer(this.userId, this.sessionID, randomUUID(), this.context.session.version, signal,
+        { decisions: raw.decisions, uncertainty: raw.uncertainty, understandingCheck: raw.understandingCheck }); await this.refresh();
       this.help = ""; this.visual = null; this.pendingFocus = this.last().followUp ? object(this.last().followUp) : null;
       const correct = this.last().outcome === "correct";
       this.approve(stringValue(this.last().feedback), "feedback", correct ? [] : jsonArray(this.last().revealedCriterionIDs).map(stringValue), !this.last().followUp && !this.understandingCheck() && this.last().outcome !== "uncertain"); this.preload(); return;
@@ -514,6 +529,9 @@ class RecallVoiceCall {
       if (!/\b(review|reassess|recheck|disagree|wrong|grade|bewertung|überprüf)/iu.test(learner)) throw new DomainError("INVALID_VOICE_REVIEW", "A text review needs an explicit learner request.");
       await this.review(learner); this.consume(decision.inputIDs); return;
     }
+    if (result.action === "clarify" && this.last().followUp && !this.checkingUnderstanding()) {
+      this.consume(decision.inputIDs.slice(-1)); this.clarifyCurrentQuestion(); return;
+    }
     if (result.action !== "clarify") {
       const evidence = this.context.materials.flatMap(m => jsonArray(m.evidence).map(e => stringValue(object(e).quote)));
       if (!result.sourceQuotes.length || result.sourceQuotes.some(q => !evidence.some(e => e.includes(q)))) throw new DomainError("INVALID_VOICE_SUPPORT", "Cite exact quotes from the loaded passages for the underlying principle. An invented illustration need not appear in those quotes; never invent a quote.");
@@ -542,11 +560,17 @@ class RecallVoiceCall {
     const taughtPendingGap = !!this.last().followUp && result.revealedCriterionIDs.includes(stringValue(object(this.last().followUp).criterionID));
     this.approve(text, result.action === "clarify" ? "clarification" : result.action === "practice" ? "practice" : result.revealedCriterionIDs.length ? "explanation" : result.kind, result.revealedCriterionIDs, taughtPendingGap && !this.understandingCheck() && this.last().outcome !== "uncertain");
   }
+  private clarifyCurrentQuestion() {
+    const follow = object(this.last().followUp), text = stringValue(follow.clarificationPrompt) || "Let me restate the question: " + this.prompt();
+    // Retain earlier fragments, but don't submit them merely because the
+    // clarification finished playing. New learner content can extend them.
+    this.consideredInputs = this.available().map(input => input.id).join("/");
+    this.approve(text, "clarification");
+  }
   private async advance(skip: boolean) {
-    if (!skip && this.context.episode.assessmentPending) { this.approve("Please let me finish checking this answer first.", "clarification"); return; }
     // Explicit Next also leaves unanswered or genuinely uncertain questions;
     // use Skip's existing no-penalty path rather than forcing another attempt.
-    if (!jsonArray(this.context.episode.assessments).length || this.last().outcome === "uncertain") skip = true;
+    if (this.context.episode.assessmentPending || !jsonArray(this.context.episode.assessments).length || this.last().outcome === "uncertain") skip = true;
     this.stopOutput(); this.action = skip ? "skip" : "next"; this.publish();
     const started = Date.now(), cached = this.nextContext;
     const result = await this.recall.advance(this.userId, this.sessionID, randomUUID(), this.context.session.version, null, skip, true);
