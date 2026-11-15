@@ -38,8 +38,8 @@ export function verificationSchema(question: Question, unitKeys: string[]) {
   });
 }
 export const judgmentDecision = z.strictObject({ status: z.enum(["met", "partial", "missing"]), evidenceQuotes: z.array(text).max(3), missingMeaning: nullable, completionTurn: z.number().int().nonnegative().nullable() });
-// Compact tool report from the same model that speaks the feedback. The server
-// supplies the original answer; the model cannot replace it with a paraphrase.
+// Canonical voice assessment assembled by the backend from the selected text
+// assessor. Original answers and evidence indices remain application-owned.
 export const voiceJudgmentSchema = z.strictObject({
   disposition: z.enum(["answer", "not_answer"]).optional(), inputIDs: z.array(text.max(160)).max(20).optional(),
   taskID: text.max(240), answerTurn: z.number().int().min(0).max(2), feedback: text.max(1600),

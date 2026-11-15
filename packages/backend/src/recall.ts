@@ -15,6 +15,7 @@ import { policies } from "./policies.js";
 import { candidateMatch, candidateQuantities, mentionsSubject } from "./recall-candidates.js";
 import { designVersion, bounded, contextIssue, displayPrompt, enrichmentSelection, evidenceID, presentationPriority, repairExample, unitInput, validateDesign, verificationInput } from "./recall-design.js";
 import { objectiveAssessment, renderAnswer } from "./recall-objective.js";
+import { gradeVoiceAnswer as assessVoiceAnswer } from "./recall-voice-assessment.js";
 
 export const schedulerVersion = "fsrs6-retention90-no-fuzz-v1", recallPolicyVersion = "recall-evidence-v21";
 const scheduler = fsrs({ request_retention: 0.9, enable_fuzz: false, enable_short_term: true, learning_steps: ["1m", "10m"], relearning_steps: ["10m"],
@@ -668,8 +669,8 @@ export class RecallService {
       await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1); return { version: version + 1 };
     });
   }
-  async selfReportUnknown(userId: string, id: string, operationID: string, version: number) {
-    return mutation(this.db, userId, operationID, { action: "selfReportUnknown", id, version }, async tx => {
+  async selfReportUnknown(userId: string, id: string, operationID: string, version: number, spoken: { text: string; evidence: JSONObject } | null = null) {
+    return mutation(this.db, userId, operationID, { action: "selfReportUnknown", id, version, ...(spoken ? { spoken } : {}) }, async tx => {
       const initial = await this.session(userId, id); await ownedSubject(tx, userId, initial.subjectId, true);
       const session = requireValue((await tx.select().from(recallSessions).where(and(eq(recallSessions.userId, userId), eq(recallSessions.id, id))).for("update"))[0]); expected(session.version, version);
       const target = await this.current(tx, session), episode = jsonObject(session.state.episode), question = episode.question as unknown as Question;
@@ -679,14 +680,16 @@ export class RecallService {
       if (turns.length) {
         if (!last?.followUp) throw new DomainError("ANSWER_NOT_PENDING", "This question is already complete.", 409);
         last.followUp = null;
+        if (session.state.mode === "voice") { last.feedback = question.expectedAnswer; last.revealedCriterionIDs = question.criteria.map(c => c.id); }
       } else {
-        turns.push({ prompt: question.prompt, kind: "initial", answer: "I don't know.", inputValue: null, input: { kind: "text" }, inputKind: "text", submittedAt: new Date().toISOString() });
+        turns.push({ prompt: question.prompt, kind: "initial", answer: spoken?.text ?? "I don't know.", inputValue: null, input: { kind: "text" }, inputKind: "text", submittedAt: new Date().toISOString(), ...(spoken ? { voice: spoken.evidence } : {}) });
+        if (spoken?.evidence.assistanceBeforeAnswer === true) episode.voiceAssistanceBeforeAnswer = true;
         assessments.push({ outcome: "incorrect", taskFairness: { status: "fair", reason: null, alternativeAnswer: null }, decisions: Object.fromEntries(question.criteria.map(c => [c.id, { status: "missing", evidenceQuotes: [], missingMeaning: c.requiredMeaning, completionTurn: null }])),
-          contradictions: [], ambiguities: {}, feedback: "Review the answer below, then practise it again later.", followUp: null, sourceConcern: null, additionalCredits: [], policyVersion: recallPolicyVersion, model: "server:self-reported-unknown", assessedAt: new Date().toISOString() });
+          contradictions: [], ambiguities: {}, feedback: session.state.mode === "voice" ? question.expectedAnswer : "Review the answer below, then practise it again later.", followUp: null, sourceConcern: null, additionalCredits: [], policyVersion: recallPolicyVersion, model: "server:self-reported-unknown", assessedAt: new Date().toISOString() });
       }
       episode.turns = turns; episode.assessments = assessments; episode.assessmentPending = false; delete episode.draft;
       await tx.update(recallSessions).set({ state: { ...session.state, episode }, version: version + 1, updatedAt: new Date() }).where(and(eq(recallSessions.userId, userId), eq(recallSessions.id, id)));
-      await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: hadTurns ? "followUpsStopped" : "selfReportedUnknown", payload: { episode, sessionVersion: version + 1 } });
+      await tx.insert(learningEvents).values({ userId, subjectId: session.subjectId, sessionId: id, targetId: target.id, kind: hadTurns ? "followUpsStopped" : "selfReportedUnknown", payload: { episode, ...(spoken ? { spoken } : {}), sessionVersion: version + 1 } });
       await invalidate(tx, userId, "recallSessions", session.subjectId, version + 1); return { version: version + 1 };
     });
   }
@@ -832,6 +835,13 @@ export class RecallService {
     try { return await this.assessReserved(userId, id, operationID, version, AbortSignal.any([signal, controller.signal]), dispute, disputeScope, leaseID); }
     finally { clearInterval(heartbeat); await releaseOperation(this.db, userId, operationID, leaseID); }
   }
+  async gradeVoiceAnswer(userId: string, id: string, operationID: string, version: number, signal: AbortSignal) {
+    const context = await this.voiceContext(userId, id); expected(context.session.version, version);
+    const selection = selectionSchema.parse(context.session.state.selection);
+    const report = await assessVoiceAnswer(this.ai, userId, selection, id, context.episode, context.materials, signal);
+    signal.throwIfAborted();
+    return this.acceptVoiceAssessment(userId, id, operationID, version, report);
+  }
   async acceptVoiceAssessment(userId: string, id: string, operationID: string, version: number, report: z.infer<typeof voiceJudgmentSchema>) {
     const proposed = voiceJudgmentSchema.parse(report);
     if (proposed.disposition === "not_answer") throw new DomainError("INVALID_ASSESSMENT", "Non-answer speech cannot be saved as a Recall assessment.");
@@ -871,24 +881,27 @@ export class RecallService {
       let accepted: JSONObject = { decisions, ambiguities: Object.fromEntries(ids.map(id => [id, []])), contradictions: [],
         taskFairness: { status: uncertainty ? "ambiguous" : "fair", reason: uncertainty, alternativeAnswer: null },
         feedback: proposed.feedback, interpretedAnswer: stringValue(turns[index]?.answer).slice(0, 1200), followUp: null,
-        revealedCriterionIDs: [...new Set(proposed.revealedCriterionIDs)],
-        sourceConcern: null, sourceConcernEvidence: [], additionalRecall: {}, additionalCredits: [], creditRetractions: retractions, model: "gpt-realtime-2.1-mini" };
+        revealedCriterionIDs: [],
+        sourceConcern: null, sourceConcernEvidence: [], additionalRecall: {}, additionalCredits: [], creditRetractions: retractions,
+        model: stringValue(jsonObject(session.state.selection).model) };
       const follow = proposed.followUp;
-      // Keep teaching and the original assessment, but never request repetition
-      // of the same answer that this feedback explicitly disclosed.
-      if (follow && !proposed.revealedCriterionIDs.includes(follow.criterionID)) {
+      // Retrieval is selected by backend policy, independently of teaching.
+      if (follow) {
         if (index !== 0 || !ids.includes(follow.criterionID) || jsonObject(decisions[follow.criterionID]).status === "met") throw new DomainError("INVALID_ASSESSMENT", "Use one unresolved criterion for the single initial follow-up; after that, teach the gap and return followUp null.");
         accepted.followUp = { ...follow, interpretations: [], input: { kind: "text" } };
       }
       const objective = objectiveAssessment(question, episode);
       if (objective) {
         const disagrees = ids.some(id => jsonObject(jsonObject(objective.decisions)[id]).status !== jsonObject(decisions[id]).status);
+        const retrieval = accepted.followUp ?? null;
         accepted = objective;
         if (disagrees || uncertainty) {
           accepted.taskFairness = { status: "ambiguous", reason: uncertainty || "The spoken assessment disagrees with the saved answer key.", alternativeAnswer: null };
           accepted.feedback = "This answer needs clarification against its saved answer key. No learning penalty will be recorded.";
-        } else accepted.feedback = proposed.feedback;
+        } else { accepted.feedback = proposed.feedback; accepted.followUp = retrieval; }
       }
+      accepted.assessorModel = stringValue(jsonObject(session.state.selection).model);
+      accepted.assessmentProvider = "selected_text"; accepted.voiceAssessmentVersion = "selected-text-v1";
       const result = outcome(accepted);
       if (result === "correct") {
         accepted.feedback = "Correct.";
@@ -903,15 +916,13 @@ export class RecallService {
         accepted.revealedCriterionIDs = [];
       } else if (result !== "correct" && result !== "uncertain") {
         const unresolved = question.criteria.filter(c => jsonObject(jsonObject(accepted.decisions)[c.id]).status !== "met");
-        const revealed = jsonArray(accepted.revealedCriterionIDs).map(stringValue);
-        // Once the follow-up is used, always teach verified content instead of
-        // accepting another instruction to try harder with followUp=null.
-        // Initial corrections that omit their disclosures get the same safe path.
-        if (unresolved.length && (index > 0 || unresolved.some(c => !revealed.includes(c.id)))) {
+        // Teaching is app-owned on every correction, including the initial
+        // answer. A model disclosure flag cannot substitute for actual content.
+        if (unresolved.length) {
           const contextual = jsonObject(question.verification?.contextualAnswers ?? {});
           accepted.feedback = unresolved.length === question.criteria.length ? question.expectedAnswer
             : [...new Set(unresolved.map(c => stringValue(contextual[c.id]) || c.requiredMeaning))].join(" ");
-          accepted.revealedCriterionIDs = [...new Set([...revealed, ...unresolved.map(c => c.id)])];
+          accepted.revealedCriterionIDs = unresolved.map(c => c.id);
           accepted.teachingFromVerifiedAnswer = true;
         }
       }
