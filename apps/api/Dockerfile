@@ -3,7 +3,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/package.json ./apps/worker/package.json
-COPY apps/recall-lab/package.json ./apps/recall-lab/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/backend/package.json ./packages/backend/package.json
 RUN npm ci

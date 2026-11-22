@@ -3,7 +3,6 @@
   "private": true,
   "workspaces": [
     "apps/api",
-    "apps/recall-lab",
     "apps/worker",
     "packages/contracts",
     "packages/backend"
@@ -23,7 +22,6 @@
     "db:generate": "npm run db:generate --workspace @knowledge/api --",
     "dev:up": "bash infra/scripts/dev.sh up",
     "dev:down": "bash infra/scripts/dev.sh down",
-    "dev:logs": "bash infra/scripts/dev.sh logs",
-    "recall:lab": "node apps/recall-lab/src/cli.mjs"
+    "dev:logs": "bash infra/scripts/dev.sh logs"
   }
 }
